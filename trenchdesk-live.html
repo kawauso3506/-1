@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TrenchDesk Live（iPhone版）</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root{
+  --bg:#E6E0F4; --panel:#F6F3FC; --panel2:#ECE6F8; --ink:#1A1433; --ink2:#5B5478; --line:#CFC6E6;
+  --purple:#4B2C9A; --purple2:#7A5BD0; --lime:#C9E63C; --limeInk:#4A5A00; --red:#D63C2A; --green:#178A55; --amber:#C77800; --blue:#2D7FD0;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px);
+  padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#120E22; --panel:#1C1631; --panel2:#251E40; --ink:#EEEAFB; --ink2:#A79FC6; --line:#3A3160;
+    --purple:#8C6BEA; --purple2:#B39CFF; --lime:#CDEB47; --limeInk:#D8F26A; --red:#FF6B57; --green:#4DD69A; --amber:#FFB84D; --blue:#5AB0FF;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#120E22; --panel:#1C1631; --panel2:#251E40; --ink:#EEEAFB; --ink2:#A79FC6; --line:#3A3160;
+  --purple:#8C6BEA; --purple2:#B39CFF; --lime:#CDEB47; --limeInk:#D8F26A; --red:#FF6B57; --green:#4DD69A; --amber:#FFB84D; --blue:#5AB0FF;
+}
+html{scroll-padding-top:env(safe-area-inset-top,0px);}
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.45;-webkit-text-size-adjust:100%}
+.app{max-width:1120px;margin:0 auto;padding:14px 12px 28px}
+h1,h2,p{margin:0}
+button{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--purple2);outline-offset:2px}
+
+/* header */
+.top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.brand svg{flex:none}
+.brand h1{font-size:22px;font-weight:600;letter-spacing:-.01em;line-height:1.1}
+.brand p{font-size:12px;color:var(--ink2)}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;background:var(--lime);color:#2A3300;font-weight:600;font-size:12.5px;border:1px solid rgba(0,0,0,.12);flex:none}
+.pill i{width:7px;height:7px;border-radius:50%;background:#2A3300;display:block}
+.pill.off{background:var(--panel2);color:var(--ink2);border-color:var(--line)}
+.pill.off i{background:var(--ink2)}
+@media (prefers-reduced-motion: no-preference){.pill:not(.off) i{animation:blink 1.4s ease-in-out infinite}}
+@keyframes blink{50%{opacity:.25}}
+
+.strip{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:8px;overflow:hidden;margin-bottom:10px}
+.strip div{background:var(--panel);padding:8px 10px}
+.strip span{display:block;font-size:11px;color:var(--ink2)}
+.strip b{font-family:var(--mono);font-weight:500;font-size:15px;color:var(--purple)}
+
+.ribbon{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;font-size:12px}
+.chip{padding:4px 10px;border-radius:999px;border:1px solid var(--line);background:var(--panel);color:var(--ink2);font-family:var(--mono);font-size:11.5px}
+.chip.on{border-color:var(--purple2);color:var(--ink)}
+.chip.act{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.chip.warn{border-color:var(--red);color:var(--red)}
+
+/* grid */
+.grid{display:grid;gap:12px;grid-template-columns:minmax(0,1fr);grid-template-areas:"pnl" "chart" "wl" "risk" "vitals" "levels" "trades" "knot" "log" "conn" "ctl"}
+@media (min-width:860px){
+  .grid{grid-template-columns:1.15fr 1fr 1fr;grid-template-areas:"pnl pnl chart" "knot knot risk" "knot knot vitals" "wl wl levels" "wl wl trades" "log log log" "conn conn conn" "ctl ctl ctl"}
+}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;min-width:0}
+.panel h2{font-size:12.5px;font-weight:500;color:var(--ink2);margin-bottom:8px;display:flex;justify-content:space-between;gap:8px}
+.panel h2 em{font-style:normal;font-family:var(--mono);font-size:11px}
+.a-pnl{grid-area:pnl}.a-chart{grid-area:chart}.a-knot{grid-area:knot;padding:0;overflow:hidden;position:relative}
+.a-risk{grid-area:risk}.a-vitals{grid-area:vitals}.a-levels{grid-area:levels}.a-whale{grid-area:whale}
+.a-mix{grid-area:mix}.a-exit{grid-area:exit}.a-traders{grid-area:traders}.a-flow{grid-area:flow}.a-log{grid-area:log}.a-ctl{grid-area:ctl}
+
+/* pnl */
+.big{font-size:clamp(42px,13vw,64px);font-weight:600;letter-spacing:-.03em;line-height:1;font-variant-numeric:tabular-nums}
+.pos{color:var(--green)} .neg{color:var(--red)}
+.kv{display:flex;gap:22px;margin-top:14px;flex-wrap:wrap}
+.kv span{display:block;font-size:11px;color:var(--ink2)}
+.kv b{font-family:var(--mono);font-weight:500;font-size:17px}
+.posline{margin-top:12px;padding-top:10px;border-top:1px solid var(--line);font-size:12.5px;color:var(--ink2)}
+.posline b{color:var(--ink);font-weight:500}
+
+svg text{font-family:var(--mono)}
+.chart svg{width:100%;height:auto;display:block}
+
+/* knot */
+.a-knot{min-height:340px}
+#knot{width:100%;height:100%;min-height:340px;display:block}
+.a-knot h2{position:absolute;left:14px;top:12px;z-index:1;margin:0}
+.node{position:absolute;transform:translate(-50%,-50%);padding:3px 9px;border-radius:6px;border:1px solid var(--line);background:var(--panel);font-family:var(--mono);font-size:11.5px;color:var(--ink2);transition:border-color .2s,color .2s,background .2s}
+.node.on{border-color:var(--lime);color:var(--ink);background:var(--panel2);box-shadow:0 0 0 2px color-mix(in srgb,var(--lime) 55%,transparent)}
+.node.out{opacity:.55}
+@media (min-width:860px){.a-knot{min-height:400px}#knot{min-height:400px}}
+
+/* mix */
+.bars{display:flex;align-items:flex-end;gap:3px;height:54px}
+.bars i{flex:1;background:var(--purple);border-radius:1px;min-height:2px;transition:height .3s}
+.bars i:nth-last-child(-n+2){background:var(--lime)}
+.note{margin-top:8px;font-size:12px;color:var(--ink2)}
+.exitline{font-size:15px;font-weight:600;margin-bottom:6px}
+
+/* traders */
+.tr{display:grid;grid-template-columns:34px 1fr auto;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--line)}
+.tr:first-of-type{border-top:0}
+.av{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;font-family:var(--mono);font-size:11px;font-weight:500;color:#fff}
+.tr .nm{font-weight:500;font-size:13px}
+.tr .st{font-family:var(--mono);font-size:11px;color:var(--ink2)}
+.meter{height:4px;border-radius:2px;background:var(--panel2);margin-top:5px;overflow:hidden}
+.meter i{display:block;height:100%;background:var(--purple2);transition:width .3s}
+.tr .pl{font-family:var(--mono);font-size:13px;text-align:right}
+
+/* flow */
+.flow line{stroke:var(--line);stroke-width:1.5;stroke-dasharray:4 4;transition:stroke .2s}
+.flow line.on{stroke:var(--purple2);stroke-dasharray:none;stroke-width:2.2}
+.flow .wn rect{fill:var(--panel2);stroke:var(--line)}
+.flow .wn.on rect{stroke:var(--lime);stroke-width:1.8}
+.flow .wn text{fill:var(--ink);font-size:11px}
+.flow circle.core{fill:var(--red)}
+.flow text.tk{fill:#fff;font-size:10px;font-weight:500}
+
+/* log */
+.log{list-style:none;margin:0;padding:0;max-height:300px;overflow:auto;font-family:var(--mono);font-size:11.5px}
+.log li{display:grid;grid-template-columns:38px 58px 1fr;gap:6px;padding:4px 0;border-top:1px solid var(--line);color:var(--ink2)}
+.log li:first-child{border-top:0}
+.log b{font-weight:500;color:var(--purple)}
+.log li.hi{color:var(--ink)}
+
+
+/* risk */
+.rhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.rhead b{font-size:22px;font-weight:600;letter-spacing:-.01em}
+.tags{display:flex;gap:6px;flex-wrap:wrap}
+.tag{padding:2px 9px;border-radius:999px;font-size:11.5px;border:1px solid var(--line);background:var(--panel2)}
+.tag.hot{border-color:var(--amber);color:var(--amber)}
+.tag.cold{border-color:var(--blue);color:var(--blue)}
+.tag.bad{border-color:var(--red);color:var(--red)}
+.rstate{margin-left:auto;font-weight:600;font-size:13px}
+.rstate.ok{color:var(--green)}.rstate.warn{color:var(--amber)}.rstate.bad{color:var(--red)}
+.gauge{margin-bottom:10px}
+.gl{display:flex;justify-content:space-between;align-items:baseline;font-size:12.5px;color:var(--ink2);margin-bottom:4px}
+.gl b{font-family:var(--mono);font-size:17px;font-weight:500;color:var(--ink)}
+.track{height:8px;border-radius:2px;background:var(--panel2);overflow:hidden}
+.track i{display:block;height:100%;width:0;transition:width .4s,background .3s}
+.track i.lo{background:var(--green)}.track i.mid{background:var(--amber)}.track i.hi{background:var(--red)}
+.pbar{display:flex;height:10px;border-radius:2px;overflow:hidden;background:var(--panel2)}
+.pbar i{display:block;transition:width .4s}
+.pbar i.s{background:var(--red)}.pbar i.b{background:var(--green)}
+.plabel{display:flex;justify-content:space-between;gap:8px;font-size:11.5px;color:var(--ink2);margin:4px 0 10px;font-family:var(--mono)}
+.dir{font-size:12.5px;color:var(--ink2);padding-top:8px;border-top:1px solid var(--line)}
+.dir b{color:var(--ink);font-weight:500}
+.vit{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.vit div{background:var(--panel);padding:8px 10px}
+.vit span{display:block;font-size:11px;color:var(--ink2)}
+.vit b{font-family:var(--mono);font-weight:500;font-size:14px}
+.lv{display:grid;grid-template-columns:88px 1fr 66px;gap:8px;align-items:center;padding:5px 0;font-size:12px}
+.lv small{display:block;font-family:var(--mono);font-size:11px;color:var(--ink2)}
+.lv .bar{height:8px;background:var(--panel2);border-radius:2px;overflow:hidden}
+.lv .bar i{display:block;height:100%}
+.lv em{font-style:normal;font-family:var(--mono);font-size:11.5px;text-align:right}
+.lv.tp .bar i{background:var(--green)}.lv.sl .bar i{background:var(--red)}.lv.tr .bar i{background:var(--purple2)}
+.lv.mk{border-top:1px dashed var(--line);border-bottom:1px dashed var(--line);font-weight:600}
+.legend{display:flex;gap:14px;margin-top:6px;font-size:11.5px;color:var(--ink2)}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+.empty{font-size:12.5px;color:var(--ink2);padding:8px 0}
+
+/* controls */
+.ctl{display:flex;flex-wrap:wrap;gap:16px 26px;align-items:flex-end}
+.grp span{display:block;font-size:11.5px;color:var(--ink2);margin-bottom:5px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{background:var(--panel);border:0;border-right:1px solid var(--line);padding:9px 13px;min-height:40px;cursor:pointer;font-family:var(--mono);font-size:12.5px}
+.seg button:last-child{border-right:0}
+.seg button[aria-pressed="true"]{background:var(--purple);color:#fff}
+.btns{display:flex;gap:8px;flex-wrap:wrap}
+.btn{background:var(--ink);color:var(--bg);border:0;border-radius:8px;padding:9px 16px;min-height:40px;font-weight:500;cursor:pointer}
+.btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+.foot{margin-top:14px;font-size:12px;color:var(--ink2);max-width:80ch}
+
+.a-wl{grid-area:wl}.a-trades{grid-area:trades}
+.wlwrap{overflow-x:auto}
+.wl{width:100%;border-collapse:collapse;font-size:12px}
+.wl th{font-weight:500;color:var(--ink2);text-align:right;padding:4px 6px;border-bottom:1px solid var(--line);font-size:11px;white-space:nowrap}
+.wl td{padding:8px 6px;border-bottom:1px solid var(--line);text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.wl th:first-child,.wl td:first-child{text-align:left}
+.wl tr.row{cursor:pointer}.wl tr.sel td{background:var(--panel2)}
+.wl .sym{font-family:var(--sans);font-weight:500}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:var(--line)}
+.dot.ready{background:var(--green)}.dot.blocked{background:var(--red)}.dot.held{background:var(--purple2)}
+.why{margin-top:8px;font-size:12px;color:var(--ink2);min-height:1.4em}
+.tl{display:grid;grid-template-columns:1fr auto;gap:2px 10px;padding:7px 0;border-top:1px solid var(--line);font-size:12.5px}
+.tl:first-child{border-top:0}.tl small{color:var(--ink2);font-size:11px}
+.tl b{font-family:var(--mono);font-weight:500;text-align:right}
+.inp{width:100%;min-height:40px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--ink);font:inherit;font-size:16px}
+.chk{display:flex;align-items:center;gap:8px;font-size:13px;min-height:40px}
+.chk input{width:20px;height:20px}
+.banner{margin-bottom:10px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12px;color:var(--ink2)}
+.banner b{color:var(--ink);font-weight:500}
+.pill.err{background:var(--red);color:#fff}.pill.err i{background:#fff}
+.pill.warn{background:var(--amber);color:#1a1200}.pill.warn i{background:#1a1200}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <svg width="36" height="36" viewBox="0 0 36 36" aria-hidden="true"><rect width="36" height="36" rx="8" fill="var(--purple)"/><path d="M9 11h18v4.5h-6.8V27h-4.4V15.5H9z" fill="var(--lime)"/></svg>
+      <div><h1>TrenchDesk Live</h1><p>実データ × ペーパー売買（この端末だけで動作）</p></div>
+    </div>
+    <span class="pill off" id="pill"><i></i><span id="pillTxt">接続中</span></span>
+  </header>
+
+  <div class="banner">価格・売買数は <b id="src">DexScreener</b> の実データ。売買は<b>仮想（ペーパー）</b>で、ウォレットや実資金は使いません。<b>この画面を開いている間だけ</b>更新・売買判定されます（閉じる／ロックすると止まります）。</div>
+
+  <div class="strip">
+    <div><span>監視銘柄</span><b id="sWatch">0</b></div>
+    <div><span>取引 / 勝ち</span><b id="sTrades">0 / 0</b></div>
+    <div><span>注目</span><b id="sFocus">–</b></div>
+    <div><span>最終更新</span><b id="sAge">–</b></div>
+  </div>
+  <div class="ribbon" id="ribbon"></div>
+
+  <main class="grid">
+    <section class="panel a-pnl">
+      <h2>セッション損益（USD）<em id="startTxt"></em></h2>
+      <div class="big pos" id="pnl">+$0.00</div>
+      <div class="kv">
+        <div><span>評価額</span><b id="bal">$0.00</b></div>
+        <div><span>経過時間</span><b id="clock">00:00</b></div>
+        <div><span>見送り</span><b id="skips">0</b></div>
+      </div>
+      <div class="posline" id="posline">ポジションなし</div>
+    </section>
+
+    <section class="panel a-chart chart">
+      <h2>評価額の推移<em id="balNow"></em></h2>
+      <svg id="balSvg" viewBox="0 0 320 130" role="img" aria-label="評価額の推移グラフ"></svg>
+    </section>
+
+    <section class="panel a-knot">
+      <h2>関係グラフ（演出）</h2>
+      <canvas id="knot" aria-label="装飾アニメーション"></canvas>
+    </section>
+
+    <section class="panel a-risk">
+      <div class="rhead"><b id="rTok">–</b><span class="tags" id="rTags"></span><span class="rstate ok" id="rState">–</span></div>
+      <div class="gauge"><div class="gl"><span>危険度・ボラ（激しさ）</span><b id="gVolVal">–</b></div><div class="track"><i id="gVolBar"></i></div></div>
+      <div class="gauge"><div class="gl"><span>下落リスク（下方向）</span><b id="gDownVal">–</b></div><div class="track"><i id="gDownBar"></i></div></div>
+      <div class="pbar" aria-hidden="true"><i class="s" id="prSell"></i><i class="b" id="prBuy"></i></div>
+      <div class="plabel"><span id="prTxt">–</span><span id="prTaker">TAKER –</span></div>
+      <div class="dir" id="dirLine">–</div>
+    </section>
+
+    <section class="panel a-vitals">
+      <h2>価格・流動性・集中度<em>5分の実測値</em></h2>
+      <div class="vit" id="vitals"></div>
+    </section>
+
+    <section class="panel a-levels">
+      <h2>損益ラインMAP<em id="lvNote"></em></h2>
+      <div id="levels"></div>
+    </section>
+
+    <section class="panel a-wl">
+      <h2>ウォッチリスト<em>タップで詳細</em></h2>
+      <div class="wlwrap"><table class="wl">
+        <thead><tr><th>銘柄</th><th>価格</th><th>5分</th><th>TAKER</th><th>リスク</th><th>状態</th></tr></thead>
+        <tbody id="wlBody"></tbody>
+      </table></div>
+      <div class="why" id="wlWhy"></div>
+    </section>
+
+    <section class="panel a-trades">
+      <h2>直近の取引（ペーパー）</h2>
+      <div id="trades"></div>
+    </section>
+
+    <section class="panel a-log">
+      <h2>エージェントの動き<em id="logCount"></em></h2>
+      <ul class="log" id="log"></ul>
+    </section>
+
+    <section class="panel a-ctl" style="grid-area:conn">
+      <h2>接続設定</h2>
+      <div class="ctl">
+        <div class="btns">
+          <button class="btn" id="bTest">接続テスト</button>
+          <button class="btn ghost" id="bWake">画面を点灯したままにする</button>
+        </div>
+        <div class="grp" style="flex:1;min-width:220px"><span>監視するmint（任意・カンマ区切り）</span><input id="inWatch" class="inp" type="text" inputmode="text" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="空欄なら新着を自動探索"></div>
+        <div class="grp" style="flex:1;min-width:220px"><span>プロキシURL（通信がブロックされる場合のみ）</span><input id="inProxy" class="inp" type="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="https://…workers.dev/?u="></div>
+        <label class="chk"><input type="checkbox" id="chkPump"> pump.fun系のペアだけにする</label>
+        <button class="btn ghost" id="bSaveConn">保存</button>
+      </div>
+      <div class="why" id="diag"></div>
+    </section>
+
+    <section class="panel a-ctl">
+      <div class="ctl">
+        <div class="btns">
+          <button class="btn" id="bPause">新規エントリー停止</button>
+          <button class="btn ghost" id="bClose">全ポジションを閉じる</button>
+          <button class="btn ghost" id="bReset">リセット</button>
+        </div>
+        <div class="grp"><span>1回の建玉（評価額比）</span><div class="seg" id="segSize"></div></div>
+        <div class="grp"><span>損切り</span><div class="seg" id="segSl"></div></div>
+        <div class="grp"><span>利確</span><div class="seg" id="segTp"></div></div>
+        <div class="grp"><span>リスクゲート</span><div class="seg" id="segGate"></div></div>
+        <div class="grp"><span>リスク連動サイズ</span><div class="seg" id="segScale"></div></div>
+      </div>
+      <p class="foot">エントリー条件: 流動性 $8,000以上・5分の取引数20以上・買い圧(TAKER)1.4以上・5分変化 0〜60%。約定は手数料1%＋スリッページ(1.5%＋注文額/流動性)で計算します。リスク指標は独自の目安で、Top10集中度はプール保有分を除いた推定値です。この戦略に優位性があるとは限りません。</p>
+    </section>
+  </main>
+</div>
+
+<script>
+(() => {
+  "use strict";
+  /* =====================================================================
+   * TrenchDesk Live (Web版) — iPhoneのSafariだけで動く単体ファイル
+   * DexScreenerの実データを読み取り、売買は仮想（ペーパー）。ウォレット・秘密鍵は使いません。
+   * ===================================================================== */
+  const Q = new URLSearchParams(location.search);
+  const DEX = (Q.get("dex") || "https://api.dexscreener.com").replace(/\/$/, "");
+  const RPC = Q.get("rpc") || "https://api.mainnet-beta.solana.com";
+  const POLL_MS = +Q.get("poll") || 10000;
+  const DISCOVER_MS = 60000, MAX_WATCH = 30, START_USD = 500, CHAIN = "solana";
+  const SKEY = "trenchdesk_live_v1", PKEY = "trenchdesk_proxy", WKEY = "trenchdesk_watch", OKEY = "trenchdesk_pumponly";
+  const store = {
+    get(k){ try{ return localStorage.getItem(k) || ""; }catch(_){ return ""; } },
+    set(k,v){ try{ localStorage.setItem(k,v); }catch(_){} }
+  };
+  let PROXY = store.get(PKEY);
+  let MANUAL = (Q.get("watch") || store.get(WKEY)).split(",").map(s=>s.trim()).filter(Boolean);
+  const AUTO = Q.get("auto") !== "0";
+  let PUMP_ONLY = store.get(OKEY) === "1";
+
+  // ---- ペーパー売買のルール（すべて仮定値。実相場での有効性は未検証） ----
+  const FEE = 0.01, SLIP_BASE = 0.015, MIN_LIQ = 8000, MIN_TXNS_5M = 20, MIN_TAKER = 1.4, MAX_POS = 2;
+  const COOLDOWN_MS = 10*60e3, MAX_HOLD_MS = 60*60e3;
+  const GATES = { off:null, std:{risk:60,top10:85,exit:85,label:"標準"}, strict:{risk:45,top10:75,exit:75,label:"厳しめ"} };
+
+  const $ = id => document.getElementById(id);
+  const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
+  const sum = a => a.reduce((x,y)=>x+y,0);
+  const pad = (n,l=2) => String(n).padStart(l,"0");
+  const mmss = s => (s>=3600 ? pad(Math.floor(s/3600))+":" : "") + pad(Math.floor(s%3600/60)) + ":" + pad(s%60);
+  const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+  /* ============================ ENGINE ============================ */
+  function fresh(){
+    return { startedAt:Date.now(), running:true, cash:START_USD, positions:[], trades:[], log:[], hist:[{t:Date.now(),v:START_USD}],
+      skips:0, polls:0, events:0, logSeq:0, lastPollAt:0, cfg:{gate:"std",scale:true,size:0.25,sl:-25,tp:50}, cooldown:{} };
+  }
+  let S = fresh();
+  const tokens = new Map();
+  let lastDiscover = 0, lastPollAt = 0, lastError = null, lastErrLogged = "", rpcBusy = false, rpcError = null, busy = false, timer = null;
+
+  function load(){
+    try{
+      const j = JSON.parse(store.get(SKEY) || "null");
+      if (j && j.cfg && Array.isArray(j.positions)){ S = Object.assign(fresh(), j); S.positions.forEach(p => ensure(p.mint)); }
+    }catch(_){}
+  }
+  function persist(){ S.lastPollAt = lastPollAt; store.set(SKEY, JSON.stringify(S)); }
+
+  function addLog(tag,msg,hi){
+    S.log.unshift({id:++S.logSeq,t:Date.now(),tag,msg,hi:!!hi});
+    if (S.log.length > 80) S.log.pop();
+  }
+  function newTok(mint){
+    return { mint, symbol:mint.slice(0,4), name:"", pairAddress:null, dexId:"", url:"", px:0, liq:0, mc:0, vol5:0, buys5:0, sells5:0,
+      pc5:0, pc1:0, createdAt:null, samples:[], peak:0, maxLiq:0, top10:null, top10At:0, updatedAt:0, firstSeen:Date.now(), miss:0, manual:MANUAL.includes(mint) };
+  }
+  function ensure(m){ if(!tokens.has(m)) tokens.set(m,newTok(m)); return tokens.get(m); }
+
+  async function fetchJson(url, opt){
+    const target = PROXY ? PROXY + encodeURIComponent(url) : url;
+    const ctl = new AbortController(), to = setTimeout(()=>ctl.abort(), 9000);
+    try{
+      const r = await fetch(target, Object.assign({signal:ctl.signal}, opt||{}));
+      if (!r.ok) throw new Error("HTTP "+r.status);
+      return await r.json();
+    }catch(e){
+      if (e.name === "AbortError") throw new Error("タイムアウト");
+      if (e.name === "TypeError") throw new Error("通信できません（オフライン、またはブラウザがブロック[CORS]）: "+e.message);
+      throw e;
+    } finally { clearTimeout(to); }
+  }
+
+  async function discover(){
+    const found = new Set(MANUAL);
+    if (AUTO){
+      for (const ep of ["/token-boosts/latest/v1","/token-profiles/latest/v1"]){
+        try{
+          const arr = await fetchJson(DEX+ep);
+          for (const it of (Array.isArray(arr)?arr:[])) if (it && it.chainId===CHAIN && it.tokenAddress) found.add(it.tokenAddress);
+        }catch(e){ addLog("SCAN","新規トークン取得に失敗: "+e.message); }
+      }
+    }
+    let added = 0;
+    for (const m of found) if (!tokens.has(m)){ tokens.set(m,newTok(m)); added++; }
+    if (added) addLog("SCAN","新規 "+added+" 銘柄をウォッチリストに追加");
+    if (tokens.size > MAX_WATCH){
+      const held = new Set(S.positions.map(p=>p.mint));
+      const rem = [...tokens.values()].filter(t=>!held.has(t.mint)&&!MANUAL.includes(t.mint)).sort((a,b)=>a.firstSeen-b.firstSeen);
+      while (tokens.size > MAX_WATCH && rem.length) tokens.delete(rem.shift().mint);
+    }
+  }
+
+  function applyPair(t,p){
+    const px = parseFloat(p.priceUsd); if (!(px>0)) return;
+    const now = Date.now(), tx = p.txns||{}, m5 = tx.m5||{};
+    t.symbol = (p.baseToken&&p.baseToken.symbol)||t.symbol; t.name = (p.baseToken&&p.baseToken.name)||"";
+    t.pairAddress = p.pairAddress; t.dexId = p.dexId; t.url = p.url||"";
+    t.px = px; t.liq = (p.liquidity&&p.liquidity.usd)||0; t.mc = p.marketCap||p.fdv||0;
+    t.buys5 = m5.buys||0; t.sells5 = m5.sells||0; t.vol5 = (p.volume&&p.volume.m5)||0;
+    t.pc5 = (p.priceChange&&p.priceChange.m5)||0; t.pc1 = (p.priceChange&&p.priceChange.h1)||0;
+    t.createdAt = p.pairCreatedAt||null; t.updatedAt = now; t.miss = 0;
+    t.samples.push({t:now,px,liq:t.liq}); if (t.samples.length>60) t.samples.shift();
+    t.peak = Math.max(...t.samples.map(s=>s.px)); t.maxLiq = Math.max(...t.samples.map(s=>s.liq));
+  }
+
+  async function pollMarket(){
+    const mints = [...tokens.keys()];
+    for (let i=0;i<mints.length;i+=30){
+      const chunk = mints.slice(i,i+30);
+      const arr = await fetchJson(DEX+"/tokens/v1/"+CHAIN+"/"+chunk.join(","));
+      const best = new Map();
+      for (const p of (Array.isArray(arr)?arr:[])){
+        const m = p.baseToken && p.baseToken.address;            // quote側ペアは別トークンの価格なので除外
+        if (!m || !tokens.has(m)) continue;
+        if (PUMP_ONLY && !["pumpfun","pumpswap"].includes(String(p.dexId).toLowerCase())) continue;
+        const liq = (p.liquidity&&p.liquidity.usd)||0, cur = best.get(m);
+        if (!cur || liq > ((cur.liquidity&&cur.liquidity.usd)||0)) best.set(m,p);
+      }
+      for (const m of chunk){ const t = tokens.get(m), p = best.get(m); if (p) applyPair(t,p); else t.miss++; }
+    }
+    const held = new Set(S.positions.map(p=>p.mint));
+    for (const t of [...tokens.values()]) if (t.miss>=5 && !held.has(t.mint) && !MANUAL.includes(t.mint)) tokens.delete(t.mint);
+  }
+
+  async function rpc(method, params){
+    const r = await fetchJson(RPC,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method,params})});
+    if (r.error) throw new Error(r.error.message||"rpc error");
+    return r.result;
+  }
+  async function fetchTop10(t){
+    const [sup,big] = await Promise.all([rpc("getTokenSupply",[t.mint]), rpc("getTokenLargestAccounts",[t.mint])]);
+    const supply = parseFloat(sup.value.uiAmountString||sup.value.uiAmount);
+    const accs = (big.value||[]).slice(0,20);
+    const own = await rpc("getMultipleAccounts",[accs.map(a=>a.address),{encoding:"jsonParsed"}]);
+    const list = [];
+    accs.forEach((a,i)=>{
+      const v = own.value && own.value[i], info = v && v.data && v.data.parsed && v.data.parsed.info;
+      if (info && info.owner && t.pairAddress && info.owner === t.pairAddress) return;   // プール保有分は除外（推定）
+      list.push(parseFloat(a.uiAmountString||a.uiAmount));
+    });
+    t.top10 = supply>0 ? Math.round(sum(list.slice(0,10))/supply*1000)/10 : null; t.top10At = Date.now();
+  }
+  async function top10Worker(){
+    if (rpcBusy) return; rpcBusy = true;
+    try{
+      const held = new Set(S.positions.map(p=>p.mint));
+      const need = [...tokens.values()].filter(t=>t.px>0 && (held.has(t.mint)||evalEntry(t).basic) && Date.now()-t.top10At > (held.has(t.mint)?60e3:180e3))
+        .sort((a,b)=>(held.has(b.mint)?1:0)-(held.has(a.mint)?1:0)).slice(0,2);
+      for (const t of need){ try{ await fetchTop10(t); rpcError = null; }catch(e){ t.top10At = Date.now(); rpcError = e.message; } }
+    } finally { rpcBusy = false; }
+  }
+
+  function metrics(t){
+    const tot = t.buys5+t.sells5, sellShare = tot ? t.sells5/tot : 0.5, taker = t.buys5/Math.max(t.sells5,1);
+    const vol = clamp(Math.abs(t.pc5)*1.2 + Math.abs(t.pc1)*0.25, 0, 100);
+    const dd = t.peak>0 ? 1 - t.px/t.peak : 0, liqDrop = t.maxLiq>0 ? clamp(1 - t.liq/t.maxLiq,0,1) : 0;
+    const top = t.top10==null ? 10 : Math.max(0,t.top10-40)*0.45;
+    const down = clamp(sellShare*50 + top + dd*140 + Math.max(0,-t.pc5)*0.8 + liqDrop*100, 0, 100);
+    return { vol:Math.round(vol), down:Math.round(down), risk:Math.round((vol+down)/2), taker, buyShare:1-sellShare, dd, liqDrop, tot };
+  }
+  const isFresh = t => t.px>0 && Date.now()-t.updatedAt < POLL_MS*4;
+
+  function evalEntry(t){
+    const m = metrics(t), r = {basic:false, why:null, gateWhy:null, score:0, m};
+    if (!isFresh(t)){ r.why = "データ未更新"; return r; }
+    if (t.liq < MIN_LIQ){ r.why = "流動性 $"+Math.round(t.liq).toLocaleString("en-US")+" < $"+MIN_LIQ; return r; }
+    if (m.tot < MIN_TXNS_5M){ r.why = "5分の取引数 "+m.tot+" < "+MIN_TXNS_5M; return r; }
+    if (m.taker < MIN_TAKER){ r.why = "買い圧 "+m.taker.toFixed(2)+" < "+MIN_TAKER; return r; }
+    if (!(t.pc5>0 && t.pc5<=60)){ r.why = "5分変化 "+t.pc5.toFixed(1)+"% が範囲外(0〜60%)"; return r; }
+    r.basic = true; r.score = m.taker*Math.log10(1+t.vol5);
+    const g = GATES[S.cfg.gate];
+    if (g){
+      if (m.risk >= g.risk) r.gateWhy = "総合リスク "+m.risk+" ≥ 上限 "+g.risk;
+      else if (t.top10!=null && t.top10 >= g.top10) r.gateWhy = "Top10集中度 "+t.top10+"% ≥ 上限 "+g.top10+"%";
+    }
+    return r;
+  }
+
+  function equity(){ let v = S.cash; for (const p of S.positions){ const t = tokens.get(p.mint); v += p.qty*((t&&t.px)||p.entryPx); } return v; }
+
+  function openPos(t,e){
+    let usd = Math.min(S.cash, equity()*S.cfg.size);
+    if (S.cfg.scale) usd *= clamp(1 - e.m.risk/120, 0.3, 1);
+    if (usd < 5) return false;
+    const slip = SLIP_BASE + usd/Math.max(t.liq,1), fill = t.px*(1+slip);
+    S.cash -= usd;
+    S.positions.push({mint:t.mint,symbol:t.symbol,qty:usd*(1-FEE)/fill,costUsd:usd,entryPx:fill,ts:Date.now()});
+    S.events++;
+    addLog("FOLLOW",t.symbol+" を $"+usd.toFixed(2)+" 購入（買い圧 "+e.m.taker.toFixed(2)+" / リスク "+e.m.risk+"）",true);
+    return true;
+  }
+  function closePos(p,reason){
+    const t = tokens.get(p.mint), px = (t&&t.px)||p.entryPx, val = p.qty*px, slip = SLIP_BASE + val/Math.max((t&&t.liq)||1,1);
+    const proceeds = val*(1-clamp(slip,0,0.9))*(1-FEE);
+    S.cash += proceeds; S.positions = S.positions.filter(x=>x!==p);
+    const pnl = proceeds - p.costUsd;
+    S.trades.unshift({symbol:p.symbol,mint:p.mint,entryTs:p.ts,exitTs:Date.now(),pnlUsd:pnl,pct:pnl/p.costUsd*100,reason});
+    if (S.trades.length>100) S.trades.pop();
+    S.cooldown[p.mint] = Date.now(); S.events++;
+    addLog("FOLLOW",p.symbol+" 売却（"+reason+"） "+(pnl>=0?"+":"−")+"$"+Math.abs(pnl).toFixed(2),true);
+  }
+  function agentStep(){
+    const now = Date.now(), g = GATES[S.cfg.gate];
+    for (const p of [...S.positions]){
+      const t = tokens.get(p.mint); if (!t || !isFresh(t)) continue;
+      const ret = p.qty*t.px/p.costUsd - 1, m = metrics(t);
+      if (ret <= S.cfg.sl/100) closePos(p,"損切り");
+      else if (ret >= S.cfg.tp/100) closePos(p,"利確");
+      else if (g && m.down >= g.exit) closePos(p,"リスク急騰");
+      else if (m.liqDrop >= 0.5) closePos(p,"流動性急減");
+      else if (now - p.ts > MAX_HOLD_MS) closePos(p,"時間切れ");
+    }
+    if (!S.running || S.positions.length >= MAX_POS) return;
+    const held = new Set(S.positions.map(p=>p.mint)), cands = [];
+    for (const t of tokens.values()){
+      if (held.has(t.mint) || (S.cooldown[t.mint] && now - S.cooldown[t.mint] < COOLDOWN_MS)) continue;
+      const e = evalEntry(t); if (!e.basic) continue;
+      if (e.gateWhy){
+        if (!t.skipAt || now - t.skipAt > COOLDOWN_MS){ t.skipAt = now; S.skips++; addLog("RISK",t.symbol+" 見送り: "+e.gateWhy,true); }
+        continue;
+      }
+      cands.push({t,e});
+    }
+    cands.sort((a,b)=>b.e.score-a.e.score);
+    for (const c of cands){ if (S.positions.length >= MAX_POS) break; openPos(c.t,c.e); }
+  }
+
+  let seq = 0;
+  async function loop(){
+    if (busy) return; busy = true; clearTimeout(timer);
+    try{
+      if (Date.now()-lastDiscover > DISCOVER_MS){ await discover(); lastDiscover = Date.now(); }
+      if (tokens.size) await pollMarket();
+      S.polls++; lastPollAt = Date.now(); lastError = null; lastErrLogged = "";
+      agentStep();
+      S.hist.push({t:Date.now(),v:equity()}); if (S.hist.length>600) S.hist.shift();
+      if (++seq % 6 === 0){ const n = [...tokens.values()].filter(x=>x.px>0).length; if (n) addLog("WATCH",n+" 銘柄を監視中（更新 #"+S.polls+"）"); }
+      persist(); top10Worker();
+    }catch(e){
+      lastError = e.message;
+      if (lastErrLogged !== e.message){ lastErrLogged = e.message; addLog("SYS","データ取得エラー: "+e.message,true); }
+    }
+    busy = false; refresh();
+    timer = setTimeout(loop, POLL_MS);
+  }
+
+  function publicState(){
+    const eq = equity(), now = Date.now(), held = new Set(S.positions.map(p=>p.mint));
+    const watch = [...tokens.values()].filter(t=>t.px>0).map(t=>{
+      const e = evalEntry(t), m = e.m, status = held.has(t.mint) ? "held" : e.basic ? (e.gateWhy?"blocked":"ready") : "wait";
+      return { mint:t.mint, symbol:t.symbol, dex:t.dexId, url:t.url, px:t.px, pc5:t.pc5, pc1:t.pc1, taker:m.taker, buys5:t.buys5, sells5:t.sells5,
+        liq:t.liq, mc:t.mc, vol5:t.vol5, top10:t.top10, vol:m.vol, down:m.down, risk:m.risk, buyShare:m.buyShare,
+        ageMin:t.createdAt?Math.round((now-t.createdAt)/60000):null, status, why:e.gateWhy||e.why, score:e.score, stale:!isFresh(t) };
+    }).sort((a,b)=>(b.status==="held")-(a.status==="held")||(b.status==="ready")-(a.status==="ready")||b.score-a.score||b.vol5-a.vol5);
+    const tp = S.cfg.tp, sl = S.cfg.sl;
+    return { now, running:S.running, startUsd:START_USD, equity:eq, pnlUsd:eq-START_USD, cash:S.cash, cfg:S.cfg, gates:GATES,
+      stats:{trades:S.trades.length,wins:S.trades.filter(x=>x.pnlUsd>0).length,skips:S.skips,polls:S.polls,watching:watch.length,events:S.events},
+      health:{lastPollAt,lastError,pollMs:POLL_MS,rpcError,source:DEX.replace(/^https?:\/\//,"")+(PROXY?"（プロキシ経由）":"")},
+      positions:S.positions.map(p=>{ const t = tokens.get(p.mint), px = (t&&t.px)||p.entryPx, val = p.qty*px;
+        return { mint:p.mint, symbol:p.symbol, qty:p.qty, costUsd:p.costUsd, valueUsd:val, retPct:(val/p.costUsd-1)*100, entryPx:p.entryPx, px, ts:p.ts,
+          tpPx:p.costUsd*(1+tp/100)/p.qty, slPx:p.costUsd*(1+sl/100)/p.qty }; }),
+      watch, trades:S.trades.slice(0,20), log:S.log.slice(0,60), hist:S.hist.slice(-300).map(h=>h.v), startedAt:S.startedAt };
+  }
+
+  function handleCmd(b){
+    const c = b.cmd;
+    if (c==="pause"){ S.running = false; addLog("SYS","新規エントリーを停止"); }
+    else if (c==="resume"){ S.running = true; addLog("SYS","新規エントリーを再開"); }
+    else if (c==="close"){ for (const p of [...S.positions]) closePos(p,"手動クローズ"); }
+    else if (c==="reset"){ const cfg = S.cfg; S = fresh(); S.cfg = cfg; addLog("SYS","セッションをリセット（ペーパー）"); }
+    else if (c==="cfg" && b.cfg){
+      const ok = {gate:["off","std","strict"],size:[0.1,0.25,0.5],sl:[-15,-25,-40],tp:[25,50,100],scale:[true,false]};
+      for (const k of Object.keys(b.cfg)) if (ok[k] && ok[k].includes(b.cfg[k])) S.cfg[k] = b.cfg[k];
+    }
+    persist();
+  }
+
+  /* ============================ UI ============================ */
+  const usd = (n,sign) => (sign?(n>=0?"+":"−"):(n<0?"−":"")) + "$" + Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+  const px = x => x>=1 ? x.toFixed(3) : x>=0.01 ? x.toFixed(4) : (x<=0 ? "0" : (x.toPrecision(3).includes("e") ? x.toExponential(2) : x.toPrecision(3)));
+  const pct = (x,d=1) => (x>=0?"+":"−") + Math.abs(x).toFixed(d) + "%";
+  const money = n => n>=1e6 ? "$"+(n/1e6).toFixed(2)+"M" : n>=1e3 ? "$"+(n/1e3).toFixed(1)+"K" : "$"+Math.round(n);
+  let ST = null, focus = null, lastLogId = 0, pulseAmt = 0;
+  const STATUS = {held:"保有",ready:"候補",blocked:"見送り",wait:"–"};
+
+  function refresh(){ ST = publicState(); render(); }
+  function cmd(o){ handleCmd(o); refresh(); }
+
+  function setPill(){
+    const p = $("pill"); let cls = "pill", t = "LIVE";
+    const age = ST.now - ST.health.lastPollAt;
+    if (ST.health.lastError){ cls = "pill err"; t = "データ取得エラー"; }
+    else if (!ST.health.lastPollAt){ cls = "pill off"; t = "取得待ち"; }
+    else if (age > ST.health.pollMs*3){ cls = "pill warn"; t = "遅延"; }
+    p.className = cls; p.innerHTML = "<i></i><span>"+t+"</span>";
+  }
+  function spark(vals,w,h,padY){
+    if (vals.length<2) vals = [vals[0]||0, vals[0]||0];
+    const mn = Math.min(...vals), mx = Math.max(...vals), span = (mx-mn)||1;
+    const pts = vals.map((v,i)=>[i/(vals.length-1)*w, padY+(1-(v-mn)/span)*(h-2*padY)]);
+    const d = "M"+pts.map(p=>p[0].toFixed(1)+","+p[1].toFixed(1)).join(" L");
+    return {d, area:d+" L"+w+","+h+" L0,"+h+" Z", last:pts[pts.length-1], mn, mx};
+  }
+  function pickFocus(){
+    const w = ST.watch;
+    return w.find(x=>x.mint===focus) || (ST.positions[0] && w.find(x=>x.mint===ST.positions[0].mint)) || w[0] || null;
+  }
+
+  function render(){
+    setPill();
+    const s = ST, f = pickFocus();
+    $("src").textContent = s.health.source;
+    $("sWatch").textContent = s.stats.watching;
+    $("sTrades").textContent = s.stats.trades+" / "+s.stats.wins;
+    $("sFocus").textContent = f ? f.symbol : "–";
+    $("sAge").textContent = s.health.lastPollAt ? Math.max(0,Math.round((s.now-s.health.lastPollAt)/1000))+"秒前" : "–";
+    const g = s.gates[s.cfg.gate];
+    $("ribbon").innerHTML =
+      (s.running ? "" : "<span class='chip warn'>新規エントリー停止中</span>") +
+      "<span class='chip'>損切り "+s.cfg.sl+"% / 利確 +"+s.cfg.tp+"%</span>" +
+      "<span class='chip "+(g?"on":"")+"'>ゲート: "+(g?g.label:"OFF")+"</span>" +
+      (s.health.lastError ? "<span class='chip warn'>"+esc(s.health.lastError)+"</span>" : "") +
+      (s.health.rpcError ? "<span class='chip'>Top10取得不可（RPC）</span>" : "");
+    const p = $("pnl");
+    p.textContent = usd(s.pnlUsd,true); p.className = "big "+(s.pnlUsd>=0?"pos":"neg");
+    $("startTxt").textContent = "開始 "+usd(s.startUsd);
+    $("bal").textContent = usd(s.equity); $("balNow").textContent = usd(s.equity);
+    $("clock").textContent = mmss(Math.floor((s.now-s.startedAt)/1000));
+    $("skips").textContent = s.stats.skips;
+    $("posline").innerHTML = s.positions.length
+      ? "保有中 "+s.positions.map(x=>"<b>"+esc(x.symbol)+"</b> <b class='"+(x.retPct>=0?"pos":"neg")+"'>"+pct(x.retPct)+"</b> ("+usd(x.valueUsd)+")").join(" ・ ")
+      : (s.running ? "ポジションなし（条件を満たす銘柄を待機）" : "ポジションなし（新規エントリー停止中）");
+
+    const b = spark(s.hist,320,130,16), base = (1-(s.startUsd-b.mn)/((b.mx-b.mn)||1))*98+16;
+    $("balSvg").innerHTML =
+      "<path d='"+b.area+"' fill='var(--purple2)' opacity='.14'/>" +
+      (s.startUsd>=b.mn && s.startUsd<=b.mx ? "<line x1='0' x2='320' y1='"+base.toFixed(1)+"' y2='"+base.toFixed(1)+"' stroke='var(--line)' stroke-dasharray='3 4'/>" : "") +
+      "<path d='"+b.d+"' fill='none' stroke='var(--purple)' stroke-width='2'/>" +
+      "<circle cx='"+b.last[0].toFixed(1)+"' cy='"+b.last[1].toFixed(1)+"' r='3.5' fill='var(--lime)' stroke='var(--purple)' stroke-width='1.5'/>" +
+      "<text x='2' y='10' font-size='9' fill='var(--ink2)'>"+b.mx.toFixed(2)+"</text><text x='2' y='128' font-size='9' fill='var(--ink2)'>"+b.mn.toFixed(2)+"</text>";
+
+    if (f){
+      $("rTok").textContent = f.symbol;
+      const tags = [];
+      if (f.pc5>25) tags.push(["急上昇","hot"]); else if (f.pc5<-20) tags.push(["急落","cold"]);
+      if (f.vol>=60) tags.push(["ボラ大","hot"]);
+      if (f.top10!=null && f.top10>=85) tags.push(["集中注意","bad"]);
+      if (f.taker>=1.6) tags.push(["買い優勢","hot"]); else if (f.taker<=0.6) tags.push(["売り優勢","cold"]);
+      if (f.stale) tags.push(["データ古い","cold"]);
+      $("rTags").innerHTML = tags.map(x=>"<span class='tag "+x[1]+"'>"+x[0]+"</span>").join("");
+      const st = f.risk<40 ? ["正常","ok"] : f.risk<65 ? ["警戒","warn"] : ["危険","bad"];
+      $("rState").textContent = st[0]; $("rState").className = "rstate "+st[1];
+      [["gVol",f.vol],["gDown",f.down]].forEach(([id,v])=>{
+        $(id+"Val").textContent = v+" "+(v<40?"低":v<65?"中":"高");
+        const el = $(id+"Bar"); el.style.width = v+"%"; el.className = v<40?"lo":v<65?"mid":"hi";
+      });
+      const bp = Math.round(f.buyShare*100);
+      $("prSell").style.width = (100-bp)+"%"; $("prBuy").style.width = bp+"%";
+      $("prTxt").textContent = "売り "+f.sells5+"件 ／ 買い "+f.buys5+"件（5分）";
+      $("prTaker").textContent = "TAKER "+f.taker.toFixed(2);
+      const dir = (f.vol>=60 && Math.abs(f.buyShare-0.5)<0.12) ? "過熱・方向不明" : f.buyShare>=0.58 ? "買い優勢" : f.buyShare<=0.42 ? "売り優勢" : "拮抗";
+      $("dirLine").innerHTML = "向き <b>"+dir+"</b> ／ 総合リスク <b>"+f.risk+"</b> ／ ゲート <b>"+(g?g.label+"（総合<"+g.risk+"・Top10<"+g.top10+"%）":"OFF")+"</b>";
+      $("vitals").innerHTML = [
+        ["価格","$"+px(f.px)],["5分",pct(f.pc5)],["1時間",pct(f.pc1)],
+        ["流動性",money(f.liq)],["時価総額",f.mc?money(f.mc):"–"],["TOP10",f.top10==null?"–":f.top10+"%"],
+        ["5分出来高",money(f.vol5)],["経過",f.ageMin==null?"–":(f.ageMin>=120?Math.round(f.ageMin/60)+"時間":f.ageMin+"分")],["DEX",esc(f.dex||"–")]
+      ].map(v=>"<div><span>"+v[0]+"</span><b>"+v[1]+"</b></div>").join("");
+    } else {
+      $("rTok").textContent = "–"; $("rTags").innerHTML = ""; $("rState").textContent = "–";
+      $("dirLine").textContent = "データ取得を待っています"; $("vitals").innerHTML = "";
+    }
+
+    const pos = f && s.positions.find(x=>x.mint===f.mint);
+    if (pos){
+      const rows = [
+        {k:"tp",label:"利確 +"+s.cfg.tp+"%",px:pos.tpPx,val:"+"+usd(pos.costUsd*s.cfg.tp/100)},
+        {k:"tr",label:"建値",px:pos.entryPx,val:usd(pos.costUsd)},
+        {k:"mk",label:"MARK",px:pos.px,val:pct(pos.retPct)},
+        {k:"sl",label:"損切り "+s.cfg.sl+"%",px:pos.slPx,val:"−"+usd(pos.costUsd*Math.abs(s.cfg.sl)/100)}
+      ].sort((a,b)=>b.px-a.px);
+      $("lvNote").textContent = f.symbol;
+      $("levels").innerHTML = rows.map(r=>{
+        const w = r.k==="mk" ? 0 : clamp(Math.abs(r.px-pos.px)/pos.px/0.6*100,4,100);
+        return "<div class='lv "+r.k+"'><span>"+r.label+"<small>$"+px(r.px)+"</small></span><div class='bar'>"+(r.k==="mk"?"":"<i style='width:"+w.toFixed(0)+"%'></i>")+"</div><em>"+r.val+"</em></div>";
+      }).join("");
+    } else { $("lvNote").textContent = ""; $("levels").innerHTML = "<div class='empty'>注目銘柄を保有していません。エントリー後に利確・損切りラインを表示します。</div>"; }
+
+    $("wlBody").innerHTML = s.watch.length ? s.watch.map(w=>{
+      const rc = w.risk<40?"pos":w.risk<65?"":"neg";
+      return "<tr class='row "+(f&&f.mint===w.mint?"sel":"")+"' data-m='"+esc(w.mint)+"'>"+
+        "<td><span class='dot "+(w.status==="wait"?"":w.status)+"'></span><span class='sym'>"+esc(w.symbol)+"</span></td>"+
+        "<td>$"+px(w.px)+"</td><td class='"+(w.pc5>=0?"pos":"neg")+"'>"+pct(w.pc5)+"</td><td>"+w.taker.toFixed(2)+"</td><td class='"+rc+"'>"+w.risk+"</td><td>"+STATUS[w.status]+"</td></tr>";
+    }).join("") : "<tr><td colspan='6' class='empty'>データ取得中…（初回は数十秒かかることがあります。表示が変わらない場合は下の「接続テスト」を押してください）</td></tr>";
+    $("wlWhy").textContent = f ? f.symbol+": "+(f.status==="held"?"保有中":f.status==="ready"?"エントリー条件を満たしています":f.why||"") : "";
+
+    $("trades").innerHTML = s.trades.length ? s.trades.slice(0,8).map(t=>
+      "<div class='tl'><span>"+esc(t.symbol)+"</span><b class='"+(t.pnlUsd>=0?"pos":"neg")+"'>"+usd(t.pnlUsd,true)+"</b><small>"+esc(t.reason)+" ・ 保有 "+mmss(Math.round((t.exitTs-t.entryTs)/1000))+"</small><small style='text-align:right'>"+pct(t.pct)+"</small></div>"
+    ).join("") : "<div class='empty'>まだ取引はありません。</div>";
+
+    $("log").innerHTML = s.log.slice(0,40).map(l=>{ const d = new Date(l.t);
+      return "<li class='"+(l.hi?"hi":"")+"'><span>"+pad(d.getHours())+":"+pad(d.getMinutes())+"</span><b>"+esc(l.tag)+"</b><span>"+esc(l.msg)+"</span></li>"; }).join("");
+    $("logCount").textContent = s.log.length+"件";
+    const newest = s.log[0] ? s.log[0].id : 0;
+    if (lastLogId && newest>lastLogId && s.log.some(l=>l.id>lastLogId && l.hi) && !reduceMotion) pulseAmt = 0.09;
+    lastLogId = newest;
+    $("bPause").textContent = s.running ? "新規エントリー停止" : "新規エントリー再開";
+    syncSegs();
+  }
+
+  document.addEventListener("click", e => { const tr = e.target.closest("tr.row"); if (!tr) return; focus = tr.dataset.m; if (ST) render(); });
+  $("bPause").addEventListener("click", () => cmd({cmd: S.running ? "pause" : "resume"}));
+  $("bClose").addEventListener("click", () => cmd({cmd:"close"}));
+  $("bReset").addEventListener("click", () => { if (confirm("ペーパーの損益と取引履歴をリセットします。よろしいですか？")) cmd({cmd:"reset"}); });
+
+  const SEGS = [
+    ["segSize","size",[{l:"10%",v:0.1},{l:"25%",v:0.25},{l:"50%",v:0.5}]],
+    ["segSl","sl",[{l:"−15%",v:-15},{l:"−25%",v:-25},{l:"−40%",v:-40}]],
+    ["segTp","tp",[{l:"+25%",v:25},{l:"+50%",v:50},{l:"+100%",v:100}]],
+    ["segGate","gate",[{l:"OFF",v:"off"},{l:"標準",v:"std"},{l:"厳しめ",v:"strict"}]],
+    ["segScale","scale",[{l:"OFF",v:false},{l:"ON",v:true}]]
+  ];
+  SEGS.forEach(([id,key,opts]) => { const box = $(id);
+    opts.forEach(o => { const b = document.createElement("button"); b.type="button"; b.textContent=o.l; b.setAttribute("aria-pressed","false");
+      b.addEventListener("click", () => { const c = {}; c[key] = o.v; cmd({cmd:"cfg",cfg:c}); }); box.appendChild(b); }); });
+  function syncSegs(){ SEGS.forEach(([id,key,opts]) => { [...$(id).children].forEach((b,i) => b.setAttribute("aria-pressed", String(ST.cfg[key]===opts[i].v))); }); }
+
+  /* ---- 接続設定 ---- */
+  $("inProxy").value = PROXY; $("inWatch").value = MANUAL.join(","); $("chkPump").checked = PUMP_ONLY;
+  $("bSaveConn").addEventListener("click", () => {
+    PROXY = $("inProxy").value.trim(); store.set(PKEY, PROXY);
+    MANUAL = $("inWatch").value.split(",").map(s=>s.trim()).filter(Boolean); store.set(WKEY, MANUAL.join(","));
+    PUMP_ONLY = $("chkPump").checked; store.set(OKEY, PUMP_ONLY ? "1" : "0");
+    MANUAL.forEach(ensure); lastDiscover = 0; $("diag").textContent = "保存しました。次の更新から反映されます。"; loop();
+  });
+  $("bTest").addEventListener("click", async () => {
+    const out = $("diag"); out.innerHTML = "テスト中…";
+    const rows = [];
+    const t = async (name, fn) => { const t0 = performance.now(); try{ const r = await fn(); rows.push("✓ "+name+"（"+Math.round(performance.now()-t0)+"ms）"+(r?" "+r:"")); }catch(e){ rows.push("✕ "+name+": "+esc(e.message)); } out.innerHTML = rows.join("<br>"); };
+    await t("DexScreener 新着一覧", async () => { const a = await fetchJson(DEX+"/token-boosts/latest/v1"); return (Array.isArray(a)?a.length:0)+"件"; });
+    await t("DexScreener 価格取得", async () => { const a = await fetchJson(DEX+"/tokens/v1/"+CHAIN+"/So11111111111111111111111111111111111111112"); return (Array.isArray(a)?a.length:0)+"ペア"; });
+    await t("Solana RPC（Top10用）", async () => { await rpc("getSlot",[]); });
+    rows.push(rows.some(r=>r.startsWith("✕ DexScreener")) ? "→ DexScreenerが✕の場合、ブラウザがブロックしている可能性があります。上の「プロキシURL」を設定するか、READMEを参照してください。" : "→ DexScreenerが✓なら実データで動きます。RPCが✕でもTop10集中度以外は動作します。");
+    out.innerHTML = rows.join("<br>");
+  });
+
+  let wakeLock = null, wakeWanted = false;
+  function wakeUI(){ $("bWake").textContent = wakeWanted ? "画面点灯を解除" : "画面を点灯したままにする"; }
+  async function acquireWake(){ try{ wakeLock = await navigator.wakeLock.request("screen"); wakeLock.addEventListener("release", () => { wakeLock = null; }); }catch(e){ $("diag").textContent = "画面点灯を有効にできませんでした: "+e.message; wakeWanted = false; wakeUI(); } }
+  $("bWake").addEventListener("click", async () => {
+    if (!("wakeLock" in navigator)){ $("diag").textContent = "このブラウザは画面点灯の維持に対応していません。設定→画面表示と明るさ→自動ロックを「なし」にしてください。"; return; }
+    wakeWanted = !wakeWanted; wakeUI();
+    if (wakeWanted) await acquireWake(); else if (wakeLock){ await wakeLock.release(); wakeLock = null; }
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    const gap = Date.now() - (lastPollAt || S.lastPollAt || Date.now());
+    if (gap > POLL_MS*3 && S.positions.length) addLog("SYS","約"+Math.max(1,Math.round(gap/60000))+"分間、画面が非表示で更新が止まっていました。この間の損切り・利確は判定されていません。",true);
+    if (wakeWanted && !wakeLock) acquireWake();
+    loop();
+  });
+
+  /* ---- knot (decoration) ---- */
+  const gauss = () => { let u=0,v=0; while(!u)u=Math.random(); while(!v)v=Math.random(); return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v); };
+  const cv = $("knot"), cx = cv.getContext("2d"); let W=0,H=0,ang=0,col={p:"#4B2C9A",l:"#C9E63C"};
+  function readColors(){ const cs = getComputedStyle(document.documentElement); col.p = cs.getPropertyValue("--purple").trim()||col.p; col.l = cs.getPropertyValue("--lime").trim()||col.l; }
+  function resize(){ const r = cv.getBoundingClientRect(), d = Math.min(window.devicePixelRatio||1,2); W=r.width; H=r.height; cv.width=W*d; cv.height=H*d; cx.setTransform(d,0,0,d,0,0); }
+  const N = 2000, P = []; for (let i=0;i<N;i++){ const t = Math.random()*Math.PI*2; P.push({x:Math.sin(t)+2*Math.sin(2*t)+gauss()*0.2,y:Math.cos(t)-2*Math.cos(2*t)+gauss()*0.2,z:-Math.sin(3*t)*1.2+gauss()*0.2,hot:Math.random()<0.1}); }
+  let last = performance.now();
+  function frame(now){
+    const dt = Math.min((now-last)/1000,0.05); last = now; if (!reduceMotion) ang += dt*0.28; pulseAmt *= 0.92;
+    cx.clearRect(0,0,W,H);
+    const sc = Math.min(W,H)/7.2*(1+pulseAmt), ca = Math.cos(ang), sa = Math.sin(ang), ct = Math.cos(0.55), st = Math.sin(0.55);
+    for (let pass=0;pass<2;pass++){ cx.fillStyle = pass===0 ? col.p : col.l;
+      for (let i=0;i<N;i++){ const q = P[i]; if ((pass===1)!==q.hot) continue;
+        const x1 = q.x*ca+q.z*sa, z1 = -q.x*sa+q.z*ca, y1 = q.y*ct-z1*st, z2 = q.y*st+z1*ct, k = 7/(7-z2);
+        cx.globalAlpha = Math.max(0.15,Math.min(0.95,0.55+z2*0.12)); const s = (pass===1?2.2:1.6)*k;
+        cx.fillRect(W/2+x1*sc*k-s/2, H/2+y1*sc*k-s/2, s, s); } }
+    cx.globalAlpha = 1; requestAnimationFrame(frame);
+  }
+  new ResizeObserver(resize).observe(cv);
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", readColors);
+
+  /* ---- start ---- */
+  load();
+  {
+    const gap = Date.now() - (S.lastPollAt || Date.now());
+    if (S.positions.length && gap > 60e3) addLog("SYS","前回の終了から約"+Math.max(1,Math.round(gap/60000))+"分経過。保有中のポジションはこの間の損切り・利確が判定されていません。",true);
+  }
+  MANUAL.forEach(ensure); wakeUI(); readColors(); resize(); requestAnimationFrame(frame);
+  refresh(); loop(); setInterval(refresh, 2000);
+})();
+</script>
+</body>
+</html>
