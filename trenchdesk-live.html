@@ -899,7 +899,7 @@ svg text{font-family:var(--mono)}
       const base = side>0 ? (t.ask||t.px) : (t.bid||t.px), fill = base*(1 + side*impactOf(t,side,N)), fee = N*FEEF();
       S.cash -= margin + fee;
       const liq = side>0 ? fill*(1-1/lev+MMR) : fill*(1+1/lev-MMR);
-      const posObj = {sym:t.sym, side, lev, margin, margin0:margin, notional:N, qty:N/fill, origQty:N/fill, entry:fill, liq, ts:Date.now(), peak:fill, fundingPaid:0, feeOpen:fee, lastFund:Date.now(), kind:e.kind, realizedNet:0, tpHit:0, beOn:false, live:null};
+      const posObj = {sym:t.sym, side, lev, margin, margin0:margin, notional:N, qty:N/fill, origQty:N/fill, entry:fill, liq, ts:Date.now(), peak:fill, fundingPaid:0, feeOpen:fee, lastFund:Date.now(), kind:e.kind, realizedNet:0, tpHit:0, beOn:false, live:null, wsSign:null, wsCrosses:0};
       if (S.cfg.pyramid){
         posObj.pyramid = true; posObj.initEntry = fill; posObj.initMargin = margin;
         posObj.slPriceFixed = side>0 ? fill*(1-PYR_SL/100/lev) : fill*(1+PYR_SL/100/lev);
@@ -941,11 +941,23 @@ svg text{font-family:var(--mono)}
       addLog("TRADE",baseOf(p.sym)+" 追加エントリー（"+label+"） 新しい建値 $"+px(p.entry),true);
       liveAdd(p);
     }
+    const WS_MIN_GAP_MS = 45000; // ノイズ対策: 前回のカウントから最低45秒は間を空ける
+    function whipsawHit(p, value, threshold, now){
+      const sign = value > threshold ? 1 : value < -threshold ? -1 : 0;
+      if (sign !== 0){
+        if (p.wsSign == null){ p.wsSign = sign; p.wsLastCrossAt = now; }
+        else if (sign !== p.wsSign && (!p.wsLastCrossAt || now - p.wsLastCrossAt >= WS_MIN_GAP_MS)){
+          p.wsCrosses = (p.wsCrosses||0) + 1; p.wsSign = sign; p.wsLastCrossAt = now;
+        }
+      }
+      return (p.wsCrosses||0) >= 3;
+    }
     function pyramidCheck(p,t,now){
       const levPct = p.side*(t.px/p.entry - 1)*100*p.lev;
       if ((p.side>0 && t.px<=p.liq) || (p.side<0 && t.px>=p.liq)){ closePos(p,"強制ロスカット"); return; }
       const slHit = p.side>0 ? t.px<=p.slPriceFixed : t.px>=p.slPriceFixed;
       if (slHit){ closePos(p,"損切り（初期固定 -"+PYR_SL+"%）"); return; }
+      if (whipsawHit(p, levPct, 8, now)){ closePos(p,"方向不明（プラスマイナス3往復）"); return; }
       if (!p.tp1Done){
         if (p.phase1Adds===0 && levPct<=-PYR_ADD1){ addPyramid(p,"証拠金維持率-"+PYR_ADD1+"%"); p.phase1Adds=1; }
         else if (p.phase1Adds===1 && levPct<=-PYR_ADD2){ addPyramid(p,"証拠金維持率-"+PYR_ADD2+"%"); p.phase1Adds=2; }
@@ -1017,13 +1029,16 @@ svg text{font-family:var(--mono)}
         p.peak = p.side>0 ? Math.max(p.peak,t.px) : Math.min(p.peak,t.px);
         const fav = p.side*(t.px/p.entry-1)*100, best = p.side*(p.peak/p.entry-1)*100, m = metricsOf(t);
         const dead = (p.side>0 && t.px<=p.liq) || (p.side<0 && t.px>=p.liq);
-        if (!dead && cf.ladder){
+        const wsThresh = Math.max(0.15, cf.sl*0.35);
+        const wsDone = !dead && whipsawHit(p, fav, wsThresh, now);
+        if (!dead && !wsDone && cf.ladder){
           if (p.tpHit<1 && fav >= MAXTP/3){ partial(p,1/3,"TP1"); p.tpHit = 1; }
           if (p.tpHit<2 && fav >= MAXTP*2/3){ partial(p,1/3,"TP2"); p.tpHit = 2; }
         }
         if ((cf.be==="tp1" && p.tpHit>=1) || (cf.be==="tp2" && p.tpHit>=2)) p.beOn = true;
         const trailOn = cf.trail && (!cf.ladder || p.tpHit>=1);
         if (dead) closePos(p,"強制ロスカット");
+        else if (wsDone) closePos(p,"方向不明（プラスマイナス3往復）");
         else if (fav >= MAXTP) closePos(p,"利確（"+(cf.ladder?"TP3/MAX":"MAX")+"）");
         else if (p.beOn && fav <= 0) closePos(p,"建値撤退");
         else if (!p.beOn && fav <= -cf.sl) closePos(p,"損切り");
