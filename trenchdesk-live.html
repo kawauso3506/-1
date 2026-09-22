@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>TrenchDesk Live（iPhone版）</title>
+<title>TrenchDesk Live v4（iPhone版）</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <style>
 :root{
@@ -190,6 +190,16 @@ svg text{font-family:var(--mono)}
 .inp{width:100%;min-height:40px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--ink);font:inherit;font-size:16px}
 .chk{display:flex;align-items:center;gap:8px;font-size:13px;min-height:40px}
 .chk input{width:20px;height:20px}
+
+.tabs{display:flex;gap:8px;margin-bottom:12px}
+.tabs button{flex:1;min-height:48px;border:1px solid var(--line);background:var(--panel);color:var(--ink2);border-radius:8px;font:inherit;font-weight:500;cursor:pointer;padding:6px 10px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px}
+.tabs button small{font-family:var(--mono);font-size:11.5px}
+.tabs button[aria-selected="true"]{background:var(--purple);color:#fff;border-color:var(--purple)}
+.side{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;font-weight:600;margin-right:6px;font-family:var(--mono);background:var(--panel2)}
+.side.long{color:var(--green)}.side.short{color:var(--red)}
+#ctlDyn{display:contents}
+.lv.liq .bar i{background:var(--red);opacity:.5}
+.posline{line-height:1.9}
 .banner{margin-bottom:10px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12px;color:var(--ink2)}
 .banner b{color:var(--ink);font-weight:500}
 .pill.err{background:var(--red);color:#fff}.pill.err i{background:#fff}
@@ -201,12 +211,17 @@ svg text{font-family:var(--mono)}
   <header class="top">
     <div class="brand">
       <svg width="36" height="36" viewBox="0 0 36 36" aria-hidden="true"><rect width="36" height="36" rx="8" fill="var(--purple)"/><path d="M9 11h18v4.5h-6.8V27h-4.4V15.5H9z" fill="var(--lime)"/></svg>
-      <div><h1>TrenchDesk Live</h1><p>実データ × ペーパー売買（この端末だけで動作）</p></div>
+      <div><h1>TrenchDesk Live</h1><p>実データ × ペーパー売買（DEX現物＋先物ロング/ショート）</p></div>
     </div>
     <span class="pill off" id="pill"><i></i><span id="pillTxt">接続中</span></span>
   </header>
 
-  <div class="banner">価格・売買数は <b id="src">DexScreener</b> の実データ。売買は<b>仮想（ペーパー）</b>で、ウォレットや実資金は使いません。<b>この画面を開いている間だけ</b>更新・売買判定されます（閉じる／ロックすると止まります）。</div>
+  <div class="banner">価格・売買数は <b id="src">DexScreener</b> の実データ。売買は<b>仮想（ペーパー）</b>で、ウォレットや実資金は使いません。<b>この画面を開いている間だけ</b>更新・売買判定されます（閉じる／ロックすると止まります）。DEX現物と先物は別々の仮想口座（各$500）です。</div>
+
+  <div class="tabs" role="tablist" aria-label="口座の切り替え">
+    <button role="tab" id="tabSpot" aria-selected="true"><span>DEX現物</span><small id="tabSpotPnl">–</small></button>
+    <button role="tab" id="tabPerp" aria-selected="false"><span>先物 L/S</span><small id="tabPerpPnl">–</small></button>
+  </div>
 
   <div class="strip">
     <div><span>監視銘柄</span><b id="sWatch">0</b></div>
@@ -218,7 +233,7 @@ svg text{font-family:var(--mono)}
 
   <main class="grid">
     <section class="panel a-pnl">
-      <h2>セッション損益（USD）<em id="startTxt"></em></h2>
+      <h2><span id="pnlTitle">セッション損益（USD）</span><em id="startTxt"></em></h2>
       <div class="big pos" id="pnl">+$0.00</div>
       <div class="kv">
         <div><span>評価額</span><b id="bal">$0.00</b></div>
@@ -240,8 +255,8 @@ svg text{font-family:var(--mono)}
 
     <section class="panel a-risk">
       <div class="rhead"><b id="rTok">–</b><span class="tags" id="rTags"></span><span class="rstate ok" id="rState">–</span></div>
-      <div class="gauge"><div class="gl"><span>危険度・ボラ（激しさ）</span><b id="gVolVal">–</b></div><div class="track"><i id="gVolBar"></i></div></div>
-      <div class="gauge"><div class="gl"><span>下落リスク（下方向）</span><b id="gDownVal">–</b></div><div class="track"><i id="gDownBar"></i></div></div>
+      <div class="gauge"><div class="gl"><span id="lblVol">危険度・ボラ（激しさ）</span><b id="gVolVal">–</b></div><div class="track"><i id="gVolBar"></i></div></div>
+      <div class="gauge"><div class="gl"><span id="lblDown">下落リスク（下方向）</span><b id="gDownVal">–</b></div><div class="track"><i id="gDownBar"></i></div></div>
       <div class="pbar" aria-hidden="true"><i class="s" id="prSell"></i><i class="b" id="prBuy"></i></div>
       <div class="plabel"><span id="prTxt">–</span><span id="prTaker">TAKER –</span></div>
       <div class="dir" id="dirLine">–</div>
@@ -260,7 +275,7 @@ svg text{font-family:var(--mono)}
     <section class="panel a-wl">
       <h2>ウォッチリスト<em>タップで詳細</em></h2>
       <div class="wlwrap"><table class="wl">
-        <thead><tr><th>銘柄</th><th>価格</th><th>5分</th><th>TAKER</th><th>リスク</th><th>状態</th></tr></thead>
+        <thead><tr><th>銘柄</th><th>価格</th><th>5分</th><th id="thTaker">TAKER</th><th>リスク</th><th>状態</th></tr></thead>
         <tbody id="wlBody"></tbody>
       </table></div>
       <div class="why" id="wlWhy"></div>
@@ -286,6 +301,10 @@ svg text{font-family:var(--mono)}
         <div class="grp" style="flex:1;min-width:220px"><span>監視するmint（任意・カンマ区切り）</span><input id="inWatch" class="inp" type="text" inputmode="text" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="空欄なら新着を自動探索"></div>
         <div class="grp" style="flex:1;min-width:220px"><span>プロキシURL（通信がブロックされる場合のみ）</span><input id="inProxy" class="inp" type="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="https://…workers.dev/?u="></div>
         <label class="chk"><input type="checkbox" id="chkPump"> pump.fun系のペアだけにする</label>
+        <div class="grp" style="flex:1;min-width:220px"><span>BingXデモ発注リレーURL（任意）</span><input id="inRelayUrl" class="inp" type="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="https://xxxx.workers.dev"></div>
+        <div class="grp" style="flex:1;min-width:220px"><span>リレーのACCESS_TOKEN</span><input id="inRelayToken" class="inp" type="password" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="Bearerの後ろに付ける文字列"></div>
+        <div class="grp" style="min-width:160px"><span>実発注1回の上限（証拠金USD）</span><input id="inLiveMax" class="inp" type="number" min="1" step="1" placeholder="5"></div>
+        <div class="grp" style="min-width:160px"><span>先物データ元</span><select id="selSrc" class="inp"><option value="bingx">BingX</option><option value="bybit">Bybit</option></select></div>
         <button class="btn ghost" id="bSaveConn">保存</button>
       </div>
       <div class="why" id="diag"></div>
@@ -298,13 +317,10 @@ svg text{font-family:var(--mono)}
           <button class="btn ghost" id="bClose">全ポジションを閉じる</button>
           <button class="btn ghost" id="bReset">リセット</button>
         </div>
-        <div class="grp"><span>1回の建玉（評価額比）</span><div class="seg" id="segSize"></div></div>
-        <div class="grp"><span>損切り</span><div class="seg" id="segSl"></div></div>
-        <div class="grp"><span>利確</span><div class="seg" id="segTp"></div></div>
-        <div class="grp"><span>リスクゲート</span><div class="seg" id="segGate"></div></div>
-        <div class="grp"><span>リスク連動サイズ</span><div class="seg" id="segScale"></div></div>
+        <div id="ctlDyn"></div>
       </div>
-      <p class="foot">エントリー条件: 流動性 $8,000以上・5分の取引数20以上・買い圧(TAKER)1.4以上・5分変化 0〜60%。約定は手数料1%＋スリッページ(1.5%＋注文額/流動性)で計算します。リスク指標は独自の目安で、Top10集中度はプール保有分を除いた推定値です。この戦略に優位性があるとは限りません。</p>
+      <p class="foot" id="liveNote" style="display:none"></p>
+      <p class="foot" id="foot"></p>
     </section>
   </main>
 </div>
@@ -313,28 +329,55 @@ svg text{font-family:var(--mono)}
 (() => {
   "use strict";
   /* =====================================================================
-   * TrenchDesk Live (Web版) — iPhoneのSafariだけで動く単体ファイル
-   * DexScreenerの実データを読み取り、売買は仮想（ペーパー）。ウォレット・秘密鍵は使いません。
+   * TrenchDesk Live v2 — iPhoneのSafariだけで動く単体ファイル
+   *  ・DEX現物（DexScreener）＋ 先物ロング/ショート（Bybit公開データ）
+   *  ・売買はすべて仮想（ペーパー）。ウォレット・秘密鍵・実資金は使いません。
    * ===================================================================== */
   const Q = new URLSearchParams(location.search);
   const DEX = (Q.get("dex") || "https://api.dexscreener.com").replace(/\/$/, "");
   const RPC = Q.get("rpc") || "https://api.mainnet-beta.solana.com";
-  const POLL_MS = +Q.get("poll") || 10000;
+  const BYBIT = (Q.get("bybit") || "https://api.bybit.com").replace(/\/$/, "");
+  const BINGX = (Q.get("bingx") || "https://open-api.bingx.com").replace(/\/$/, "");
+  const POLL_OVERRIDE = +Q.get("poll") || 0;
+  const WARP = +Q.get("warp") || 1;                 // テスト用（時間窓の縮尺）。通常は1
   const DISCOVER_MS = 60000, MAX_WATCH = 30, START_USD = 500, CHAIN = "solana";
-  const SKEY = "trenchdesk_live_v1", PKEY = "trenchdesk_proxy", WKEY = "trenchdesk_watch", OKEY = "trenchdesk_pumponly";
+  const SKEY = "trenchdesk_live_v1", PKEY = "trenchdesk_proxy", WKEY = "trenchdesk_watch", OKEY = "trenchdesk_pumponly", FKEY = "trenchdesk_perp_v1", SRCKEY = "trenchdesk_perp_src";
   const store = {
     get(k){ try{ return localStorage.getItem(k) || ""; }catch(_){ return ""; } },
     set(k,v){ try{ localStorage.setItem(k,v); }catch(_){} }
   };
   let PROXY = store.get(PKEY);
+  const RELAYKEY = "trenchdesk_relay_url", RELAYTOKKEY = "trenchdesk_relay_token", LIVEMAXKEY = "trenchdesk_live_max";
+  let RELAY_URL = store.get(RELAYKEY);
+  let RELAY_TOKEN = store.get(RELAYTOKKEY);
+  let LIVE_MAX = parseFloat(store.get(LIVEMAXKEY)) || 5;
+  const precisionCache = new Map();
+  async function relay(path, method, body){
+    if (!RELAY_URL || !RELAY_TOKEN) throw new Error("リレー未設定（接続設定でURLとトークンを入力してください）");
+    const r = await fetch(RELAY_URL.replace(/\/$/,"") + path, {
+      method: method || "GET",
+      headers: Object.assign({authorization:"Bearer "+RELAY_TOKEN}, body?{"content-type":"application/json"}:{}),
+      body: body ? JSON.stringify(body) : undefined
+    });
+    const j = await r.json().catch(()=>({}));
+    if (!r.ok || j.error) throw new Error(j.error ? (j.error+(j.detail?": "+(typeof j.detail==="string"?j.detail:JSON.stringify(j.detail)):"")) : ("HTTP "+r.status));
+    return j;
+  }
+  async function getPrecision(symBase){
+    if (precisionCache.has(symBase)) return precisionCache.get(symBase);
+    let prec = 3;
+    try{
+      const j = await relay("/contracts?symbol="+symBase+"USDT");
+      const d = Array.isArray(j.result && j.result.data) ? j.result.data[0] : (j.result && j.result.data);
+      if (d && d.quantityPrecision != null) prec = d.quantityPrecision;
+    }catch(_){}
+    precisionCache.set(symBase, prec);
+    return prec;
+  }
+  function floorTo(v, prec){ const f = Math.pow(10,Math.max(0,prec)); return Number((Math.floor(v*f + 1e-6)/f).toFixed(Math.max(0,prec))); }
   let MANUAL = (Q.get("watch") || store.get(WKEY)).split(",").map(s=>s.trim()).filter(Boolean);
   const AUTO = Q.get("auto") !== "0";
   let PUMP_ONLY = store.get(OKEY) === "1";
-
-  // ---- ペーパー売買のルール（すべて仮定値。実相場での有効性は未検証） ----
-  const FEE = 0.01, SLIP_BASE = 0.015, MIN_LIQ = 8000, MIN_TXNS_5M = 20, MIN_TAKER = 1.4, MAX_POS = 2;
-  const COOLDOWN_MS = 10*60e3, MAX_HOLD_MS = 60*60e3;
-  const GATES = { off:null, std:{risk:60,top10:85,exit:85,label:"標準"}, strict:{risk:45,top10:75,exit:75,label:"厳しめ"} };
 
   const $ = id => document.getElementById(id);
   const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
@@ -343,33 +386,12 @@ svg text{font-family:var(--mono)}
   const mmss = s => (s>=3600 ? pad(Math.floor(s/3600))+":" : "") + pad(Math.floor(s%3600/60)) + ":" + pad(s%60);
   const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-
-  /* ============================ ENGINE ============================ */
-  function fresh(){
-    return { startedAt:Date.now(), running:true, cash:START_USD, positions:[], trades:[], log:[], hist:[{t:Date.now(),v:START_USD}],
-      skips:0, polls:0, events:0, logSeq:0, lastPollAt:0, cfg:{gate:"std",scale:true,size:0.25,sl:-25,tp:50}, cooldown:{} };
-  }
-  let S = fresh();
-  const tokens = new Map();
-  let lastDiscover = 0, lastPollAt = 0, lastError = null, lastErrLogged = "", rpcBusy = false, rpcError = null, busy = false, timer = null;
-
-  function load(){
-    try{
-      const j = JSON.parse(store.get(SKEY) || "null");
-      if (j && j.cfg && Array.isArray(j.positions)){ S = Object.assign(fresh(), j); S.positions.forEach(p => ensure(p.mint)); }
-    }catch(_){}
-  }
-  function persist(){ S.lastPollAt = lastPollAt; store.set(SKEY, JSON.stringify(S)); }
-
-  function addLog(tag,msg,hi){
-    S.log.unshift({id:++S.logSeq,t:Date.now(),tag,msg,hi:!!hi});
-    if (S.log.length > 80) S.log.pop();
-  }
-  function newTok(mint){
-    return { mint, symbol:mint.slice(0,4), name:"", pairAddress:null, dexId:"", url:"", px:0, liq:0, mc:0, vol5:0, buys5:0, sells5:0,
-      pc5:0, pc1:0, createdAt:null, samples:[], peak:0, maxLiq:0, top10:null, top10At:0, updatedAt:0, firstSeen:Date.now(), miss:0, manual:MANUAL.includes(mint) };
-  }
-  function ensure(m){ if(!tokens.has(m)) tokens.set(m,newTok(m)); return tokens.get(m); }
+  const usd = (n,sign) => (sign?(n>=0?"+":"−"):(n<0?"−":"")) + "$" + Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+  const px = x => x>=1000 ? x.toFixed(1) : x>=1 ? x.toFixed(3) : x>=0.01 ? x.toFixed(4) : (x<=0 ? "0" : (x.toPrecision(3).includes("e") ? x.toExponential(2) : x.toPrecision(3)));
+  const pct = (x,d=1) => (x>=0?"+":"−") + Math.abs(x).toFixed(d) + "%";
+  const money = n => n>=1e9 ? "$"+(n/1e9).toFixed(2)+"B" : n>=1e6 ? "$"+(n/1e6).toFixed(2)+"M" : n>=1e3 ? "$"+(n/1e3).toFixed(1)+"K" : "$"+Math.round(n);
+  const msMin = m => m*60e3*WARP;
+  const baseOf = s => s.replace(/-?USDT$/,"");
 
   async function fetchJson(url, opt){
     const target = PROXY ? PROXY + encodeURIComponent(url) : url;
@@ -380,233 +402,637 @@ svg text{font-family:var(--mono)}
       return await r.json();
     }catch(e){
       if (e.name === "AbortError") throw new Error("タイムアウト");
-      if (e.name === "TypeError") throw new Error("通信できません（オフライン、またはブラウザがブロック[CORS]）: "+e.message);
+      if (e.name === "TypeError") throw new Error("通信できません（オフライン、またはブラウザ/取引所側のブロック）: "+e.message);
       throw e;
     } finally { clearTimeout(to); }
   }
 
-  async function discover(){
-    const found = new Set(MANUAL);
-    if (AUTO){
-      for (const ep of ["/token-boosts/latest/v1","/token-profiles/latest/v1"]){
-        try{
-          const arr = await fetchJson(DEX+ep);
-          for (const it of (Array.isArray(arr)?arr:[])) if (it && it.chainId===CHAIN && it.tokenAddress) found.add(it.tokenAddress);
-        }catch(e){ addLog("SCAN","新規トークン取得に失敗: "+e.message); }
+  const MODE_OPTS = [{l:"控えめ",v:"calm"},{l:"標準",v:"normal"},{l:"積極",v:"active"}];
+  const YN = [{l:"OFF",v:false},{l:"ON",v:true}];
+  const GATE_OPTS = [{l:"OFF",v:"off"},{l:"標準",v:"std"},{l:"厳しめ",v:"strict"}];
+  const LADDER_OPTS = [{l:"OFF",v:false},{l:"3分割",v:true}];
+  const BE_OPTS = [{l:"OFF",v:"off"},{l:"TP1後",v:"tp1"},{l:"TP2後",v:"tp2"}];
+  const beLabel = v => v==="tp1" ? "建値撤退: TP1後" : v==="tp2" ? "建値撤退: TP2後" : "建値撤退: OFF";
+
+  /* ============================ SPOT（DEX現物） ============================ */
+  function makeSpot(){
+    const SPOT_MODE = {
+      calm:   {poll:10000, minTaker:1.4,  minTxns:20, maxPos:2, cool:10, hold:60, pcMax:60,  minLiq:8000},
+      normal: {poll:7000,  minTaker:1.25, minTxns:12, maxPos:3, cool:5,  hold:30, pcMax:80,  minLiq:6000},
+      active: {poll:5000,  minTaker:1.1,  minTxns:8,  maxPos:5, cool:2,  hold:20, pcMax:100, minLiq:5000}
+    };
+    const FEE = 0.01, SLIP_BASE = 0.015;
+    const GATES = { off:null, std:{risk:60,top10:85,exit:85,label:"標準"}, strict:{risk:45,top10:75,exit:75,label:"厳しめ"} };
+    const ALLOW = {mode:["calm","normal","active"],gate:["off","std","strict"],size:[0.05,0.1,0.25,0.5],sl:[-10,-15,-25,-40],tp:[15,25,50,100],scale:[true,false],trail:[true,false],ladder:[true,false],be:["off","tp1","tp2"]};
+    const SP = () => SPOT_MODE[S.cfg.mode] || SPOT_MODE.active;
+    const pollMs = () => POLL_OVERRIDE || SP().poll;
+
+    function fresh(){
+      return { startedAt:Date.now(), running:true, cash:START_USD, positions:[], trades:[], log:[], hist:[{t:Date.now(),v:START_USD}],
+        skips:0, polls:0, events:0, logSeq:0, lastPollAt:0, cfg:{mode:"active",gate:"std",scale:true,size:0.1,sl:-15,tp:25,trail:true,ladder:true,be:"tp2"}, cooldown:{} };
+    }
+    let S = fresh();
+    const tokens = new Map();
+    let lastDiscover = 0, lastPollAt = 0, lastError = null, lastErrLogged = "", rpcBusy = false, rpcError = null, busy = false, timer = null, onUpdate = () => {};
+
+    function load(){
+      try{
+        const j = JSON.parse(store.get(SKEY) || "null");
+        if (j && j.cfg && Array.isArray(j.positions)){ const def = fresh().cfg; S = Object.assign(fresh(), j); S.cfg = Object.assign(def, j.cfg); S.positions.forEach(p => { ensure(p.mint); if (p.origQty==null) p.origQty = p.qty; if (p.realized==null) p.realized = 0; if (p.tpHit==null) p.tpHit = 0; if (p.beOn==null) p.beOn = false; }); }
+      }catch(_){}
+    }
+    function persist(){ S.lastPollAt = lastPollAt; store.set(SKEY, JSON.stringify(S)); }
+    function addLog(tag,msg,hi){ S.log.unshift({id:++S.logSeq,t:Date.now(),tag,msg,hi:!!hi}); if (S.log.length > 80) S.log.pop(); }
+    function newTok(mint){
+      return { mint, symbol:mint.slice(0,4), name:"", pairAddress:null, dexId:"", url:"", px:0, liq:0, mc:0, vol5:0, buys5:0, sells5:0,
+        pc5:0, pc1:0, createdAt:null, samples:[], peak:0, maxLiq:0, top10:null, top10At:0, updatedAt:0, firstSeen:Date.now(), miss:0 };
+    }
+    function ensure(m){ if(!tokens.has(m)) tokens.set(m,newTok(m)); return tokens.get(m); }
+
+    async function discover(){
+      const found = new Set(MANUAL);
+      if (AUTO){
+        for (const ep of ["/token-boosts/latest/v1","/token-profiles/latest/v1"]){
+          try{
+            const arr = await fetchJson(DEX+ep);
+            for (const it of (Array.isArray(arr)?arr:[])) if (it && it.chainId===CHAIN && it.tokenAddress) found.add(it.tokenAddress);
+          }catch(e){ addLog("SCAN","新規トークン取得に失敗: "+e.message); }
+        }
+      }
+      let added = 0;
+      for (const m of found) if (!tokens.has(m)){ tokens.set(m,newTok(m)); added++; }
+      if (added) addLog("SCAN","新規 "+added+" 銘柄をウォッチリストに追加");
+      if (tokens.size > MAX_WATCH){
+        const held = new Set(S.positions.map(p=>p.mint));
+        const rem = [...tokens.values()].filter(t=>!held.has(t.mint)&&!MANUAL.includes(t.mint)).sort((a,b)=>a.firstSeen-b.firstSeen);
+        while (tokens.size > MAX_WATCH && rem.length) tokens.delete(rem.shift().mint);
       }
     }
-    let added = 0;
-    for (const m of found) if (!tokens.has(m)){ tokens.set(m,newTok(m)); added++; }
-    if (added) addLog("SCAN","新規 "+added+" 銘柄をウォッチリストに追加");
-    if (tokens.size > MAX_WATCH){
+    function applyPair(t,p){
+      const pxv = parseFloat(p.priceUsd); if (!(pxv>0)) return;
+      const now = Date.now(), tx = p.txns||{}, m5 = tx.m5||{};
+      t.symbol = (p.baseToken&&p.baseToken.symbol)||t.symbol; t.name = (p.baseToken&&p.baseToken.name)||"";
+      t.pairAddress = p.pairAddress; t.dexId = p.dexId; t.url = p.url||"";
+      t.px = pxv; t.liq = (p.liquidity&&p.liquidity.usd)||0; t.mc = p.marketCap||p.fdv||0;
+      t.buys5 = m5.buys||0; t.sells5 = m5.sells||0; t.vol5 = (p.volume&&p.volume.m5)||0;
+      t.pc5 = (p.priceChange&&p.priceChange.m5)||0; t.pc1 = (p.priceChange&&p.priceChange.h1)||0;
+      t.createdAt = p.pairCreatedAt||null; t.updatedAt = now; t.miss = 0;
+      t.samples.push({t:now,px:pxv,liq:t.liq}); if (t.samples.length>60) t.samples.shift();
+      t.peak = Math.max(...t.samples.map(s=>s.px)); t.maxLiq = Math.max(...t.samples.map(s=>s.liq));
+    }
+    async function pollMarket(){
+      const mints = [...tokens.keys()];
+      for (let i=0;i<mints.length;i+=30){
+        const chunk = mints.slice(i,i+30);
+        const arr = await fetchJson(DEX+"/tokens/v1/"+CHAIN+"/"+chunk.join(","));
+        const best = new Map();
+        for (const p of (Array.isArray(arr)?arr:[])){
+          const m = p.baseToken && p.baseToken.address;
+          if (!m || !tokens.has(m)) continue;
+          if (PUMP_ONLY && !["pumpfun","pumpswap"].includes(String(p.dexId).toLowerCase())) continue;
+          const liq = (p.liquidity&&p.liquidity.usd)||0, cur = best.get(m);
+          if (!cur || liq > ((cur.liquidity&&cur.liquidity.usd)||0)) best.set(m,p);
+        }
+        for (const m of chunk){ const t = tokens.get(m), p = best.get(m); if (p) applyPair(t,p); else t.miss++; }
+      }
       const held = new Set(S.positions.map(p=>p.mint));
-      const rem = [...tokens.values()].filter(t=>!held.has(t.mint)&&!MANUAL.includes(t.mint)).sort((a,b)=>a.firstSeen-b.firstSeen);
-      while (tokens.size > MAX_WATCH && rem.length) tokens.delete(rem.shift().mint);
+      for (const t of [...tokens.values()]) if (t.miss>=5 && !held.has(t.mint) && !MANUAL.includes(t.mint)) tokens.delete(t.mint);
     }
-  }
+    async function rpc(method, params){
+      const r = await fetchJson(RPC,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method,params})});
+      if (r.error) throw new Error(r.error.message||"rpc error");
+      return r.result;
+    }
+    async function fetchTop10(t){
+      const [sup,big] = await Promise.all([rpc("getTokenSupply",[t.mint]), rpc("getTokenLargestAccounts",[t.mint])]);
+      const supply = parseFloat(sup.value.uiAmountString||sup.value.uiAmount);
+      const accs = (big.value||[]).slice(0,20);
+      const own = await rpc("getMultipleAccounts",[accs.map(a=>a.address),{encoding:"jsonParsed"}]);
+      const list = [];
+      accs.forEach((a,i)=>{
+        const v = own.value && own.value[i], info = v && v.data && v.data.parsed && v.data.parsed.info;
+        if (info && info.owner && t.pairAddress && info.owner === t.pairAddress) return;
+        list.push(parseFloat(a.uiAmountString||a.uiAmount));
+      });
+      t.top10 = supply>0 ? Math.round(sum(list.slice(0,10))/supply*1000)/10 : null; t.top10At = Date.now();
+    }
+    async function top10Worker(){
+      if (rpcBusy) return; rpcBusy = true;
+      try{
+        const held = new Set(S.positions.map(p=>p.mint));
+        const need = [...tokens.values()].filter(t=>t.px>0 && (held.has(t.mint)||evalEntry(t).basic) && Date.now()-t.top10At > (held.has(t.mint)?60e3:180e3))
+          .sort((a,b)=>(held.has(b.mint)?1:0)-(held.has(a.mint)?1:0)).slice(0,2);
+        for (const t of need){ try{ await fetchTop10(t); rpcError = null; }catch(e){ t.top10At = Date.now(); rpcError = e.message; } }
+      } finally { rpcBusy = false; }
+    }
 
-  function applyPair(t,p){
-    const px = parseFloat(p.priceUsd); if (!(px>0)) return;
-    const now = Date.now(), tx = p.txns||{}, m5 = tx.m5||{};
-    t.symbol = (p.baseToken&&p.baseToken.symbol)||t.symbol; t.name = (p.baseToken&&p.baseToken.name)||"";
-    t.pairAddress = p.pairAddress; t.dexId = p.dexId; t.url = p.url||"";
-    t.px = px; t.liq = (p.liquidity&&p.liquidity.usd)||0; t.mc = p.marketCap||p.fdv||0;
-    t.buys5 = m5.buys||0; t.sells5 = m5.sells||0; t.vol5 = (p.volume&&p.volume.m5)||0;
-    t.pc5 = (p.priceChange&&p.priceChange.m5)||0; t.pc1 = (p.priceChange&&p.priceChange.h1)||0;
-    t.createdAt = p.pairCreatedAt||null; t.updatedAt = now; t.miss = 0;
-    t.samples.push({t:now,px,liq:t.liq}); if (t.samples.length>60) t.samples.shift();
-    t.peak = Math.max(...t.samples.map(s=>s.px)); t.maxLiq = Math.max(...t.samples.map(s=>s.liq));
-  }
+    function metrics(t){
+      const tot = t.buys5+t.sells5, sellShare = tot ? t.sells5/tot : 0.5, taker = t.buys5/Math.max(t.sells5,1);
+      const vol = clamp(Math.abs(t.pc5)*1.2 + Math.abs(t.pc1)*0.25, 0, 100);
+      const dd = t.peak>0 ? 1 - t.px/t.peak : 0, liqDrop = t.maxLiq>0 ? clamp(1 - t.liq/t.maxLiq,0,1) : 0;
+      const top = t.top10==null ? 10 : Math.max(0,t.top10-40)*0.45;
+      const down = clamp(sellShare*50 + top + dd*140 + Math.max(0,-t.pc5)*0.8 + liqDrop*100, 0, 100);
+      return { vol:Math.round(vol), down:Math.round(down), risk:Math.round((vol+down)/2), taker, buyShare:1-sellShare, dd, liqDrop, tot };
+    }
+    const isFresh = t => t.px>0 && Date.now()-t.updatedAt < pollMs()*4;
 
-  async function pollMarket(){
-    const mints = [...tokens.keys()];
-    for (let i=0;i<mints.length;i+=30){
-      const chunk = mints.slice(i,i+30);
-      const arr = await fetchJson(DEX+"/tokens/v1/"+CHAIN+"/"+chunk.join(","));
-      const best = new Map();
-      for (const p of (Array.isArray(arr)?arr:[])){
-        const m = p.baseToken && p.baseToken.address;            // quote側ペアは別トークンの価格なので除外
-        if (!m || !tokens.has(m)) continue;
-        if (PUMP_ONLY && !["pumpfun","pumpswap"].includes(String(p.dexId).toLowerCase())) continue;
-        const liq = (p.liquidity&&p.liquidity.usd)||0, cur = best.get(m);
-        if (!cur || liq > ((cur.liquidity&&cur.liquidity.usd)||0)) best.set(m,p);
+    function evalEntry(t){
+      const m = metrics(t), P = SP(), r = {basic:false, why:null, gateWhy:null, score:0, m};
+      if (!isFresh(t)){ r.why = "データ未更新"; return r; }
+      if (t.liq < P.minLiq){ r.why = "流動性 $"+Math.round(t.liq).toLocaleString("en-US")+" < $"+P.minLiq; return r; }
+      if (m.tot < P.minTxns){ r.why = "5分の取引数 "+m.tot+" < "+P.minTxns; return r; }
+      if (m.taker < P.minTaker){ r.why = "買い圧 "+m.taker.toFixed(2)+" < "+P.minTaker; return r; }
+      if (!(t.pc5>0 && t.pc5<=P.pcMax)){ r.why = "5分変化 "+t.pc5.toFixed(1)+"% が範囲外(0〜"+P.pcMax+"%)"; return r; }
+      r.basic = true; r.score = m.taker*Math.log10(1+t.vol5);
+      const g = GATES[S.cfg.gate];
+      if (g){
+        if (m.risk >= g.risk) r.gateWhy = "総合リスク "+m.risk+" ≥ 上限 "+g.risk;
+        else if (t.top10!=null && t.top10 >= g.top10) r.gateWhy = "Top10集中度 "+t.top10+"% ≥ 上限 "+g.top10+"%";
       }
-      for (const m of chunk){ const t = tokens.get(m), p = best.get(m); if (p) applyPair(t,p); else t.miss++; }
+      return r;
     }
-    const held = new Set(S.positions.map(p=>p.mint));
-    for (const t of [...tokens.values()]) if (t.miss>=5 && !held.has(t.mint) && !MANUAL.includes(t.mint)) tokens.delete(t.mint);
-  }
-
-  async function rpc(method, params){
-    const r = await fetchJson(RPC,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method,params})});
-    if (r.error) throw new Error(r.error.message||"rpc error");
-    return r.result;
-  }
-  async function fetchTop10(t){
-    const [sup,big] = await Promise.all([rpc("getTokenSupply",[t.mint]), rpc("getTokenLargestAccounts",[t.mint])]);
-    const supply = parseFloat(sup.value.uiAmountString||sup.value.uiAmount);
-    const accs = (big.value||[]).slice(0,20);
-    const own = await rpc("getMultipleAccounts",[accs.map(a=>a.address),{encoding:"jsonParsed"}]);
-    const list = [];
-    accs.forEach((a,i)=>{
-      const v = own.value && own.value[i], info = v && v.data && v.data.parsed && v.data.parsed.info;
-      if (info && info.owner && t.pairAddress && info.owner === t.pairAddress) return;   // プール保有分は除外（推定）
-      list.push(parseFloat(a.uiAmountString||a.uiAmount));
-    });
-    t.top10 = supply>0 ? Math.round(sum(list.slice(0,10))/supply*1000)/10 : null; t.top10At = Date.now();
-  }
-  async function top10Worker(){
-    if (rpcBusy) return; rpcBusy = true;
-    try{
-      const held = new Set(S.positions.map(p=>p.mint));
-      const need = [...tokens.values()].filter(t=>t.px>0 && (held.has(t.mint)||evalEntry(t).basic) && Date.now()-t.top10At > (held.has(t.mint)?60e3:180e3))
-        .sort((a,b)=>(held.has(b.mint)?1:0)-(held.has(a.mint)?1:0)).slice(0,2);
-      for (const t of need){ try{ await fetchTop10(t); rpcError = null; }catch(e){ t.top10At = Date.now(); rpcError = e.message; } }
-    } finally { rpcBusy = false; }
-  }
-
-  function metrics(t){
-    const tot = t.buys5+t.sells5, sellShare = tot ? t.sells5/tot : 0.5, taker = t.buys5/Math.max(t.sells5,1);
-    const vol = clamp(Math.abs(t.pc5)*1.2 + Math.abs(t.pc1)*0.25, 0, 100);
-    const dd = t.peak>0 ? 1 - t.px/t.peak : 0, liqDrop = t.maxLiq>0 ? clamp(1 - t.liq/t.maxLiq,0,1) : 0;
-    const top = t.top10==null ? 10 : Math.max(0,t.top10-40)*0.45;
-    const down = clamp(sellShare*50 + top + dd*140 + Math.max(0,-t.pc5)*0.8 + liqDrop*100, 0, 100);
-    return { vol:Math.round(vol), down:Math.round(down), risk:Math.round((vol+down)/2), taker, buyShare:1-sellShare, dd, liqDrop, tot };
-  }
-  const isFresh = t => t.px>0 && Date.now()-t.updatedAt < POLL_MS*4;
-
-  function evalEntry(t){
-    const m = metrics(t), r = {basic:false, why:null, gateWhy:null, score:0, m};
-    if (!isFresh(t)){ r.why = "データ未更新"; return r; }
-    if (t.liq < MIN_LIQ){ r.why = "流動性 $"+Math.round(t.liq).toLocaleString("en-US")+" < $"+MIN_LIQ; return r; }
-    if (m.tot < MIN_TXNS_5M){ r.why = "5分の取引数 "+m.tot+" < "+MIN_TXNS_5M; return r; }
-    if (m.taker < MIN_TAKER){ r.why = "買い圧 "+m.taker.toFixed(2)+" < "+MIN_TAKER; return r; }
-    if (!(t.pc5>0 && t.pc5<=60)){ r.why = "5分変化 "+t.pc5.toFixed(1)+"% が範囲外(0〜60%)"; return r; }
-    r.basic = true; r.score = m.taker*Math.log10(1+t.vol5);
-    const g = GATES[S.cfg.gate];
-    if (g){
-      if (m.risk >= g.risk) r.gateWhy = "総合リスク "+m.risk+" ≥ 上限 "+g.risk;
-      else if (t.top10!=null && t.top10 >= g.top10) r.gateWhy = "Top10集中度 "+t.top10+"% ≥ 上限 "+g.top10+"%";
+    function equity(){ let v = S.cash; for (const p of S.positions){ const t = tokens.get(p.mint); v += p.qty*((t&&t.px)||p.entryPx); } return v; }
+    function openPos(t,e){
+      let usdv = Math.min(S.cash, equity()*S.cfg.size);
+      if (S.cfg.scale) usdv *= clamp(1 - e.m.risk/120, 0.3, 1);
+      if (usdv < 5) return false;
+      const slip = SLIP_BASE + usdv/Math.max(t.liq,1), fill = t.px*(1+slip);
+      S.cash -= usdv;
+      const q0 = usdv*(1-FEE)/fill;
+      S.positions.push({mint:t.mint,symbol:t.symbol,qty:q0,origQty:q0,costUsd:usdv,entryPx:fill,ts:Date.now(),peakPx:t.px,realized:0,tpHit:0,beOn:false});
+      S.events++;
+      addLog("FOLLOW",t.symbol+" を $"+usdv.toFixed(2)+" 購入（買い圧 "+e.m.taker.toFixed(2)+" / リスク "+e.m.risk+"）",true);
+      return true;
     }
-    return r;
-  }
-
-  function equity(){ let v = S.cash; for (const p of S.positions){ const t = tokens.get(p.mint); v += p.qty*((t&&t.px)||p.entryPx); } return v; }
-
-  function openPos(t,e){
-    let usd = Math.min(S.cash, equity()*S.cfg.size);
-    if (S.cfg.scale) usd *= clamp(1 - e.m.risk/120, 0.3, 1);
-    if (usd < 5) return false;
-    const slip = SLIP_BASE + usd/Math.max(t.liq,1), fill = t.px*(1+slip);
-    S.cash -= usd;
-    S.positions.push({mint:t.mint,symbol:t.symbol,qty:usd*(1-FEE)/fill,costUsd:usd,entryPx:fill,ts:Date.now()});
-    S.events++;
-    addLog("FOLLOW",t.symbol+" を $"+usd.toFixed(2)+" 購入（買い圧 "+e.m.taker.toFixed(2)+" / リスク "+e.m.risk+"）",true);
-    return true;
-  }
-  function closePos(p,reason){
-    const t = tokens.get(p.mint), px = (t&&t.px)||p.entryPx, val = p.qty*px, slip = SLIP_BASE + val/Math.max((t&&t.liq)||1,1);
-    const proceeds = val*(1-clamp(slip,0,0.9))*(1-FEE);
-    S.cash += proceeds; S.positions = S.positions.filter(x=>x!==p);
-    const pnl = proceeds - p.costUsd;
-    S.trades.unshift({symbol:p.symbol,mint:p.mint,entryTs:p.ts,exitTs:Date.now(),pnlUsd:pnl,pct:pnl/p.costUsd*100,reason});
-    if (S.trades.length>100) S.trades.pop();
-    S.cooldown[p.mint] = Date.now(); S.events++;
-    addLog("FOLLOW",p.symbol+" 売却（"+reason+"） "+(pnl>=0?"+":"−")+"$"+Math.abs(pnl).toFixed(2),true);
-  }
-  function agentStep(){
-    const now = Date.now(), g = GATES[S.cfg.gate];
-    for (const p of [...S.positions]){
-      const t = tokens.get(p.mint); if (!t || !isFresh(t)) continue;
-      const ret = p.qty*t.px/p.costUsd - 1, m = metrics(t);
-      if (ret <= S.cfg.sl/100) closePos(p,"損切り");
-      else if (ret >= S.cfg.tp/100) closePos(p,"利確");
-      else if (g && m.down >= g.exit) closePos(p,"リスク急騰");
-      else if (m.liqDrop >= 0.5) closePos(p,"流動性急減");
-      else if (now - p.ts > MAX_HOLD_MS) closePos(p,"時間切れ");
+    function sellQty(p,q,pxv,t){
+      const val = q*pxv, slip = SLIP_BASE + val/Math.max((t&&t.liq)||1,1);
+      return val*(1-clamp(slip,0,0.9))*(1-FEE);
     }
-    if (!S.running || S.positions.length >= MAX_POS) return;
-    const held = new Set(S.positions.map(p=>p.mint)), cands = [];
-    for (const t of tokens.values()){
-      if (held.has(t.mint) || (S.cooldown[t.mint] && now - S.cooldown[t.mint] < COOLDOWN_MS)) continue;
-      const e = evalEntry(t); if (!e.basic) continue;
-      if (e.gateWhy){
-        if (!t.skipAt || now - t.skipAt > COOLDOWN_MS){ t.skipAt = now; S.skips++; addLog("RISK",t.symbol+" 見送り: "+e.gateWhy,true); }
-        continue;
+    function partial(p,frac,label){
+      const t = tokens.get(p.mint), pxv = (t&&t.px)||p.entryPx, q = Math.min(p.qty*0.999, p.origQty*frac);
+      if (!(q>0)) return;
+      const proceeds = sellQty(p,q,pxv,t);
+      S.cash += proceeds; p.qty -= q; p.realized = (p.realized||0) + proceeds; S.events++;
+      addLog("FOLLOW",p.symbol+" "+label+"到達：約"+Math.round(frac*100)+"%を利確 +$"+proceeds.toFixed(2),true);
+    }
+    function closePos(p,reason){
+      const t = tokens.get(p.mint), pxv = (t&&t.px)||p.entryPx;
+      const proceeds = sellQty(p,p.qty,pxv,t);
+      S.cash += proceeds; S.positions = S.positions.filter(x=>x!==p);
+      const pnl = (p.realized||0) + proceeds - p.costUsd;
+      const why = (p.tpHit>0 && !reason.startsWith("利確")) ? reason+"（TP"+p.tpHit+"済）" : reason;
+      S.trades.unshift({symbol:p.symbol,mint:p.mint,side:"spot",entryTs:p.ts,exitTs:Date.now(),pnlUsd:pnl,pct:pnl/p.costUsd*100,reason:why});
+      if (S.trades.length>100) S.trades.pop();
+      S.cooldown[p.mint] = Date.now(); S.events++;
+      addLog("FOLLOW",p.symbol+" 売却（"+why+"） "+(pnl>=0?"+":"−")+"$"+Math.abs(pnl).toFixed(2),true);
+    }
+    function agentStep(){
+      const now = Date.now(), g = GATES[S.cfg.gate], P = SP(), cf = S.cfg, MAXTP = cf.tp/100;
+      for (const p of [...S.positions]){
+        const t = tokens.get(p.mint); if (!t || !isFresh(t)) continue;
+        p.peakPx = Math.max(p.peakPx||p.entryPx, t.px);
+        const unitCost = p.costUsd/p.origQty, ret = t.px/unitCost - 1, m = metrics(t), bestRet = p.peakPx/unitCost - 1;
+        if (cf.ladder){
+          if (p.tpHit<1 && ret >= MAXTP/3){ partial(p,1/3,"TP1"); p.tpHit = 1; }
+          if (p.tpHit<2 && ret >= MAXTP*2/3){ partial(p,1/3,"TP2"); p.tpHit = 2; }
+        }
+        if ((cf.be==="tp1" && p.tpHit>=1) || (cf.be==="tp2" && p.tpHit>=2)) p.beOn = true;
+        const trailOn = cf.trail && (!cf.ladder || p.tpHit>=1);
+        if (ret >= MAXTP) closePos(p,"利確（"+(cf.ladder?"TP3/MAX":"MAX")+"）");
+        else if (p.beOn && t.px <= unitCost) closePos(p,"建値撤退");
+        else if (!p.beOn && ret <= cf.sl/100) closePos(p,"損切り");
+        else if (trailOn && bestRet >= Math.max(0.08, MAXTP*0.4) && (t.px/p.peakPx-1) <= -Math.max(0.05, MAXTP*0.25)) closePos(p,"トレーリング");
+        else if (g && m.down >= g.exit) closePos(p,"リスク急騰");
+        else if (m.liqDrop >= 0.5) closePos(p,"流動性急減");
+        else if (now - p.ts > msMin(P.hold)) closePos(p,"時間切れ");
       }
-      cands.push({t,e});
+      if (!S.running || S.positions.length >= P.maxPos) return;
+      const held = new Set(S.positions.map(p=>p.mint)), cands = [];
+      for (const t of tokens.values()){
+        if (held.has(t.mint) || (S.cooldown[t.mint] && now - S.cooldown[t.mint] < msMin(P.cool))) continue;
+        const e = evalEntry(t); if (!e.basic) continue;
+        if (e.gateWhy){
+          if (!t.skipAt || now - t.skipAt > msMin(10)){ t.skipAt = now; S.skips++; addLog("RISK",t.symbol+" 見送り: "+e.gateWhy,true); }
+          continue;
+        }
+        cands.push({t,e});
+      }
+      cands.sort((a,b)=>b.e.score-a.e.score);
+      for (const c of cands){ if (S.positions.length >= P.maxPos) break; openPos(c.t,c.e); }
     }
-    cands.sort((a,b)=>b.e.score-a.e.score);
-    for (const c of cands){ if (S.positions.length >= MAX_POS) break; openPos(c.t,c.e); }
+    let seq = 0;
+    async function loop(){
+      if (busy) return; busy = true; clearTimeout(timer);
+      try{
+        if (Date.now()-lastDiscover > DISCOVER_MS){ await discover(); lastDiscover = Date.now(); }
+        if (tokens.size) await pollMarket();
+        S.polls++; lastPollAt = Date.now(); lastError = null; lastErrLogged = "";
+        agentStep();
+        S.hist.push({t:Date.now(),v:equity()}); if (S.hist.length>600) S.hist.shift();
+        if (++seq % 12 === 0){ const n = [...tokens.values()].filter(x=>x.px>0).length; if (n) addLog("WATCH",n+" 銘柄を監視中（更新 #"+S.polls+"）"); }
+        persist(); top10Worker();
+      }catch(e){
+        lastError = e.message;
+        if (lastErrLogged !== e.message){ lastErrLogged = e.message; addLog("SYS","データ取得エラー: "+e.message,true); }
+      }
+      busy = false; onUpdate();
+      timer = setTimeout(loop, pollMs());
+    }
+
+    function publicState(){
+      const eq = equity(), now = Date.now(), held = new Set(S.positions.map(p=>p.mint));
+      const watch = [...tokens.values()].filter(t=>t.px>0).map(t=>{
+        const e = evalEntry(t), m = e.m, status = held.has(t.mint) ? "held" : e.basic ? (e.gateWhy?"blocked":"ready") : "wait";
+        return { mint:t.mint, symbol:t.symbol, dex:t.dexId, url:t.url, px:t.px, pc5:t.pc5, pc1:t.pc1, taker:m.taker, buys5:t.buys5, sells5:t.sells5,
+          liq:t.liq, mc:t.mc, vol5:t.vol5, top10:t.top10, vol:m.vol, down:m.down, risk:m.risk, buyShare:m.buyShare,
+          ageMin:t.createdAt?Math.round((now-t.createdAt)/60000):null, status, why:e.gateWhy||e.why, score:e.score, stale:!isFresh(t),
+          vit:[["価格","$"+px(t.px)],["5分",pct(t.pc5)],["1時間",pct(t.pc1)],["流動性",money(t.liq)],["時価総額",t.mc?money(t.mc):"–"],["TOP10",t.top10==null?"–":t.top10+"%"],
+            ["5分出来高",money(t.vol5)],["経過",t.createdAt?(Math.round((now-t.createdAt)/60000)>=120?Math.round((now-t.createdAt)/3600000)+"時間":Math.round((now-t.createdAt)/60000)+"分"):"–"],["DEX",t.dexId||"–"]] };
+      }).sort((a,b)=>(b.status==="held")-(a.status==="held")||(b.status==="ready")-(a.status==="ready")||b.score-a.score||b.vol5-a.vol5);
+      const tp = S.cfg.tp, sl = S.cfg.sl, g = GATES[S.cfg.gate];
+      return { kind:"spot", title:"DEX現物（ペーパー）", colTaker:"TAKER", now, running:S.running, startUsd:START_USD, equity:eq, pnlUsd:eq-START_USD, cash:S.cash, cfg:S.cfg, gates:GATES,
+        labels:{vol:"危険度・ボラ（激しさ）",down:"下落リスク（下方向）"},
+        chips:[S.cfg.ladder ? "SL "+sl+"% ／ TP "+(tp/3).toFixed(1)+"/"+(tp*2/3).toFixed(1)+"/"+tp+"%" : "SL "+sl+"% ／ 利確 +"+tp+"%", beLabel(S.cfg.be),"モード: "+(MODE_OPTS.find(o=>o.v===S.cfg.mode)||{l:""}).l+(S.cfg.trail?" ・ トレーリング":""),"ゲート: "+(g?g.label:"OFF")].concat(rpcError?["Top10取得不可（RPC）"]:[]),
+        stats:{trades:S.trades.length,wins:S.trades.filter(x=>x.pnlUsd>0).length,skips:S.skips,polls:S.polls,watching:watch.length,events:S.events},
+        health:{lastPollAt,lastError,pollMs:pollMs(),source:DEX.replace(/^https?:\/\//,"")+(PROXY?"（プロキシ経由）":"")},
+        positions:S.positions.map(p=>{ const t = tokens.get(p.mint), pxv = (t&&t.px)||p.entryPx, val = p.qty*pxv, uc = p.costUsd/p.origQty, lad = S.cfg.ladder;
+          const rows = [];
+          if (lad){ [1,2].forEach(k=>rows.push({k:"tp"+(p.tpHit>=k?" hit":""),label:"TP"+k+" +"+(tp*k/3).toFixed(1)+"%",px:uc*(1+tp*k/300),val:p.tpHit>=k?"済":"+"+(tp*k/3).toFixed(1)+"%"})); }
+          rows.push({k:"tp",label:(lad?"TP3(MAX) +":"利確 +")+tp+"%",px:uc*(1+tp/100),val:"+"+tp+"%"});
+          rows.push({k:"tr",label:"建値",px:p.entryPx,val:usd(p.costUsd)});
+          rows.push(p.beOn ? {k:"sl",label:"建値撤退",px:uc,val:"±0"} : {k:"sl",label:"損切り "+sl+"%",px:uc*(1+sl/100),val:"−"+Math.abs(sl)+"%"});
+          return { mint:p.mint, symbol:p.symbol, side:"spot", lev:1, qty:p.qty, costUsd:p.costUsd, valueUsd:val, retPct:((p.realized||0)+val)/p.costUsd*100-100, entryPx:p.entryPx, px:pxv, ts:p.ts, rows, tpHit:p.tpHit, beOn:p.beOn }; }),
+        watch, trades:S.trades.slice(0,20), log:S.log.slice(0,60), hist:S.hist.slice(-300).map(h=>h.v), startedAt:S.startedAt,
+        ctl:[
+          {key:"mode",label:"アクティブ度",opts:MODE_OPTS,val:S.cfg.mode},
+          {key:"size",label:"1回の建玉（評価額比）",opts:ALLOW.size.map(v=>({l:Math.round(v*100)+"%",v})),val:S.cfg.size},
+          {key:"sl",label:"損切り",opts:ALLOW.sl.map(v=>({l:"−"+Math.abs(v)+"%",v})),val:S.cfg.sl},
+          {key:"tp",label:"MAX利確（TP3）",opts:ALLOW.tp.map(v=>({l:"+"+v+"%",v})),val:S.cfg.tp},
+          {key:"ladder",label:"利確の分割（TP1/2/3）",opts:LADDER_OPTS,val:S.cfg.ladder},
+          {key:"be",label:"建値撤退（BE）",opts:BE_OPTS,val:S.cfg.be},
+          {key:"trail",label:"トレーリング",opts:YN,val:S.cfg.trail},
+          {key:"gate",label:"リスクゲート",opts:GATE_OPTS,val:S.cfg.gate},
+          {key:"scale",label:"リスク連動サイズ",opts:YN,val:S.cfg.scale}
+        ],
+        foot:"エントリー条件（積極/標準/控えめで変わります）: 流動性・5分の取引数・買い圧(TAKER)・5分変化。利確は MAX利確を3等分（TP1=1/3、TP2=2/3、TP3=MAX）し、TP1・TP2で約1/3ずつ決済。「建値撤退」をTP2後（またはTP1後）にすると、そこから損切りが建値（手数料込み）に切り上がります。約定は手数料1%＋スリッページ(1.5%＋注文額/流動性)で計算。リスク指標は独自の目安で、Top10集中度はプール保有分を除いた推定値です。この戦略に優位性があるとは限りません。" };
+    }
+    function handleCmd(b){
+      const c = b.cmd;
+      if (c==="pause"){ S.running = false; addLog("SYS","新規エントリーを停止"); }
+      else if (c==="resume"){ S.running = true; addLog("SYS","新規エントリーを再開"); }
+      else if (c==="close"){ for (const p of [...S.positions]) closePos(p,"手動クローズ"); }
+      else if (c==="reset"){ const cfg = S.cfg; S = fresh(); S.cfg = cfg; addLog("SYS","セッションをリセット（ペーパー）"); }
+      else if (c==="cfg" && b.cfg){ for (const k of Object.keys(b.cfg)) if (ALLOW[k] && ALLOW[k].includes(b.cfg[k])) S.cfg[k] = b.cfg[k]; }
+      persist();
+    }
+    return { kind:"spot", publicState, handleCmd,
+      start(cb){ onUpdate = cb; load(); MANUAL.forEach(ensure); const gap = Date.now() - (S.lastPollAt || Date.now());
+        if (S.positions.length && gap > 60e3) addLog("SYS","前回の終了から約"+Math.max(1,Math.round(gap/60000))+"分経過。保有中のポジションはこの間の損切り・利確が判定されていません。",true);
+        loop(); },
+      kick(){ const gap = Date.now() - (lastPollAt || S.lastPollAt || Date.now()); if (gap > pollMs()*3 && S.positions.length) addLog("SYS","約"+Math.max(1,Math.round(gap/60000))+"分間、画面が非表示で更新が止まっていました。この間の損切り・利確は判定されていません。",true); loop(); },
+      applyConn(){ MANUAL.forEach(ensure); lastDiscover = 0; loop(); },
+      test:{ fetchJson, rpc } };
   }
 
-  let seq = 0;
-  async function loop(){
-    if (busy) return; busy = true; clearTimeout(timer);
-    try{
-      if (Date.now()-lastDiscover > DISCOVER_MS){ await discover(); lastDiscover = Date.now(); }
-      if (tokens.size) await pollMarket();
-      S.polls++; lastPollAt = Date.now(); lastError = null; lastErrLogged = "";
-      agentStep();
-      S.hist.push({t:Date.now(),v:equity()}); if (S.hist.length>600) S.hist.shift();
-      if (++seq % 6 === 0){ const n = [...tokens.values()].filter(x=>x.px>0).length; if (n) addLog("WATCH",n+" 銘柄を監視中（更新 #"+S.polls+"）"); }
-      persist(); top10Worker();
-    }catch(e){
-      lastError = e.message;
-      if (lastErrLogged !== e.message){ lastErrLogged = e.message; addLog("SYS","データ取得エラー: "+e.message,true); }
-    }
-    busy = false; refresh();
-    timer = setTimeout(loop, POLL_MS);
-  }
+  /* ============================ PERP（先物 ロング/ショート） ============================ */
+  function makePerp(){
+    const PERP_MODE = {
+      calm:   {poll:15000, r1:0.30, r5:1.0, vrel:2.0, maxPos:2, cool:10, hold:60, minTurn:3e6},
+      normal: {poll:10000, r1:0.20, r5:0.7, vrel:1.6, maxPos:3, cool:5,  hold:30, minTurn:1.5e6},
+      active: {poll:6000,  r1:0.10, r5:0.4, vrel:1.3, maxPos:5, cool:2,  hold:15, minTurn:8e5}
+    };
+    const MMR = 0.005, MAX_SPREAD = 0.0015;
+    const FEEF = () => src === "bingx" ? 0.0005 : 0.00055;
+    const GATES = { off:null, std:{risk:65,label:"標準"}, strict:{risk:50,label:"厳しめ"} };
+    const ALLOW = {mode:["calm","normal","active"],dir:["both","long","short"],lev:[1,2,3,5,10],size:[0.05,0.1,0.2],sl:[0.8,1.5,3,5],tp:[1,2,4,8],trail:[true,false],gate:["off","std","strict"],scale:[true,false],ladder:[true,false],be:["off","tp1","tp2"],live:[true,false]};
+    const PM = () => PERP_MODE[S.cfg.mode] || PERP_MODE.active;
+    const pollMs = () => POLL_OVERRIDE || PM().poll;
 
-  function publicState(){
-    const eq = equity(), now = Date.now(), held = new Set(S.positions.map(p=>p.mint));
-    const watch = [...tokens.values()].filter(t=>t.px>0).map(t=>{
-      const e = evalEntry(t), m = e.m, status = held.has(t.mint) ? "held" : e.basic ? (e.gateWhy?"blocked":"ready") : "wait";
-      return { mint:t.mint, symbol:t.symbol, dex:t.dexId, url:t.url, px:t.px, pc5:t.pc5, pc1:t.pc1, taker:m.taker, buys5:t.buys5, sells5:t.sells5,
-        liq:t.liq, mc:t.mc, vol5:t.vol5, top10:t.top10, vol:m.vol, down:m.down, risk:m.risk, buyShare:m.buyShare,
-        ageMin:t.createdAt?Math.round((now-t.createdAt)/60000):null, status, why:e.gateWhy||e.why, score:e.score, stale:!isFresh(t) };
-    }).sort((a,b)=>(b.status==="held")-(a.status==="held")||(b.status==="ready")-(a.status==="ready")||b.score-a.score||b.vol5-a.vol5);
-    const tp = S.cfg.tp, sl = S.cfg.sl;
-    return { now, running:S.running, startUsd:START_USD, equity:eq, pnlUsd:eq-START_USD, cash:S.cash, cfg:S.cfg, gates:GATES,
-      stats:{trades:S.trades.length,wins:S.trades.filter(x=>x.pnlUsd>0).length,skips:S.skips,polls:S.polls,watching:watch.length,events:S.events},
-      health:{lastPollAt,lastError,pollMs:POLL_MS,rpcError,source:DEX.replace(/^https?:\/\//,"")+(PROXY?"（プロキシ経由）":"")},
-      positions:S.positions.map(p=>{ const t = tokens.get(p.mint), px = (t&&t.px)||p.entryPx, val = p.qty*px;
-        return { mint:p.mint, symbol:p.symbol, qty:p.qty, costUsd:p.costUsd, valueUsd:val, retPct:(val/p.costUsd-1)*100, entryPx:p.entryPx, px, ts:p.ts,
-          tpPx:p.costUsd*(1+tp/100)/p.qty, slPx:p.costUsd*(1+sl/100)/p.qty }; }),
-      watch, trades:S.trades.slice(0,20), log:S.log.slice(0,60), hist:S.hist.slice(-300).map(h=>h.v), startedAt:S.startedAt };
-  }
-
-  function handleCmd(b){
-    const c = b.cmd;
-    if (c==="pause"){ S.running = false; addLog("SYS","新規エントリーを停止"); }
-    else if (c==="resume"){ S.running = true; addLog("SYS","新規エントリーを再開"); }
-    else if (c==="close"){ for (const p of [...S.positions]) closePos(p,"手動クローズ"); }
-    else if (c==="reset"){ const cfg = S.cfg; S = fresh(); S.cfg = cfg; addLog("SYS","セッションをリセット（ペーパー）"); }
-    else if (c==="cfg" && b.cfg){
-      const ok = {gate:["off","std","strict"],size:[0.1,0.25,0.5],sl:[-15,-25,-40],tp:[25,50,100],scale:[true,false]};
-      for (const k of Object.keys(b.cfg)) if (ok[k] && ok[k].includes(b.cfg[k])) S.cfg[k] = b.cfg[k];
+    function fresh(){
+      return { startedAt:Date.now(), running:true, cash:START_USD, positions:[], trades:[], log:[], hist:[{t:Date.now(),v:START_USD}],
+        skips:0, polls:0, events:0, logSeq:0, lastPollAt:0, cooldown:{}, cfg:{mode:"active",dir:"both",lev:3,size:0.1,sl:1.5,tp:3,trail:true,gate:"std",scale:true,ladder:true,be:"tp2",live:false} };
     }
-    persist();
+    let S = fresh();
+    const tokens = new Map();
+    const bootTs = Date.now();
+    let src = store.get(SRCKEY) === "bybit" ? "bybit" : "bingx";
+    let lastPollAt = 0, lastError = null, lastErrLogged = "", busy = false, timer = null, onUpdate = () => {};
+
+    function load(){
+      try{
+        const j = JSON.parse(store.get(FKEY) || "null");
+        if (j && j.cfg && Array.isArray(j.positions)){ const def = fresh().cfg; S = Object.assign(fresh(), j); S.cfg = Object.assign(def, j.cfg); S.positions.forEach(p => { if (p.origQty==null) p.origQty = p.qty; if (p.margin0==null) p.margin0 = p.margin; if (p.realizedNet==null) p.realizedNet = 0; if (p.tpHit==null) p.tpHit = 0; if (p.beOn==null) p.beOn = false; if (!tokens.has(p.sym)) tokens.set(p.sym,{sym:p.sym,samples:[],firstSeen:Date.now(),px:p.entry,mark:p.entry,bid:0,ask:0,bidSz:0,askSz:0,turn:0,oi:0,fr:0,chg24:0,chg1h:0,hi:p.entry,lo:p.entry,updatedAt:0}); }); }
+      }catch(_){}
+    }
+    function persist(){ S.lastPollAt = lastPollAt; store.set(FKEY, JSON.stringify(S)); }
+    function addLog(tag,msg,hi){ S.log.unshift({id:++S.logSeq,t:Date.now(),tag,msg,hi:!!hi}); if (S.log.length > 80) S.log.pop(); }
+    const isFresh = t => t.px>0 && Date.now()-t.updatedAt < pollMs()*4;
+
+    async function fetchBybit(){
+      const j = await fetchJson(BYBIT+"/v5/market/tickers?category=linear");
+      if (!j || j.retCode !== 0) throw new Error("Bybit: "+((j&&j.retMsg)||"応答が不正"));
+      const out = [];
+      for (const o of ((j.result && j.result.list) || [])){
+        if (!o.symbol || !o.symbol.endsWith("USDT")) continue;
+        const pxv = +o.lastPrice, p1 = +o.prevPrice1h;
+        out.push({sym:o.symbol, px:pxv, mark:+o.markPrice||pxv, bid:+o.bid1Price||0, ask:+o.ask1Price||0, bidSz:+o.bid1Size||0, askSz:+o.ask1Size||0,
+          turn:+o.turnover24h, oi:+o.openInterestValue||0, fr:+o.fundingRate, chg24:(+o.price24hPcnt||0)*100, chg1h:p1>0?(pxv/p1-1)*100:null, hi:+o.highPrice24h||pxv, lo:+o.lowPrice24h||pxv});
+      }
+      return out;
+    }
+    async function fetchBingx(){
+      const ts = Date.now();
+      const [tk, pi] = await Promise.all([
+        fetchJson(BINGX+"/openApi/swap/v2/quote/ticker?timestamp="+ts),
+        fetchJson(BINGX+"/openApi/swap/v2/quote/premiumIndex?timestamp="+ts).catch(()=>null)
+      ]);
+      if (!tk || tk.code !== 0) throw new Error("BingX: "+((tk&&tk.msg)||"応答が不正")+(tk&&tk.code?"（code "+tk.code+"）":""));
+      const fund = new Map();
+      if (pi && pi.code === 0){ for (const o of (Array.isArray(pi.data)?pi.data:[pi.data])) if (o && o.symbol) fund.set(o.symbol,{fr:parseFloat(o.lastFundingRate),mark:parseFloat(o.markPrice)}); }
+      const out = [];
+      for (const o of (Array.isArray(tk.data)?tk.data:[tk.data])){
+        if (!o || !o.symbol || !o.symbol.endsWith("-USDT")) continue;
+        const pxv = parseFloat(o.lastPrice), f = fund.get(o.symbol) || {};
+        out.push({sym:o.symbol, px:pxv, mark:f.mark>0?f.mark:pxv, bid:parseFloat(o.bidPrice)||0, ask:parseFloat(o.askPrice)||0, bidSz:parseFloat(o.bidQty)||0, askSz:parseFloat(o.askQty)||0,
+          turn:parseFloat(o.quoteVolume), oi:0, fr:f.fr, chg24:parseFloat(o.priceChangePercent)||0, chg1h:null, hi:parseFloat(o.highPrice)||pxv, lo:parseFloat(o.lowPrice)||pxv});
+      }
+      if (!out.length) throw new Error("BingX: 銘柄データが空です");
+      return out;
+    }
+    async function pollTickers(){
+      const rows = src === "bingx" ? await fetchBingx() : await fetchBybit();
+      const now = Date.now(), P = PM(), heldSet = new Set(S.positions.map(p=>p.sym));
+      for (const o of rows){
+        if (!(o.px>0) || !isFinite(o.turn)) continue;
+        if (!heldSet.has(o.sym) && o.turn < P.minTurn) continue;
+        let t = tokens.get(o.sym); if (!t){ t = {sym:o.sym,samples:[],firstSeen:now}; tokens.set(o.sym,t); }
+        t.px = o.px; t.mark = o.mark; t.bid = o.bid; t.ask = o.ask; t.bidSz = o.bidSz; t.askSz = o.askSz; t.turn = o.turn; t.oi = o.oi;
+        t.fr = isFinite(o.fr) ? o.fr : 0; t.chg24 = o.chg24; t.chg1h = o.chg1h; t.hi = o.hi; t.lo = o.lo; t.updatedAt = now;
+        t.samples.push({t:now,px:o.px,turn:o.turn,oi:o.oi}); if (t.samples.length>200) t.samples.shift();
+      }
+      for (const [k,t] of tokens) if (now - t.updatedAt > 90000 && !heldSet.has(k)) tokens.delete(k);
+    }
+
+    function retOver(t,sec){
+      const s = t.samples, n = s.length; if (n<2) return null;
+      const nowT = s[n-1].t, target = nowT - sec*1000*WARP; let ref = null;
+      for (let i=n-1;i>=0;i--){ if (s[i].t <= target){ ref = s[i]; break; } }
+      if (!ref){ const o = s[0]; if (nowT - o.t >= sec*1000*WARP*0.5) ref = o; else return null; }
+      return { r:s[n-1].px/ref.px - 1, age:(nowT-ref.t)/1000, ref };
+    }
+    function metricsOf(t){
+      const s = t.samples, n = s.length, m = {r1:null,r5:null,vrel:null,oiChg:null,vol:0,adv:0,risk:0,up:0,dn:0,spread:0,buyShare:0.5};
+      const a1 = retOver(t,60), a5 = retOver(t,300);
+      if (a1){ m.r1 = a1.r*100; const dT = Math.max(0, s[n-1].turn - a1.ref.turn), rate = dT/Math.max(a1.age,1), base = t.turn/86400; m.vrel = base>0 ? rate/base : null; }
+      if (a5){ m.r5 = a5.r*100; if (a5.ref.oi>0) m.oiChg = (t.oi/a5.ref.oi - 1)*100; }
+      let up = 0, dn = 0; const rets = [];
+      for (let i=Math.max(1,n-30);i<n;i++){ const d = s[i].px - s[i-1].px; if (d>0) up++; else if (d<0) dn++; rets.push(Math.log(s[i].px/s[i-1].px)); }
+      m.up = up; m.dn = dn; m.buyShare = (up+dn) ? up/(up+dn) : 0.5;
+      let sd = 0; if (rets.length>=5){ const mu = sum(rets)/rets.length; sd = Math.sqrt(sum(rets.map(x=>(x-mu)**2))/rets.length); }
+      m.vol = Math.round(clamp(sd/0.004*100,0,100));
+      m.spread = (t.bid>0 && t.ask>0) ? (t.ask-t.bid)/((t.ask+t.bid)/2) : 0.01;
+      m.adv = Math.round(clamp(Math.abs(t.fr)/0.001*40 + Math.max(0,Math.abs(t.chg24)-20)*0.6 + m.spread/MAX_SPREAD*15, 0, 100));
+      m.risk = Math.round((m.vol+m.adv)/2);
+      return m;
+    }
+    function evalEntry(t){
+      const m = metricsOf(t), P = PM(), r = {basic:false, dir:null, kind:"", why:null, gateWhy:null, score:0, m};
+      if (!isFresh(t)){ r.why = "データ未更新"; return r; }
+      if (t.turn < P.minTurn){ r.why = "売買代金 "+money(t.turn)+" < "+money(P.minTurn); return r; }
+      if (m.spread > MAX_SPREAD){ r.why = "スプレッド "+(m.spread*100).toFixed(2)+"% が広い"; return r; }
+      if (m.r5==null || m.r1==null || m.vrel==null){ r.why = "ウォームアップ中"; return r; }
+      const d = S.cfg.dir, c = [], vr = Math.min(m.vrel,5);
+      if (d!=="short" && m.r1>=P.r1 && m.r5>=P.r5 && m.vrel>=P.vrel && t.fr<=0.001 && t.chg24<=100 && (t.chg1h==null || t.chg1h>=-3)) c.push({dir:"long",kind:"順張り",score:m.r5*vr});
+      if (d!=="long"){
+        if (-m.r1>=P.r1 && -m.r5>=P.r5 && m.vrel>=P.vrel && t.fr>=-0.001 && (t.chg1h==null || t.chg1h<=3)) c.push({dir:"short",kind:"順張り",score:-m.r5*vr});
+        if (t.chg24>=35 && t.hi>0 && (t.hi-t.px)/t.hi>=0.04 && m.r5<=-P.r5*0.75 && t.fr>=0) c.push({dir:"short",kind:"反落狙い",score:-m.r5*Math.max(vr,1)});
+      }
+      if (!c.length){ r.why = "条件未達（5分 "+pct(m.r5,2)+" ／ 出来高×"+m.vrel.toFixed(1)+"）"; return r; }
+      c.sort((a,b)=>b.score-a.score); r.basic = true; r.dir = c[0].dir; r.kind = c[0].kind; r.score = c[0].score;
+      const g = GATES[S.cfg.gate]; if (g && m.risk >= g.risk) r.gateWhy = "総合リスク "+m.risk+" ≥ 上限 "+g.risk;
+      return r;
+    }
+    const unreal = (p,t) => p.side*((t?t.px:p.entry)-p.entry)*p.qty;
+    function equity(){ let v = S.cash; for (const p of S.positions){ const t = tokens.get(p.sym); v += p.margin + unreal(p,t) - p.fundingPaid; } return v; }
+    const impactOf = (t,side,N) => { const depth = (side>0 ? t.askSz*t.ask : t.bidSz*t.bid) || 0; return 0.0003 + 0.001*Math.min(N/Math.max(depth,1),5); };
+
+    async function liveOpen(p){
+      if (!S.cfg.live) return;
+      const base = baseOf(p.sym);
+      try{
+        const prec = await getPrecision(base);
+        const qty = floorTo(LIVE_MAX*p.lev/p.entry, prec);
+        if (!(qty>0)){ addLog("LIVE",base+": 実発注スキップ（数量が最小単位未満）",true); p.live = null; return; }
+        const j = await relay("/order","POST",{symbol:base+"USDT", side:p.side>0?"BUY":"SELL", positionSide:p.side>0?"LONG":"SHORT", quantity:qty});
+        p.live = {qty, prec, status:"open"};
+        addLog("LIVE",base+" 実発注: "+(p.side>0?"ロング":"ショート")+" "+qty+"（BingXデモ）",true);
+      }catch(err){ p.live = null; addLog("LIVE",base+" 実発注に失敗: "+err.message,true); }
+    }
+    async function liveClose(p, frac, label){
+      if (!p.live || p.live.status!=="open") return;
+      const base = baseOf(p.sym);
+      try{
+        let q = frac>=0.999 ? floorTo(p.live.qty, p.live.prec) : floorTo(p.live.qty*frac, p.live.prec);
+        if (!(q>0)) return;
+        await relay("/close","POST",{symbol:base+"USDT", positionSide:p.side>0?"LONG":"SHORT", quantity:q});
+        p.live.qty = Math.max(0, p.live.qty - q);
+        if (frac>=0.999 || p.live.qty<=0) p.live.status = "closed";
+        addLog("LIVE",base+" 実決済（"+label+"）: "+q,true);
+      }catch(err){ addLog("LIVE",base+" 実決済に失敗（"+label+"）: "+err.message,true); }
+    }
+    function openPos(t,e){
+      let margin = Math.min(S.cash*0.98, equity()*S.cfg.size);
+      if (S.cfg.scale) margin *= clamp(1 - e.m.risk/150, 0.4, 1);
+      if (margin < 5) return false;
+      const lev = S.cfg.lev, N = margin*lev, side = e.dir==="long" ? 1 : -1;
+      const base = side>0 ? (t.ask||t.px) : (t.bid||t.px), fill = base*(1 + side*impactOf(t,side,N)), fee = N*FEEF();
+      S.cash -= margin + fee;
+      const liq = side>0 ? fill*(1-1/lev+MMR) : fill*(1+1/lev-MMR);
+      const posObj = {sym:t.sym, side, lev, margin, margin0:margin, notional:N, qty:N/fill, origQty:N/fill, entry:fill, liq, ts:Date.now(), peak:fill, fundingPaid:0, feeOpen:fee, lastFund:Date.now(), kind:e.kind, realizedNet:0, tpHit:0, beOn:false, live:null};
+      S.positions.push(posObj);
+      liveOpen(posObj);
+      S.events++;
+      addLog("TRADE",baseOf(t.sym)+" "+(side>0?"ロング":"ショート")+" "+lev+"x（"+e.kind+"）証拠金 $"+margin.toFixed(2)+" ／ 5分 "+pct(e.m.r5,2)+" 出来高×"+e.m.vrel.toFixed(1),true);
+      return true;
+    }
+    function fillExit(p,t,q,last){
+      const base = p.side>0 ? ((t&&t.bid)||last) : ((t&&t.ask)||last);
+      return base*(1 - p.side*(t?impactOf(t,-p.side,q*last):0.0003));
+    }
+    function partial(p,frac,label){
+      const t = tokens.get(p.sym), last = t ? t.px : p.entry, q = Math.min(p.qty*0.999, p.origQty*frac);
+      if (!(q>0)) return;
+      liveClose(p, frac, label);
+      const portion = q/p.qty, exitPx = fillExit(p,t,q,last), fee = q*exitPx*FEEF();
+      const marginPart = p.margin*portion, fundPart = p.fundingPaid*portion;
+      const back = Math.max(0, marginPart + p.side*(exitPx-p.entry)*q - fundPart - fee);
+      S.cash += back; p.realizedNet = (p.realizedNet||0) + (back - marginPart);
+      p.qty -= q; p.margin -= marginPart; p.notional *= (1-portion); p.fundingPaid -= fundPart; S.events++;
+      addLog("TRADE",baseOf(p.sym)+" "+label+"到達：約"+Math.round(frac*100)+"%を利確 "+((back-marginPart)>=0?"+":"−")+"$"+Math.abs(back-marginPart).toFixed(2),true);
+    }
+    function closePos(p,reason){
+      liveClose(p, 1, reason);
+      const t = tokens.get(p.sym), last = t ? t.px : p.entry;
+      let back;
+      if (reason === "強制ロスカット"){ back = 0; }
+      else {
+        const exitPx = fillExit(p,t,p.qty,last), fee = p.qty*exitPx*FEEF();
+        back = Math.max(0, p.margin + p.side*(exitPx-p.entry)*p.qty - p.fundingPaid - fee);
+      }
+      S.cash += back; S.positions = S.positions.filter(x=>x!==p);
+      const pnl = (p.realizedNet||0) + (back - p.margin) - p.feeOpen, m0 = p.margin0 || p.margin;
+      const why = (p.tpHit>0 && !reason.startsWith("利確")) ? reason+"（TP"+p.tpHit+"済）" : reason;
+      S.trades.unshift({symbol:baseOf(p.sym),mint:p.sym,side:p.side>0?"long":"short",lev:p.lev,entryTs:p.ts,exitTs:Date.now(),pnlUsd:pnl,pct:pnl/m0*100,reason:why,kind:p.kind});
+      if (S.trades.length>100) S.trades.pop();
+      S.cooldown[p.sym] = Date.now(); S.events++;
+      addLog("TRADE",baseOf(p.sym)+" "+(p.side>0?"ロング":"ショート")+" 決済（"+why+"） "+(pnl>=0?"+":"−")+"$"+Math.abs(pnl).toFixed(2),true);
+    }
+    function accrueFunding(){
+      const now = Date.now();
+      for (const p of S.positions){ const t = tokens.get(p.sym), dt = (now-p.lastFund)/1000; p.lastFund = now; if (t && dt>0 && dt<3600) p.fundingPaid += p.side*t.fr*p.notional*dt/(8*3600); }
+    }
+    function agentStep(){
+      const now = Date.now(), P = PM(), cf = S.cfg, MAXTP = cf.tp;
+      accrueFunding();
+      for (const p of [...S.positions]){
+        const t = tokens.get(p.sym); if (!t || !isFresh(t)) continue;
+        p.peak = p.side>0 ? Math.max(p.peak,t.px) : Math.min(p.peak,t.px);
+        const fav = p.side*(t.px/p.entry-1)*100, best = p.side*(p.peak/p.entry-1)*100, m = metricsOf(t);
+        const dead = (p.side>0 && t.px<=p.liq) || (p.side<0 && t.px>=p.liq);
+        if (!dead && cf.ladder){
+          if (p.tpHit<1 && fav >= MAXTP/3){ partial(p,1/3,"TP1"); p.tpHit = 1; }
+          if (p.tpHit<2 && fav >= MAXTP*2/3){ partial(p,1/3,"TP2"); p.tpHit = 2; }
+        }
+        if ((cf.be==="tp1" && p.tpHit>=1) || (cf.be==="tp2" && p.tpHit>=2)) p.beOn = true;
+        const trailOn = cf.trail && (!cf.ladder || p.tpHit>=1);
+        if (dead) closePos(p,"強制ロスカット");
+        else if (fav >= MAXTP) closePos(p,"利確（"+(cf.ladder?"TP3/MAX":"MAX")+"）");
+        else if (p.beOn && fav <= 0) closePos(p,"建値撤退");
+        else if (!p.beOn && fav <= -cf.sl) closePos(p,"損切り");
+        else if (trailOn && best >= Math.max(0.8,MAXTP*0.4) && (best-fav) >= Math.max(0.5,MAXTP*0.25)) closePos(p,"トレーリング");
+        else if (m.r5!=null && m.r1!=null && p.side*m.r5 <= -P.r5 && p.side*m.r1 < 0 && fav < 0.3) closePos(p,"反転");
+        else if (now - p.ts > msMin(P.hold)) closePos(p,"時間切れ");
+      }
+      if (!S.running || S.positions.length >= P.maxPos) return;
+      const held = new Set(S.positions.map(p=>p.sym)), cands = [];
+      for (const t of tokens.values()){
+        if (held.has(t.sym) || (S.cooldown[t.sym] && now - S.cooldown[t.sym] < msMin(P.cool))) continue;
+        const e = evalEntry(t); if (!e.basic) continue;
+        if (e.gateWhy){ if (!t.skipAt || now - t.skipAt > msMin(10)){ t.skipAt = now; S.skips++; addLog("RISK",baseOf(t.sym)+" 見送り: "+e.gateWhy,true); } continue; }
+        cands.push({t,e});
+      }
+      cands.sort((a,b)=>b.e.score-a.e.score);
+      for (const c of cands){ if (S.positions.length >= P.maxPos) break; openPos(c.t,c.e); }
+    }
+    let seq = 0;
+    async function loop(){
+      if (busy) return; busy = true; clearTimeout(timer);
+      try{
+        await pollTickers();
+        S.polls++; lastPollAt = Date.now(); lastError = null; lastErrLogged = "";
+        agentStep();
+        S.hist.push({t:Date.now(),v:equity()}); if (S.hist.length>600) S.hist.shift();
+        if (++seq % 12 === 0) addLog("WATCH",tokens.size+" 銘柄を監視中（更新 #"+S.polls+"）");
+        persist();
+      }catch(e){
+        lastError = e.message;
+        if (lastErrLogged !== e.message){ lastErrLogged = e.message; addLog("SYS","データ取得エラー: "+e.message,true); }
+      }
+      busy = false; onUpdate();
+      timer = setTimeout(loop, pollMs());
+    }
+
+    function publicState(){
+      const eq = equity(), now = Date.now(), held = new Set(S.positions.map(p=>p.sym)), P = PM();
+      const rows = [...tokens.values()].filter(t=>t.px>0).map(t=>{
+        const e = evalEntry(t), m = e.m;
+        const status = held.has(t.sym) ? "held" : e.basic ? (e.gateWhy?"blocked":"ready") : "wait";
+        const label = status==="ready" ? (e.dir==="long"?"買い候補":"売り候補") : status==="blocked" ? "見送り" : status==="held" ? "保有" : "–";
+        const interest = Math.abs(m.r5||0)*Math.min(m.vrel||1,5) + Math.abs(t.chg1h||0)*0.1;
+        return { mint:t.sym, symbol:baseOf(t.sym), dex:src==="bingx"?"BingX":"Bybit", url:src==="bingx"?"https://bingx.com/en/perpetual/"+t.sym:"https://www.bybit.com/trade/usdt/"+t.sym, px:t.px, pc5:m.r5==null?0:m.r5, pc1:t.chg1h==null?0:t.chg1h,
+          taker:m.vrel==null?0:m.vrel, buys5:m.up, sells5:m.dn, liq:t.turn, mc:0, vol5:0, top10:null, vol:m.vol, down:m.adv, risk:m.risk, buyShare:m.buyShare,
+          ageMin:null, status, label, dir:e.dir, why:e.gateWhy||e.why, score:e.score, interest, stale:!isFresh(t),
+          pressTxt:"下げ "+m.dn+"回 ／ 上げ "+m.up+"回（直近30更新）", pressRight:"出来高×"+(m.vrel==null?"–":m.vrel.toFixed(1)),
+          vit:[["価格","$"+px(t.px)],["5分",m.r5==null?"–":pct(m.r5,2)],["1時間",t.chg1h==null?"–":pct(t.chg1h)],["24時間",pct(t.chg24)],["出来高×",m.vrel==null?"–":m.vrel.toFixed(1)],
+            ["資金調達",(t.fr*100).toFixed(4)+"%"],["建玉(OI)",t.oi>0?money(t.oi):"–"],["24h売買代金",money(t.turn)],["スプレッド",(m.spread*100).toFixed(3)+"%"]] };
+      });
+      rows.sort((a,b)=>(b.status==="held")-(a.status==="held")||(b.status==="ready")-(a.status==="ready")||b.score-a.score||b.interest-a.interest);
+      const watch = rows.slice(0,40), g = GATES[S.cfg.gate], warm = Math.max(0, Math.round(150*WARP - (now-bootTs)/1000));
+      const dirL = {both:"ロング＋ショート",long:"ロングのみ",short:"ショートのみ"}[S.cfg.dir];
+      return { kind:"perp", title:"先物 ロング/ショート（ペーパー）", colTaker:"出来高×", now, running:S.running, startUsd:START_USD, equity:eq, pnlUsd:eq-START_USD, cash:S.cash, cfg:S.cfg, gates:GATES,
+        labels:{vol:"危険度・ボラ（激しさ）",down:"逆行リスク（過熱度）"},
+        chips:[dirL+" ・ "+S.cfg.lev+"x", S.cfg.ladder ? "SL "+S.cfg.sl+"% ／ TP "+(S.cfg.tp/3).toFixed(2)+"/"+(S.cfg.tp*2/3).toFixed(2)+"/"+S.cfg.tp+"%" : "SL "+S.cfg.sl+"% ／ 利確 "+S.cfg.tp+"%", beLabel(S.cfg.be),"モード: "+(MODE_OPTS.find(o=>o.v===S.cfg.mode)||{l:""}).l+(S.cfg.trail?" ・ トレーリング":""),"ゲート: "+(g?g.label:"OFF")].concat(S.cfg.live?["実発注 ON（BingXデモ）"]:[]).concat(warm>0?["ウォームアップ中（あと約"+warm+"秒）"]:[]),
+        stats:{trades:S.trades.length,wins:S.trades.filter(x=>x.pnlUsd>0).length,skips:S.skips,polls:S.polls,watching:tokens.size,events:S.events},
+        health:{lastPollAt,lastError,pollMs:pollMs(),source:(src==="bingx"?BINGX:BYBIT).replace(/^https?:\/\//,"")+(PROXY?"（プロキシ経由）":"")},
+        positions:S.positions.map(p=>{ const t = tokens.get(p.sym), pxv = t?t.px:p.entry, un = unreal(p,t)-p.fundingPaid, m0 = p.margin0 || p.margin, cf = S.cfg, lad = cf.ladder;
+          const at = k => p.entry*(1+p.side*cf.tp*k/100), rows = [];
+          if (lad){ [1,2].forEach(k=>rows.push({k:"tp"+(p.tpHit>=k?" hit":""),label:"TP"+k+" "+(cf.tp*k/3).toFixed(2)+"%",px:at(k/3),val:p.tpHit>=k?"済":"+"+usd(p.notional*cf.tp*k/300)})); }
+          rows.push({k:"tp",label:(lad?"TP3(MAX) ":"利確 ")+cf.tp+"%",px:at(1),val:"+"+usd(p.notional*cf.tp/100)});
+          rows.push({k:"tr",label:(p.side>0?"買い建値":"売り建値"),px:p.entry,val:usd(p.margin)});
+          rows.push(p.beOn ? {k:"sl",label:"建値撤退",px:p.entry,val:"±0"} : {k:"sl",label:"損切り "+cf.sl+"%",px:p.entry*(1-p.side*cf.sl/100),val:"−"+usd(p.notional*cf.sl/100)});
+          rows.push({k:"liq",label:"ロスカット",px:p.liq,val:"全損"});
+          return { mint:p.sym, symbol:baseOf(p.sym), side:p.side>0?"long":"short", lev:p.lev, qty:p.qty, costUsd:p.margin, valueUsd:p.margin+un, retPct:((p.realizedNet||0)+un)/m0*100, entryPx:p.entry, px:pxv, ts:p.ts, rows, tpHit:p.tpHit, beOn:p.beOn }; }),
+        watch, trades:S.trades.slice(0,20), log:S.log.slice(0,60), hist:S.hist.slice(-300).map(h=>h.v), startedAt:S.startedAt,
+        ctl:[
+          {key:"mode",label:"アクティブ度",opts:MODE_OPTS,val:S.cfg.mode},
+          {key:"dir",label:"方向",opts:[{l:"両方",v:"both"},{l:"ロングのみ",v:"long"},{l:"ショートのみ",v:"short"}],val:S.cfg.dir},
+          {key:"lev",label:"レバレッジ",opts:ALLOW.lev.map(v=>({l:v+"x",v})),val:S.cfg.lev},
+          {key:"size",label:"1回の証拠金（評価額比）",opts:ALLOW.size.map(v=>({l:Math.round(v*100)+"%",v})),val:S.cfg.size},
+          {key:"sl",label:"損切り（価格の逆行）",opts:ALLOW.sl.map(v=>({l:v+"%",v})),val:S.cfg.sl},
+          {key:"tp",label:"MAX利確（TP3・価格の順行）",opts:ALLOW.tp.map(v=>({l:v+"%",v})),val:S.cfg.tp},
+          {key:"ladder",label:"利確の分割（TP1/2/3）",opts:LADDER_OPTS,val:S.cfg.ladder},
+          {key:"be",label:"建値撤退（BE）",opts:BE_OPTS,val:S.cfg.be},
+          {key:"trail",label:"トレーリング",opts:YN,val:S.cfg.trail},
+          {key:"gate",label:"リスクゲート",opts:GATE_OPTS,val:S.cfg.gate},
+          {key:"scale",label:"リスク連動サイズ",opts:YN,val:S.cfg.scale},
+          {key:"live",label:"BingXデモへ実発注",opts:YN,val:S.cfg.live}
+        ],
+        liveNote:"実発注は1回あたり証拠金 $"+LIVE_MAX.toFixed(2)+"（"+S.cfg.lev+"x）を上限に、接続設定のリレー経由でBingXデモ口座に送信します。リレー未設定の場合はONにできません。",
+        foot:(src==="bingx"?"BingX":"Bybit")+"公開データ（USDT無期限先物）で判定。直近1分・5分の値動きと出来高の急増から、ロング（上昇の順張り）／ショート（下落の順張り・急騰後の反落狙い）を選びます。利確は MAX利確を3等分（TP1=1/3、TP2=2/3、TP3=MAX）し、TP1・TP2で約1/3ずつ決済、「建値撤退」をTP2後（またはTP1後）にすると損切りが建値に切り上がります。手数料は片道"+(FEEF()*100).toFixed(3)+"%、資金調達は保有中に連続的に概算、強制ロスカットは維持証拠金率0.5%で概算。実際の取引所の約定・ロスカット・資金調達とは異なります。レバレッジ取引は元本以上の損失に至ることがあり、この戦略に優位性があるとは限りません。" };
+    }
+    function handleCmd(b){
+      const c = b.cmd;
+      if (c==="pause"){ S.running = false; addLog("SYS","新規エントリーを停止"); }
+      else if (c==="resume"){ S.running = true; addLog("SYS","新規エントリーを再開"); }
+      else if (c==="close"){ for (const p of [...S.positions]) closePos(p,"手動クローズ"); }
+      else if (c==="reset"){ const cfg = S.cfg; S = fresh(); S.cfg = cfg; addLog("SYS","セッションをリセット（ペーパー）"); }
+      else if (c==="cfg" && b.cfg){
+        for (const k of Object.keys(b.cfg)) if (ALLOW[k] && ALLOW[k].includes(b.cfg[k])){
+          if (k==="live" && b.cfg[k]===true && (!RELAY_URL || !RELAY_TOKEN)){ addLog("SYS","実発注をONにするには、接続設定でリレーURLとトークンを入力してください。",true); continue; }
+          S.cfg[k] = b.cfg[k];
+          if (k==="live") addLog("SYS","BingXデモへの実発注を "+(b.cfg[k]?"ON":"OFF")+" にしました",true);
+        }
+      }
+      persist();
+    }
+    function setSource(v){
+      if (v !== "bingx" && v !== "bybit") return;
+      if (v === src) return;
+      for (const p of [...S.positions]) closePos(p,"データ元変更");
+      src = v; store.set(SRCKEY, v); tokens.clear(); lastError = null; lastErrLogged = "";
+      addLog("SYS","先物データ元を "+(v==="bingx"?"BingX":"Bybit")+" に変更",true); persist(); loop();
+    }
+    return { kind:"perp", publicState, handleCmd, setSource, getSource:()=>src,
+      start(cb){ onUpdate = cb; load(); const gap = Date.now() - (S.lastPollAt || Date.now());
+        if (S.positions.length && gap > 60e3) addLog("SYS","前回の終了から約"+Math.max(1,Math.round(gap/60000))+"分経過。保有中のポジションはこの間の損切り・利確・ロスカットが判定されていません。",true);
+        loop(); },
+      kick(){ const gap = Date.now() - (lastPollAt || S.lastPollAt || Date.now()); if (gap > pollMs()*3 && S.positions.length) addLog("SYS","約"+Math.max(1,Math.round(gap/60000))+"分間、画面が非表示で更新が止まっていました。この間の損切り・利確・ロスカットは判定されていません。",true); loop(); },
+      applyConn(){ loop(); } };
   }
 
   /* ============================ UI ============================ */
-  const usd = (n,sign) => (sign?(n>=0?"+":"−"):(n<0?"−":"")) + "$" + Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
-  const px = x => x>=1 ? x.toFixed(3) : x>=0.01 ? x.toFixed(4) : (x<=0 ? "0" : (x.toPrecision(3).includes("e") ? x.toExponential(2) : x.toPrecision(3)));
-  const pct = (x,d=1) => (x>=0?"+":"−") + Math.abs(x).toFixed(d) + "%";
-  const money = n => n>=1e6 ? "$"+(n/1e6).toFixed(2)+"M" : n>=1e3 ? "$"+(n/1e3).toFixed(1)+"K" : "$"+Math.round(n);
-  let ST = null, focus = null, lastLogId = 0, pulseAmt = 0;
-  const STATUS = {held:"保有",ready:"候補",blocked:"見送り",wait:"–"};
+  const engines = { spot: makeSpot(), perp: makePerp() };
+  let cur = "spot", STs = { spot:null, perp:null }, focusBy = { spot:null, perp:null }, lastLogId = { spot:0, perp:0 }, pulseAmt = 0, ctlSig = "", ctlRefs = [];
 
-  function refresh(){ ST = publicState(); render(); }
-  function cmd(o){ handleCmd(o); refresh(); }
+  function refresh(){ STs.spot = engines.spot.publicState(); STs.perp = engines.perp.publicState(); render(); }
+  function cmd(o){ engines[cur].handleCmd(o); refresh(); }
 
-  function setPill(){
+  function setPill(s){
     const p = $("pill"); let cls = "pill", t = "LIVE";
-    const age = ST.now - ST.health.lastPollAt;
-    if (ST.health.lastError){ cls = "pill err"; t = "データ取得エラー"; }
-    else if (!ST.health.lastPollAt){ cls = "pill off"; t = "取得待ち"; }
-    else if (age > ST.health.pollMs*3){ cls = "pill warn"; t = "遅延"; }
+    const age = s.now - s.health.lastPollAt;
+    if (s.health.lastError){ cls = "pill err"; t = "データ取得エラー"; }
+    else if (!s.health.lastPollAt){ cls = "pill off"; t = "取得待ち"; }
+    else if (age > s.health.pollMs*3){ cls = "pill warn"; t = "遅延"; }
     p.className = cls; p.innerHTML = "<i></i><span>"+t+"</span>";
   }
   function spark(vals,w,h,padY){
@@ -616,26 +1042,43 @@ svg text{font-family:var(--mono)}
     const d = "M"+pts.map(p=>p[0].toFixed(1)+","+p[1].toFixed(1)).join(" L");
     return {d, area:d+" L"+w+","+h+" L0,"+h+" Z", last:pts[pts.length-1], mn, mx};
   }
-  function pickFocus(){
-    const w = ST.watch;
-    return w.find(x=>x.mint===focus) || (ST.positions[0] && w.find(x=>x.mint===ST.positions[0].mint)) || w[0] || null;
+  function pickFocus(s){
+    const w = s.watch, f = focusBy[cur];
+    return w.find(x=>x.mint===f) || (s.positions[0] && w.find(x=>x.mint===s.positions[0].mint)) || w[0] || null;
+  }
+  const sideBadge = p => p.side==="long" ? "<span class='side long'>L "+p.lev+"x</span>" : p.side==="short" ? "<span class='side short'>S "+p.lev+"x</span>" : "";
+
+  function syncCtl(s){
+    const sig = cur + JSON.stringify(s.ctl.map(c=>[c.key,c.opts.map(o=>o.v)])), box = $("ctlDyn");
+    if (sig !== ctlSig){
+      ctlSig = sig; box.innerHTML = ""; ctlRefs = [];
+      s.ctl.forEach(c => {
+        const g = document.createElement("div"); g.className = "grp";
+        const sp = document.createElement("span"); sp.textContent = c.label;
+        const seg = document.createElement("div"); seg.className = "seg"; const btns = [];
+        c.opts.forEach(o => { const b = document.createElement("button"); b.type = "button"; b.textContent = o.l; b.setAttribute("aria-pressed","false");
+          b.addEventListener("click", () => { const cc = {}; cc[c.key] = o.v; cmd({cmd:"cfg",cfg:cc}); }); seg.appendChild(b); btns.push(b); });
+        g.appendChild(sp); g.appendChild(seg); box.appendChild(g); ctlRefs.push(btns);
+      });
+    }
+    s.ctl.forEach((c,gi) => { (ctlRefs[gi]||[]).forEach((b,bi) => b.setAttribute("aria-pressed", String(c.val === c.opts[bi].v))); });
   }
 
   function render(){
-    setPill();
-    const s = ST, f = pickFocus();
+    const s = STs[cur], f = pickFocus(s);
+    setPill(s);
+    $("tabSpot").setAttribute("aria-selected", String(cur==="spot")); $("tabPerp").setAttribute("aria-selected", String(cur==="perp"));
+    $("tabSpotPnl").textContent = usd(STs.spot.pnlUsd,true); $("tabPerpPnl").textContent = usd(STs.perp.pnlUsd,true);
+    $("pnlTitle").textContent = s.title; $("thTaker").textContent = s.colTaker;
+    $("lblVol").textContent = s.labels.vol; $("lblDown").textContent = s.labels.down;
     $("src").textContent = s.health.source;
     $("sWatch").textContent = s.stats.watching;
     $("sTrades").textContent = s.stats.trades+" / "+s.stats.wins;
     $("sFocus").textContent = f ? f.symbol : "–";
     $("sAge").textContent = s.health.lastPollAt ? Math.max(0,Math.round((s.now-s.health.lastPollAt)/1000))+"秒前" : "–";
-    const g = s.gates[s.cfg.gate];
-    $("ribbon").innerHTML =
-      (s.running ? "" : "<span class='chip warn'>新規エントリー停止中</span>") +
-      "<span class='chip'>損切り "+s.cfg.sl+"% / 利確 +"+s.cfg.tp+"%</span>" +
-      "<span class='chip "+(g?"on":"")+"'>ゲート: "+(g?g.label:"OFF")+"</span>" +
-      (s.health.lastError ? "<span class='chip warn'>"+esc(s.health.lastError)+"</span>" : "") +
-      (s.health.rpcError ? "<span class='chip'>Top10取得不可（RPC）</span>" : "");
+    $("ribbon").innerHTML = (s.running ? "" : "<span class='chip warn'>新規エントリー停止中</span>") +
+      s.chips.map(c=>"<span class='chip "+(c.indexOf("ゲート")===0?"on":"")+"'>"+esc(c)+"</span>").join("") +
+      (s.health.lastError ? "<span class='chip warn'>"+esc(s.health.lastError)+"</span>" : "");
     const p = $("pnl");
     p.textContent = usd(s.pnlUsd,true); p.className = "big "+(s.pnlUsd>=0?"pos":"neg");
     $("startTxt").textContent = "開始 "+usd(s.startUsd);
@@ -643,7 +1086,7 @@ svg text{font-family:var(--mono)}
     $("clock").textContent = mmss(Math.floor((s.now-s.startedAt)/1000));
     $("skips").textContent = s.stats.skips;
     $("posline").innerHTML = s.positions.length
-      ? "保有中 "+s.positions.map(x=>"<b>"+esc(x.symbol)+"</b> <b class='"+(x.retPct>=0?"pos":"neg")+"'>"+pct(x.retPct)+"</b> ("+usd(x.valueUsd)+")").join(" ・ ")
+      ? "保有中 "+s.positions.map(x=>sideBadge(x)+"<b>"+esc(x.symbol)+"</b> <b class='"+(x.retPct>=0?"pos":"neg")+"'>"+pct(x.retPct)+"</b> ("+usd(x.valueUsd)+")").join("<br>")
       : (s.running ? "ポジションなし（条件を満たす銘柄を待機）" : "ポジションなし（新規エントリー停止中）");
 
     const b = spark(s.hist,320,130,16), base = (1-(s.startUsd-b.mn)/((b.mx-b.mn)||1))*98+16;
@@ -654,13 +1097,15 @@ svg text{font-family:var(--mono)}
       "<circle cx='"+b.last[0].toFixed(1)+"' cy='"+b.last[1].toFixed(1)+"' r='3.5' fill='var(--lime)' stroke='var(--purple)' stroke-width='1.5'/>" +
       "<text x='2' y='10' font-size='9' fill='var(--ink2)'>"+b.mx.toFixed(2)+"</text><text x='2' y='128' font-size='9' fill='var(--ink2)'>"+b.mn.toFixed(2)+"</text>";
 
+    const g = s.gates[s.cfg.gate];
     if (f){
       $("rTok").textContent = f.symbol;
       const tags = [];
       if (f.pc5>25) tags.push(["急上昇","hot"]); else if (f.pc5<-20) tags.push(["急落","cold"]);
       if (f.vol>=60) tags.push(["ボラ大","hot"]);
       if (f.top10!=null && f.top10>=85) tags.push(["集中注意","bad"]);
-      if (f.taker>=1.6) tags.push(["買い優勢","hot"]); else if (f.taker<=0.6) tags.push(["売り優勢","cold"]);
+      if (s.kind==="spot"){ if (f.taker>=1.6) tags.push(["買い優勢","hot"]); else if (f.taker<=0.6) tags.push(["売り優勢","cold"]); }
+      else { if (f.status==="ready") tags.push([f.dir==="long"?"買いシグナル":"売りシグナル", f.dir==="long"?"hot":"cold"]); if (Math.abs(f.pc1)>=5) tags.push([f.pc1>0?"1時間で急伸":"1時間で急落","hot"]); }
       if (f.stale) tags.push(["データ古い","cold"]);
       $("rTags").innerHTML = tags.map(x=>"<span class='tag "+x[1]+"'>"+x[0]+"</span>").join("");
       const st = f.risk<40 ? ["正常","ok"] : f.risk<65 ? ["警戒","warn"] : ["危険","bad"];
@@ -671,15 +1116,11 @@ svg text{font-family:var(--mono)}
       });
       const bp = Math.round(f.buyShare*100);
       $("prSell").style.width = (100-bp)+"%"; $("prBuy").style.width = bp+"%";
-      $("prTxt").textContent = "売り "+f.sells5+"件 ／ 買い "+f.buys5+"件（5分）";
-      $("prTaker").textContent = "TAKER "+f.taker.toFixed(2);
+      $("prTxt").textContent = f.pressTxt || ("売り "+f.sells5+"件 ／ 買い "+f.buys5+"件（5分）");
+      $("prTaker").textContent = f.pressRight || ("TAKER "+f.taker.toFixed(2));
       const dir = (f.vol>=60 && Math.abs(f.buyShare-0.5)<0.12) ? "過熱・方向不明" : f.buyShare>=0.58 ? "買い優勢" : f.buyShare<=0.42 ? "売り優勢" : "拮抗";
-      $("dirLine").innerHTML = "向き <b>"+dir+"</b> ／ 総合リスク <b>"+f.risk+"</b> ／ ゲート <b>"+(g?g.label+"（総合<"+g.risk+"・Top10<"+g.top10+"%）":"OFF")+"</b>";
-      $("vitals").innerHTML = [
-        ["価格","$"+px(f.px)],["5分",pct(f.pc5)],["1時間",pct(f.pc1)],
-        ["流動性",money(f.liq)],["時価総額",f.mc?money(f.mc):"–"],["TOP10",f.top10==null?"–":f.top10+"%"],
-        ["5分出来高",money(f.vol5)],["経過",f.ageMin==null?"–":(f.ageMin>=120?Math.round(f.ageMin/60)+"時間":f.ageMin+"分")],["DEX",esc(f.dex||"–")]
-      ].map(v=>"<div><span>"+v[0]+"</span><b>"+v[1]+"</b></div>").join("");
+      $("dirLine").innerHTML = "向き <b>"+dir+"</b> ／ 総合リスク <b>"+f.risk+"</b> ／ ゲート <b>"+(g?g.label+"（総合<"+g.risk+(g.top10?"・Top10<"+g.top10+"%":"")+"）":"OFF")+"</b>";
+      $("vitals").innerHTML = f.vit.map(v=>"<div><span>"+v[0]+"</span><b>"+esc(v[1])+"</b></div>").join("");
     } else {
       $("rTok").textContent = "–"; $("rTags").innerHTML = ""; $("rState").textContent = "–";
       $("dirLine").textContent = "データ取得を待っています"; $("vitals").innerHTML = "";
@@ -687,77 +1128,75 @@ svg text{font-family:var(--mono)}
 
     const pos = f && s.positions.find(x=>x.mint===f.mint);
     if (pos){
-      const rows = [
-        {k:"tp",label:"利確 +"+s.cfg.tp+"%",px:pos.tpPx,val:"+"+usd(pos.costUsd*s.cfg.tp/100)},
-        {k:"tr",label:"建値",px:pos.entryPx,val:usd(pos.costUsd)},
-        {k:"mk",label:"MARK",px:pos.px,val:pct(pos.retPct)},
-        {k:"sl",label:"損切り "+s.cfg.sl+"%",px:pos.slPx,val:"−"+usd(pos.costUsd*Math.abs(s.cfg.sl)/100)}
-      ].sort((a,b)=>b.px-a.px);
+      const rows = pos.rows.concat([{k:"mk",label:"MARK",px:pos.px,val:pct(pos.retPct)}]);
+      rows.sort((a,c)=>c.px-a.px);
       $("lvNote").textContent = f.symbol;
       $("levels").innerHTML = rows.map(r=>{
         const w = r.k==="mk" ? 0 : clamp(Math.abs(r.px-pos.px)/pos.px/0.6*100,4,100);
-        return "<div class='lv "+r.k+"'><span>"+r.label+"<small>$"+px(r.px)+"</small></span><div class='bar'>"+(r.k==="mk"?"":"<i style='width:"+w.toFixed(0)+"%'></i>")+"</div><em>"+r.val+"</em></div>";
+        return "<div class='lv "+r.k+"'"+(r.k.indexOf("hit")>0?" style='opacity:.5'":"")+"><span>"+r.label+"<small>$"+px(r.px)+"</small></span><div class='bar'>"+(r.k==="mk"?"":"<i style='width:"+w.toFixed(0)+"%'></i>")+"</div><em>"+r.val+"</em></div>";
       }).join("");
-    } else { $("lvNote").textContent = ""; $("levels").innerHTML = "<div class='empty'>注目銘柄を保有していません。エントリー後に利確・損切りラインを表示します。</div>"; }
+    } else { $("lvNote").textContent = ""; $("levels").innerHTML = "<div class='empty'>注目銘柄を保有していません。エントリー後に利確・損切りライン（先物はロスカット価格も）を表示します。</div>"; }
 
     $("wlBody").innerHTML = s.watch.length ? s.watch.map(w=>{
       const rc = w.risk<40?"pos":w.risk<65?"":"neg";
+      const lab = w.label || ({held:"保有",ready:"候補",blocked:"見送り",wait:"–"})[w.status];
+      const tk = s.kind==="spot" ? w.taker.toFixed(2) : (w.taker?w.taker.toFixed(1):"–");
       return "<tr class='row "+(f&&f.mint===w.mint?"sel":"")+"' data-m='"+esc(w.mint)+"'>"+
         "<td><span class='dot "+(w.status==="wait"?"":w.status)+"'></span><span class='sym'>"+esc(w.symbol)+"</span></td>"+
-        "<td>$"+px(w.px)+"</td><td class='"+(w.pc5>=0?"pos":"neg")+"'>"+pct(w.pc5)+"</td><td>"+w.taker.toFixed(2)+"</td><td class='"+rc+"'>"+w.risk+"</td><td>"+STATUS[w.status]+"</td></tr>";
-    }).join("") : "<tr><td colspan='6' class='empty'>データ取得中…（初回は数十秒かかることがあります。表示が変わらない場合は下の「接続テスト」を押してください）</td></tr>";
+        "<td>$"+px(w.px)+"</td><td class='"+(w.pc5>=0?"pos":"neg")+"'>"+pct(w.pc5)+"</td><td>"+tk+"</td><td class='"+rc+"'>"+w.risk+"</td><td>"+lab+"</td></tr>";
+    }).join("") : "<tr><td colspan='6' class='empty'>データ取得中…（表示が変わらない場合は下の「接続テスト」を押してください）</td></tr>";
     $("wlWhy").textContent = f ? f.symbol+": "+(f.status==="held"?"保有中":f.status==="ready"?"エントリー条件を満たしています":f.why||"") : "";
 
     $("trades").innerHTML = s.trades.length ? s.trades.slice(0,8).map(t=>
-      "<div class='tl'><span>"+esc(t.symbol)+"</span><b class='"+(t.pnlUsd>=0?"pos":"neg")+"'>"+usd(t.pnlUsd,true)+"</b><small>"+esc(t.reason)+" ・ 保有 "+mmss(Math.round((t.exitTs-t.entryTs)/1000))+"</small><small style='text-align:right'>"+pct(t.pct)+"</small></div>"
+      "<div class='tl'><span>"+sideBadge(t)+esc(t.symbol)+"</span><b class='"+(t.pnlUsd>=0?"pos":"neg")+"'>"+usd(t.pnlUsd,true)+"</b><small>"+esc(t.reason)+" ・ 保有 "+mmss(Math.round((t.exitTs-t.entryTs)/1000))+"</small><small style='text-align:right'>"+pct(t.pct)+"</small></div>"
     ).join("") : "<div class='empty'>まだ取引はありません。</div>";
 
     $("log").innerHTML = s.log.slice(0,40).map(l=>{ const d = new Date(l.t);
       return "<li class='"+(l.hi?"hi":"")+"'><span>"+pad(d.getHours())+":"+pad(d.getMinutes())+"</span><b>"+esc(l.tag)+"</b><span>"+esc(l.msg)+"</span></li>"; }).join("");
     $("logCount").textContent = s.log.length+"件";
     const newest = s.log[0] ? s.log[0].id : 0;
-    if (lastLogId && newest>lastLogId && s.log.some(l=>l.id>lastLogId && l.hi) && !reduceMotion) pulseAmt = 0.09;
-    lastLogId = newest;
+    if (lastLogId[cur] && newest>lastLogId[cur] && s.log.some(l=>l.id>lastLogId[cur] && l.hi) && !reduceMotion) pulseAmt = 0.09;
+    lastLogId[cur] = newest;
     $("bPause").textContent = s.running ? "新規エントリー停止" : "新規エントリー再開";
-    syncSegs();
+    $("foot").textContent = s.foot;
+    const ln = $("liveNote");
+    if (s.kind==="perp" && s.liveNote){ ln.style.display = ""; ln.textContent = s.liveNote; } else { ln.style.display = "none"; }
+    syncCtl(s);
   }
 
-  document.addEventListener("click", e => { const tr = e.target.closest("tr.row"); if (!tr) return; focus = tr.dataset.m; if (ST) render(); });
-  $("bPause").addEventListener("click", () => cmd({cmd: S.running ? "pause" : "resume"}));
+  function setTab(k){ cur = k; refresh(); }
+  $("tabSpot").addEventListener("click", () => setTab("spot"));
+  $("tabPerp").addEventListener("click", () => setTab("perp"));
+  document.addEventListener("click", e => { const tr = e.target.closest("tr.row"); if (!tr) return; focusBy[cur] = tr.dataset.m; render(); });
+  $("bPause").addEventListener("click", () => cmd({cmd: STs[cur].running ? "pause" : "resume"}));
   $("bClose").addEventListener("click", () => cmd({cmd:"close"}));
-  $("bReset").addEventListener("click", () => { if (confirm("ペーパーの損益と取引履歴をリセットします。よろしいですか？")) cmd({cmd:"reset"}); });
-
-  const SEGS = [
-    ["segSize","size",[{l:"10%",v:0.1},{l:"25%",v:0.25},{l:"50%",v:0.5}]],
-    ["segSl","sl",[{l:"−15%",v:-15},{l:"−25%",v:-25},{l:"−40%",v:-40}]],
-    ["segTp","tp",[{l:"+25%",v:25},{l:"+50%",v:50},{l:"+100%",v:100}]],
-    ["segGate","gate",[{l:"OFF",v:"off"},{l:"標準",v:"std"},{l:"厳しめ",v:"strict"}]],
-    ["segScale","scale",[{l:"OFF",v:false},{l:"ON",v:true}]]
-  ];
-  SEGS.forEach(([id,key,opts]) => { const box = $(id);
-    opts.forEach(o => { const b = document.createElement("button"); b.type="button"; b.textContent=o.l; b.setAttribute("aria-pressed","false");
-      b.addEventListener("click", () => { const c = {}; c[key] = o.v; cmd({cmd:"cfg",cfg:c}); }); box.appendChild(b); }); });
-  function syncSegs(){ SEGS.forEach(([id,key,opts]) => { [...$(id).children].forEach((b,i) => b.setAttribute("aria-pressed", String(ST.cfg[key]===opts[i].v))); }); }
+  $("bReset").addEventListener("click", () => { if (confirm("この口座（"+STs[cur].title+"）の損益と取引履歴をリセットします。よろしいですか？")) cmd({cmd:"reset"}); });
 
   /* ---- 接続設定 ---- */
-  $("inProxy").value = PROXY; $("inWatch").value = MANUAL.join(","); $("chkPump").checked = PUMP_ONLY;
+  $("selSrc").value = engines.perp.getSource(); $("inProxy").value = PROXY;
+  $("inRelayUrl").value = RELAY_URL; $("inRelayToken").value = RELAY_TOKEN; $("inLiveMax").value = LIVE_MAX; $("inWatch").value = MANUAL.join(","); $("chkPump").checked = PUMP_ONLY;
   $("bSaveConn").addEventListener("click", () => {
     PROXY = $("inProxy").value.trim(); store.set(PKEY, PROXY);
     MANUAL = $("inWatch").value.split(",").map(s=>s.trim()).filter(Boolean); store.set(WKEY, MANUAL.join(","));
     PUMP_ONLY = $("chkPump").checked; store.set(OKEY, PUMP_ONLY ? "1" : "0");
-    MANUAL.forEach(ensure); lastDiscover = 0; $("diag").textContent = "保存しました。次の更新から反映されます。"; loop();
+    RELAY_URL = $("inRelayUrl").value.trim(); store.set(RELAYKEY, RELAY_URL);
+    RELAY_TOKEN = $("inRelayToken").value.trim(); store.set(RELAYTOKKEY, RELAY_TOKEN);
+    LIVE_MAX = parseFloat($("inLiveMax").value) || 5; store.set(LIVEMAXKEY, String(LIVE_MAX));
+    precisionCache.clear();
+    engines.perp.setSource($("selSrc").value);
+    $("diag").textContent = "保存しました。次の更新から反映されます."; engines.spot.applyConn(); engines.perp.applyConn();
   });
   $("bTest").addEventListener("click", async () => {
-    const out = $("diag"); out.innerHTML = "テスト中…";
-    const rows = [];
+    const out = $("diag"); out.innerHTML = "テスト中…"; const rows = [];
     const t = async (name, fn) => { const t0 = performance.now(); try{ const r = await fn(); rows.push("✓ "+name+"（"+Math.round(performance.now()-t0)+"ms）"+(r?" "+r:"")); }catch(e){ rows.push("✕ "+name+": "+esc(e.message)); } out.innerHTML = rows.join("<br>"); };
     await t("DexScreener 新着一覧", async () => { const a = await fetchJson(DEX+"/token-boosts/latest/v1"); return (Array.isArray(a)?a.length:0)+"件"; });
     await t("DexScreener 価格取得", async () => { const a = await fetchJson(DEX+"/tokens/v1/"+CHAIN+"/So11111111111111111111111111111111111111112"); return (Array.isArray(a)?a.length:0)+"ペア"; });
-    await t("Solana RPC（Top10用）", async () => { await rpc("getSlot",[]); });
-    rows.push(rows.some(r=>r.startsWith("✕ DexScreener")) ? "→ DexScreenerが✕の場合、ブラウザがブロックしている可能性があります。上の「プロキシURL」を設定するか、READMEを参照してください。" : "→ DexScreenerが✓なら実データで動きます。RPCが✕でもTop10集中度以外は動作します。");
+    await t("BingX 先物ティッカー", async () => { const j = await fetchJson(BINGX+"/openApi/swap/v2/quote/ticker?symbol=BTC-USDT&timestamp="+Date.now()); if (j.code!==0) throw new Error((j.msg||"応答が不正")+"（code "+j.code+"）"); const d = Array.isArray(j.data)?j.data[0]:j.data; return "BTC-USDT $"+(d&&d.lastPrice); });
+    await t("Bybit 先物ティッカー", async () => { const j = await fetchJson(BYBIT+"/v5/market/tickers?category=linear&symbol=BTCUSDT"); if (j.retCode!==0) throw new Error(j.retMsg||"応答が不正"); return "BTCUSDT $"+(j.result.list[0]||{}).lastPrice; });
+    await t("Solana RPC（Top10用）", async () => { await engines.spot.test.rpc("getSlot",[]); });
+    rows.push("→ ✕の行があれば、ブラウザや取引所側が通信をブロックしている可能性があります（地域制限など）。表示されたメッセージを教えてください。プロキシURLの設定でも解決できる場合があります。");
     out.innerHTML = rows.join("<br>");
   });
-
   let wakeLock = null, wakeWanted = false;
   function wakeUI(){ $("bWake").textContent = wakeWanted ? "画面点灯を解除" : "画面を点灯したままにする"; }
   async function acquireWake(){ try{ wakeLock = await navigator.wakeLock.request("screen"); wakeLock.addEventListener("release", () => { wakeLock = null; }); }catch(e){ $("diag").textContent = "画面点灯を有効にできませんでした: "+e.message; wakeWanted = false; wakeUI(); } }
@@ -766,13 +1205,10 @@ svg text{font-family:var(--mono)}
     wakeWanted = !wakeWanted; wakeUI();
     if (wakeWanted) await acquireWake(); else if (wakeLock){ await wakeLock.release(); wakeLock = null; }
   });
-
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible") return;
-    const gap = Date.now() - (lastPollAt || S.lastPollAt || Date.now());
-    if (gap > POLL_MS*3 && S.positions.length) addLog("SYS","約"+Math.max(1,Math.round(gap/60000))+"分間、画面が非表示で更新が止まっていました。この間の損切り・利確は判定されていません。",true);
     if (wakeWanted && !wakeLock) acquireWake();
-    loop();
+    engines.spot.kick(); engines.perp.kick();
   });
 
   /* ---- knot (decoration) ---- */
@@ -797,13 +1233,9 @@ svg text{font-family:var(--mono)}
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", readColors);
 
   /* ---- start ---- */
-  load();
-  {
-    const gap = Date.now() - (S.lastPollAt || Date.now());
-    if (S.positions.length && gap > 60e3) addLog("SYS","前回の終了から約"+Math.max(1,Math.round(gap/60000))+"分経過。保有中のポジションはこの間の損切り・利確が判定されていません。",true);
-  }
-  MANUAL.forEach(ensure); wakeUI(); readColors(); resize(); requestAnimationFrame(frame);
-  refresh(); loop(); setInterval(refresh, 2000);
+  wakeUI(); readColors(); resize(); requestAnimationFrame(frame);
+  engines.spot.start(refresh); engines.perp.start(refresh);
+  refresh(); setInterval(refresh, 2000);
 })();
 </script>
 </body>
