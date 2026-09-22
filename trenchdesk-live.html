@@ -237,6 +237,7 @@ svg text{font-family:var(--mono)}
       <div class="big pos" id="pnl">+$0.00</div>
       <div class="kv">
         <div><span>評価額</span><b id="bal">$0.00</b></div>
+        <div id="balLiveWrap" style="display:none"><span>評価額（BingX実口座）</span><b id="balLive">$0.00</b></div>
         <div><span>経過時間</span><b id="clock">00:00</b></div>
         <div><span>見送り</span><b id="skips">0</b></div>
       </div>
@@ -286,6 +287,11 @@ svg text{font-family:var(--mono)}
       <div id="trades"></div>
     </section>
 
+    <section class="panel a-trades" id="liveAccSec" style="display:none">
+      <h2>BingXデモ実口座<em id="liveAccAge"></em></h2>
+      <div id="liveAccBody"></div>
+    </section>
+
     <section class="panel a-log">
       <h2>エージェントの動き<em id="logCount"></em></h2>
       <ul class="log" id="log"></ul>
@@ -316,6 +322,7 @@ svg text{font-family:var(--mono)}
           <button class="btn" id="bPause">新規エントリー停止</button>
           <button class="btn ghost" id="bClose">全ポジションを閉じる</button>
           <button class="btn ghost" id="bReset">リセット</button>
+          <button class="btn ghost" id="bScalp" style="display:none">スキャルプ設定（$20×20x・TP/SL $5）</button>
         </div>
         <div id="ctlDyn"></div>
       </div>
@@ -704,7 +711,7 @@ svg text{font-family:var(--mono)}
     const MMR = 0.005, MAX_SPREAD = 0.0015;
     const FEEF = () => src === "bingx" ? 0.0005 : 0.00055;
     const GATES = { off:null, std:{risk:65,label:"標準"}, strict:{risk:50,label:"厳しめ"} };
-    const ALLOW = {mode:["calm","normal","active"],dir:["both","long","short"],lev:[1,2,3,5,10],size:[0.05,0.1,0.2],sl:[0.8,1.5,3,5],tp:[1,2,4,8],trail:[true,false],gate:["off","std","strict"],scale:[true,false],ladder:[true,false],be:["off","tp1","tp2"],live:[true,false]};
+    const ALLOW = {mode:["calm","normal","active"],dir:["both","long","short"],lev:[1,2,3,5,10,20],size:[0.04,0.05,0.1,0.2],sl:[0.8,1.25,1.5,3,5],tp:[1,1.25,2,4,8],trail:[true,false],gate:["off","std","strict"],scale:[true,false],ladder:[true,false],be:["off","tp1","tp2"],live:[true,false]};
     const PM = () => PERP_MODE[S.cfg.mode] || PERP_MODE.active;
     const pollMs = () => POLL_OVERRIDE || PM().poll;
 
@@ -716,6 +723,23 @@ svg text{font-family:var(--mono)}
     const tokens = new Map();
     const bootTs = Date.now();
     let src = store.get(SRCKEY) === "bybit" ? "bybit" : "bingx";
+    let liveAccount = null, liveAccountErr = null, lastLiveAccountAt = 0, liveAccBusy = false;
+    async function fetchLiveAccount(){
+      if (liveAccBusy) return; liveAccBusy = true;
+      try{
+        const [bal, pos] = await Promise.all([ relay("/balance"), relay("/positions") ]);
+        const b = bal.result && bal.result.data && bal.result.data.balance;
+        const raw = (pos.result && pos.result.data) || [];
+        const list = (Array.isArray(raw) ? raw : [raw]).filter(Boolean);
+        liveAccount = {
+          equity: b ? parseFloat(b.equity) : null, balance: b ? parseFloat(b.balance) : null, avail: b ? parseFloat(b.availableMargin) : null,
+          positions: list.map(p => ({ symbol: p.symbol, side: p.positionSide, amt: parseFloat(p.positionAmt != null ? p.positionAmt : (p.positionSide==="SHORT" ? -Math.abs(parseFloat(p.positionAmt||0)) : p.positionAmt)) || 0,
+            entry: parseFloat(p.avgPrice || p.entryPrice || 0), pnl: parseFloat(p.unrealizedProfit != null ? p.unrealizedProfit : (p.profit || 0)), lev: p.leverage })).filter(p => Math.abs(p.amt) > 0)
+        };
+        liveAccountErr = null;
+      }catch(e){ liveAccountErr = e.message; }
+      lastLiveAccountAt = Date.now(); liveAccBusy = false;
+    }
     let lastPollAt = 0, lastError = null, lastErrLogged = "", busy = false, timer = null, onUpdate = () => {};
 
     function load(){
@@ -741,12 +765,19 @@ svg text{font-family:var(--mono)}
       return out;
     }
     async function fetchBingx(){
-      const ts = Date.now();
-      const [tk, pi] = await Promise.all([
-        fetchJson(BINGX+"/openApi/swap/v2/quote/ticker?timestamp="+ts),
-        fetchJson(BINGX+"/openApi/swap/v2/quote/premiumIndex?timestamp="+ts).catch(()=>null)
-      ]);
-      if (!tk || tk.code !== 0) throw new Error("BingX: "+((tk&&tk.msg)||"応答が不正")+(tk&&tk.code?"（code "+tk.code+"）":""));
+      const viaRelay = !!(RELAY_URL && RELAY_TOKEN);
+      let tk, pi;
+      if (viaRelay){
+        const [rtk, rpi] = await Promise.all([ relay("/market/ticker"), relay("/market/premiumIndex").catch(()=>null) ]);
+        tk = rtk && rtk.result; pi = rpi && rpi.result;
+      } else {
+        const ts = Date.now();
+        [tk, pi] = await Promise.all([
+          fetchJson(BINGX+"/openApi/swap/v2/quote/ticker?timestamp="+ts),
+          fetchJson(BINGX+"/openApi/swap/v2/quote/premiumIndex?timestamp="+ts).catch(()=>null)
+        ]);
+      }
+      if (!tk || tk.code !== 0) throw new Error("BingX"+(viaRelay?"（リレー経由）":"")+": "+((tk&&tk.msg)||"応答が不正")+(tk&&tk.code?"（code "+tk.code+"）":""));
       const fund = new Map();
       if (pi && pi.code === 0){ for (const o of (Array.isArray(pi.data)?pi.data:[pi.data])) if (o && o.symbol) fund.set(o.symbol,{fr:parseFloat(o.lastFundingRate),mark:parseFloat(o.markPrice)}); }
       const out = [];
@@ -933,6 +964,7 @@ svg text{font-family:var(--mono)}
         agentStep();
         S.hist.push({t:Date.now(),v:equity()}); if (S.hist.length>600) S.hist.shift();
         if (++seq % 12 === 0) addLog("WATCH",tokens.size+" 銘柄を監視中（更新 #"+S.polls+"）");
+        if (S.cfg.live && RELAY_URL && RELAY_TOKEN && Date.now()-lastLiveAccountAt > 15000) fetchLiveAccount();
         persist();
       }catch(e){
         lastError = e.message;
@@ -963,7 +995,7 @@ svg text{font-family:var(--mono)}
         labels:{vol:"危険度・ボラ（激しさ）",down:"逆行リスク（過熱度）"},
         chips:[dirL+" ・ "+S.cfg.lev+"x", S.cfg.ladder ? "SL "+S.cfg.sl+"% ／ TP "+(S.cfg.tp/3).toFixed(2)+"/"+(S.cfg.tp*2/3).toFixed(2)+"/"+S.cfg.tp+"%" : "SL "+S.cfg.sl+"% ／ 利確 "+S.cfg.tp+"%", beLabel(S.cfg.be),"モード: "+(MODE_OPTS.find(o=>o.v===S.cfg.mode)||{l:""}).l+(S.cfg.trail?" ・ トレーリング":""),"ゲート: "+(g?g.label:"OFF")].concat(S.cfg.live?["実発注 ON（BingXデモ）"]:[]).concat(warm>0?["ウォームアップ中（あと約"+warm+"秒）"]:[]),
         stats:{trades:S.trades.length,wins:S.trades.filter(x=>x.pnlUsd>0).length,skips:S.skips,polls:S.polls,watching:tokens.size,events:S.events},
-        health:{lastPollAt,lastError,pollMs:pollMs(),source:(src==="bingx"?BINGX:BYBIT).replace(/^https?:\/\//,"")+(PROXY?"（プロキシ経由）":"")},
+        health:{lastPollAt,lastError,pollMs:pollMs(),source:(src==="bingx"?BINGX:BYBIT).replace(/^https?:\/\//,"")+(src==="bingx"&&RELAY_URL&&RELAY_TOKEN?"（リレー経由）":PROXY?"（プロキシ経由）":"")},
         positions:S.positions.map(p=>{ const t = tokens.get(p.sym), pxv = t?t.px:p.entry, un = unreal(p,t)-p.fundingPaid, m0 = p.margin0 || p.margin, cf = S.cfg, lad = cf.ladder;
           const at = k => p.entry*(1+p.side*cf.tp*k/100), rows = [];
           if (lad){ [1,2].forEach(k=>rows.push({k:"tp"+(p.tpHit>=k?" hit":""),label:"TP"+k+" "+(cf.tp*k/3).toFixed(2)+"%",px:at(k/3),val:p.tpHit>=k?"済":"+"+usd(p.notional*cf.tp*k/300)})); }
@@ -988,6 +1020,7 @@ svg text{font-family:var(--mono)}
           {key:"live",label:"BingXデモへ実発注",opts:YN,val:S.cfg.live}
         ],
         liveNote:"実発注は1回あたり証拠金 $"+LIVE_MAX.toFixed(2)+"（"+S.cfg.lev+"x）を上限に、接続設定のリレー経由でBingXデモ口座に送信します。リレー未設定の場合はONにできません。",
+        liveAccount: S.cfg.live ? { data: liveAccount, err: liveAccountErr, updatedAt: lastLiveAccountAt } : null,
         foot:(src==="bingx"?"BingX":"Bybit")+"公開データ（USDT無期限先物）で判定。直近1分・5分の値動きと出来高の急増から、ロング（上昇の順張り）／ショート（下落の順張り・急騰後の反落狙い）を選びます。利確は MAX利確を3等分（TP1=1/3、TP2=2/3、TP3=MAX）し、TP1・TP2で約1/3ずつ決済、「建値撤退」をTP2後（またはTP1後）にすると損切りが建値に切り上がります。手数料は片道"+(FEEF()*100).toFixed(3)+"%、資金調達は保有中に連続的に概算、強制ロスカットは維持証拠金率0.5%で概算。実際の取引所の約定・ロスカット・資金調達とは異なります。レバレッジ取引は元本以上の損失に至ることがあり、この戦略に優位性があるとは限りません。" };
     }
     function handleCmd(b){
@@ -1012,7 +1045,7 @@ svg text{font-family:var(--mono)}
       src = v; store.set(SRCKEY, v); tokens.clear(); lastError = null; lastErrLogged = "";
       addLog("SYS","先物データ元を "+(v==="bingx"?"BingX":"Bybit")+" に変更",true); persist(); loop();
     }
-    return { kind:"perp", publicState, handleCmd, setSource, getSource:()=>src,
+    return { kind:"perp", publicState, handleCmd, setSource, getSource:()=>src, test:{relay, fetchLiveAccount},
       start(cb){ onUpdate = cb; load(); const gap = Date.now() - (S.lastPollAt || Date.now());
         if (S.positions.length && gap > 60e3) addLog("SYS","前回の終了から約"+Math.max(1,Math.round(gap/60000))+"分経過。保有中のポジションはこの間の損切り・利確・ロスカットが判定されていません。",true);
         loop(); },
@@ -1083,6 +1116,9 @@ svg text{font-family:var(--mono)}
     p.textContent = usd(s.pnlUsd,true); p.className = "big "+(s.pnlUsd>=0?"pos":"neg");
     $("startTxt").textContent = "開始 "+usd(s.startUsd);
     $("bal").textContent = usd(s.equity); $("balNow").textContent = usd(s.equity);
+    const blw = $("balLiveWrap");
+    if (s.kind==="perp" && s.liveAccount && s.liveAccount.data && s.liveAccount.data.equity!=null){ blw.style.display = ""; $("balLive").textContent = usd(s.liveAccount.data.equity); }
+    else { blw.style.display = "none"; }
     $("clock").textContent = mmss(Math.floor((s.now-s.startedAt)/1000));
     $("skips").textContent = s.stats.skips;
     $("posline").innerHTML = s.positions.length
@@ -1157,6 +1193,25 @@ svg text{font-family:var(--mono)}
     const newest = s.log[0] ? s.log[0].id : 0;
     if (lastLogId[cur] && newest>lastLogId[cur] && s.log.some(l=>l.id>lastLogId[cur] && l.hi) && !reduceMotion) pulseAmt = 0.09;
     lastLogId[cur] = newest;
+    const laSec = $("liveAccSec");
+    if (s.kind==="perp" && s.liveAccount){
+      laSec.style.display = "";
+      const la = s.liveAccount;
+      $("liveAccAge").textContent = la.updatedAt ? Math.max(0,Math.round((s.now-la.updatedAt)/1000))+"秒前" : "取得中…";
+      if (la.err){
+        $("liveAccBody").innerHTML = "<div class='empty'>取得エラー: "+esc(la.err)+"</div>";
+      } else if (!la.data){
+        $("liveAccBody").innerHTML = "<div class='empty'>取得中…</div>";
+      } else {
+        const d = la.data;
+        const rows = d.positions.length ? d.positions.map(p=>{
+          const side = p.amt>0 ? "long" : "short";
+          const nm = String(p.symbol||"").replace(/-?USDT$/,"");
+          return "<div class='tl'><span>"+sideBadge({side, lev:p.lev||"?"})+esc(nm)+"</span><b class='"+(p.pnl>=0?"pos":"neg")+"'>"+usd(p.pnl,true)+"</b><small>数量 "+Math.abs(p.amt)+"</small><small style='text-align:right'>建値 $"+px(p.entry)+"</small></div>";
+        }).join("") : "<div class='empty'>ポジションなし</div>";
+        $("liveAccBody").innerHTML = "<div class='kv' style='margin-bottom:10px'><div><span>評価額</span><b>"+usd(d.equity||0)+"</b></div><div><span>残高</span><b>"+usd(d.balance||0)+"</b></div><div><span>使用可能</span><b>"+usd(d.avail||0)+"</b></div></div>" + rows;
+      }
+    } else { laSec.style.display = "none"; }
     $("bPause").textContent = s.running ? "新規エントリー停止" : "新規エントリー再開";
     $("foot").textContent = s.foot;
     const ln = $("liveNote");
@@ -1164,13 +1219,18 @@ svg text{font-family:var(--mono)}
     syncCtl(s);
   }
 
-  function setTab(k){ cur = k; refresh(); }
+  function setTab(k){ cur = k; $("bScalp").style.display = k==="perp" ? "" : "none"; refresh(); }
   $("tabSpot").addEventListener("click", () => setTab("spot"));
   $("tabPerp").addEventListener("click", () => setTab("perp"));
   document.addEventListener("click", e => { const tr = e.target.closest("tr.row"); if (!tr) return; focusBy[cur] = tr.dataset.m; render(); });
   $("bPause").addEventListener("click", () => cmd({cmd: STs[cur].running ? "pause" : "resume"}));
   $("bClose").addEventListener("click", () => cmd({cmd:"close"}));
   $("bReset").addEventListener("click", () => { if (confirm("この口座（"+STs[cur].title+"）の損益と取引履歴をリセットします。よろしいですか？")) cmd({cmd:"reset"}); });
+  $("bScalp").addEventListener("click", () => {
+    if (cur !== "perp"){ alert("このプリセットは「先物 L/S」タブでのみ使えます。タブを切り替えてから押してください。"); return; }
+    if (!confirm("先物の設定を、証拠金$20・20倍・利確/損切りとも約$5（1.25%）・単発決済（分割OFF）・トレーリングOFFに変更します。よろしいですか？")) return;
+    cmd({cmd:"cfg", cfg:{lev:20, size:0.04, sl:1.25, tp:1.25, ladder:false, trail:false, scale:false}});
+  });
 
   /* ---- 接続設定 ---- */
   $("selSrc").value = engines.perp.getSource(); $("inProxy").value = PROXY;
@@ -1192,6 +1252,10 @@ svg text{font-family:var(--mono)}
     await t("DexScreener 新着一覧", async () => { const a = await fetchJson(DEX+"/token-boosts/latest/v1"); return (Array.isArray(a)?a.length:0)+"件"; });
     await t("DexScreener 価格取得", async () => { const a = await fetchJson(DEX+"/tokens/v1/"+CHAIN+"/So11111111111111111111111111111111111111112"); return (Array.isArray(a)?a.length:0)+"ペア"; });
     await t("BingX 先物ティッカー", async () => { const j = await fetchJson(BINGX+"/openApi/swap/v2/quote/ticker?symbol=BTC-USDT&timestamp="+Date.now()); if (j.code!==0) throw new Error((j.msg||"応答が不正")+"（code "+j.code+"）"); const d = Array.isArray(j.data)?j.data[0]:j.data; return "BTC-USDT $"+(d&&d.lastPrice); });
+    if (RELAY_URL && RELAY_TOKEN){
+      await t("BingX 先物ティッカー（リレー経由）", async () => { const j = await engines.perp.test.relay("/market/ticker?symbol=BTC-USDT"); const d = j.result && (Array.isArray(j.result.data)?j.result.data[0]:j.result.data); return "BTC-USDT $"+(d&&d.lastPrice); });
+      await t("BingXデモ残高（リレー経由）", async () => { const j = await engines.perp.test.relay("/balance"); const b = j.result && j.result.data && j.result.data.balance; return b ? "equity $"+b.equity : "取得済み"; });
+    }
     await t("Bybit 先物ティッカー", async () => { const j = await fetchJson(BYBIT+"/v5/market/tickers?category=linear&symbol=BTCUSDT"); if (j.retCode!==0) throw new Error(j.retMsg||"応答が不正"); return "BTCUSDT $"+(j.result.list[0]||{}).lastPrice; });
     await t("Solana RPC（Top10用）", async () => { await engines.spot.test.rpc("getSlot",[]); });
     rows.push("→ ✕の行があれば、ブラウザや取引所側が通信をブロックしている可能性があります（地域制限など）。表示されたメッセージを教えてください。プロキシURLの設定でも解決できる場合があります。");
