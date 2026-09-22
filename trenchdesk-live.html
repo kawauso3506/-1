@@ -711,13 +711,13 @@ svg text{font-family:var(--mono)}
     const MMR = 0.005, MAX_SPREAD = 0.0015;
     const FEEF = () => src === "bingx" ? 0.0005 : 0.00055;
     const GATES = { off:null, std:{risk:65,label:"標準"}, strict:{risk:50,label:"厳しめ"} };
-    const ALLOW = {mode:["calm","normal","active"],dir:["both","long","short"],lev:[1,2,3,5,10,20],size:[0.04,0.05,0.1,0.2],sl:[0.8,1.25,1.5,3,5],tp:[1,1.25,2,4,8],trail:[true,false],gate:["off","std","strict"],scale:[true,false],ladder:[true,false],be:["off","tp1","tp2"],live:[true,false]};
+    const ALLOW = {mode:["calm","normal","active"],dir:["both","long","short"],lev:[1,2,3,5,10,20],size:[0.04,0.05,0.1,0.2],sl:[0.8,1.25,1.5,3,5],tp:[1,1.25,2,4,8],trail:[true,false],gate:["off","std","strict"],scale:[true,false],ladder:[true,false],be:["off","tp1","tp2"],live:[true,false],strategy:["momentum","fade"],fadeThresh:[3,5,8]};
     const PM = () => PERP_MODE[S.cfg.mode] || PERP_MODE.active;
     const pollMs = () => POLL_OVERRIDE || PM().poll;
 
     function fresh(){
       return { startedAt:Date.now(), running:true, cash:START_USD, positions:[], trades:[], log:[], hist:[{t:Date.now(),v:START_USD}],
-        skips:0, polls:0, events:0, logSeq:0, lastPollAt:0, cooldown:{}, cfg:{mode:"active",dir:"both",lev:3,size:0.1,sl:1.5,tp:3,trail:true,gate:"std",scale:true,ladder:true,be:"tp2",live:false} };
+        skips:0, polls:0, events:0, logSeq:0, lastPollAt:0, cooldown:{}, cfg:{mode:"active",dir:"both",lev:3,size:0.1,sl:1.5,tp:3,trail:true,gate:"std",scale:true,ladder:true,be:"tp2",live:false,strategy:"fade",fadeThresh:5} };
     }
     let S = fresh();
     const tokens = new Map();
@@ -833,12 +833,19 @@ svg text{font-family:var(--mono)}
       if (m.spread > MAX_SPREAD){ r.why = "スプレッド "+(m.spread*100).toFixed(2)+"% が広い"; return r; }
       if (m.r5==null || m.r1==null || m.vrel==null){ r.why = "ウォームアップ中"; return r; }
       const d = S.cfg.dir, c = [], vr = Math.min(m.vrel,5);
-      if (d!=="short" && m.r1>=P.r1 && m.r5>=P.r5 && m.vrel>=P.vrel && t.fr<=0.001 && t.chg24<=100 && (t.chg1h==null || t.chg1h>=-3)) c.push({dir:"long",kind:"順張り",score:m.r5*vr});
-      if (d!=="long"){
-        if (-m.r1>=P.r1 && -m.r5>=P.r5 && m.vrel>=P.vrel && t.fr>=-0.001 && (t.chg1h==null || t.chg1h<=3)) c.push({dir:"short",kind:"順張り",score:-m.r5*vr});
-        if (t.chg24>=35 && t.hi>0 && (t.hi-t.px)/t.hi>=0.04 && m.r5<=-P.r5*0.75 && t.fr>=0) c.push({dir:"short",kind:"反落狙い",score:-m.r5*Math.max(vr,1)});
+      if (S.cfg.strategy === "fade"){
+        const th = S.cfg.fadeThresh;
+        if (d!=="long" && m.r5>=th) c.push({dir:"short",kind:"逆張り（5分+"+m.r5.toFixed(1)+"%）",score:m.r5});
+        if (d!=="short" && -m.r5>=th) c.push({dir:"long",kind:"逆張り（5分"+m.r5.toFixed(1)+"%）",score:-m.r5});
+        if (!c.length){ r.why = "条件未達（5分 "+pct(m.r5,2)+" ／ しきい値 ±"+th+"%）"; return r; }
+      } else {
+        if (d!=="short" && m.r1>=P.r1 && m.r5>=P.r5 && m.vrel>=P.vrel && t.fr<=0.001 && t.chg24<=100 && (t.chg1h==null || t.chg1h>=-3)) c.push({dir:"long",kind:"順張り",score:m.r5*vr});
+        if (d!=="long"){
+          if (-m.r1>=P.r1 && -m.r5>=P.r5 && m.vrel>=P.vrel && t.fr>=-0.001 && (t.chg1h==null || t.chg1h<=3)) c.push({dir:"short",kind:"順張り",score:-m.r5*vr});
+          if (t.chg24>=35 && t.hi>0 && (t.hi-t.px)/t.hi>=0.04 && m.r5<=-P.r5*0.75 && t.fr>=0) c.push({dir:"short",kind:"反落狙い",score:-m.r5*Math.max(vr,1)});
+        }
+        if (!c.length){ r.why = "条件未達（5分 "+pct(m.r5,2)+" ／ 出来高×"+m.vrel.toFixed(1)+"）"; return r; }
       }
-      if (!c.length){ r.why = "条件未達（5分 "+pct(m.r5,2)+" ／ 出来高×"+m.vrel.toFixed(1)+"）"; return r; }
       c.sort((a,b)=>b.score-a.score); r.basic = true; r.dir = c[0].dir; r.kind = c[0].kind; r.score = c[0].score;
       const g = GATES[S.cfg.gate]; if (g && m.risk >= g.risk) r.gateWhy = "総合リスク "+m.risk+" ≥ 上限 "+g.risk;
       return r;
@@ -993,7 +1000,7 @@ svg text{font-family:var(--mono)}
       const dirL = {both:"ロング＋ショート",long:"ロングのみ",short:"ショートのみ"}[S.cfg.dir];
       return { kind:"perp", title:"先物 ロング/ショート（ペーパー）", colTaker:"出来高×", now, running:S.running, startUsd:START_USD, equity:eq, pnlUsd:eq-START_USD, cash:S.cash, cfg:S.cfg, gates:GATES,
         labels:{vol:"危険度・ボラ（激しさ）",down:"逆行リスク（過熱度）"},
-        chips:[dirL+" ・ "+S.cfg.lev+"x", S.cfg.ladder ? "SL "+S.cfg.sl+"% ／ TP "+(S.cfg.tp/3).toFixed(2)+"/"+(S.cfg.tp*2/3).toFixed(2)+"/"+S.cfg.tp+"%" : "SL "+S.cfg.sl+"% ／ 利確 "+S.cfg.tp+"%", beLabel(S.cfg.be),"モード: "+(MODE_OPTS.find(o=>o.v===S.cfg.mode)||{l:""}).l+(S.cfg.trail?" ・ トレーリング":""),"ゲート: "+(g?g.label:"OFF")].concat(S.cfg.live?["実発注 ON（BingXデモ）"]:[]).concat(warm>0?["ウォームアップ中（あと約"+warm+"秒）"]:[]),
+        chips:[dirL+" ・ "+S.cfg.lev+"x", S.cfg.strategy==="fade" ? "逆張り（5分±"+S.cfg.fadeThresh+"%で反転を取る）" : "順張り", S.cfg.ladder ? "SL "+S.cfg.sl+"% ／ TP "+(S.cfg.tp/3).toFixed(2)+"/"+(S.cfg.tp*2/3).toFixed(2)+"/"+S.cfg.tp+"%" : "SL "+S.cfg.sl+"% ／ 利確 "+S.cfg.tp+"%", beLabel(S.cfg.be),"モード: "+(MODE_OPTS.find(o=>o.v===S.cfg.mode)||{l:""}).l+(S.cfg.trail?" ・ トレーリング":""),"ゲート: "+(g?g.label:"OFF")].concat(S.cfg.live?["実発注 ON（BingXデモ）"]:[]).concat(warm>0?["ウォームアップ中（あと約"+warm+"秒）"]:[]),
         stats:{trades:S.trades.length,wins:S.trades.filter(x=>x.pnlUsd>0).length,skips:S.skips,polls:S.polls,watching:tokens.size,events:S.events},
         health:{lastPollAt,lastError,pollMs:pollMs(),source:(src==="bingx"?BINGX:BYBIT).replace(/^https?:\/\//,"")+(src==="bingx"&&RELAY_URL&&RELAY_TOKEN?"（リレー経由）":PROXY?"（プロキシ経由）":"")},
         positions:S.positions.map(p=>{ const t = tokens.get(p.sym), pxv = t?t.px:p.entry, un = unreal(p,t)-p.fundingPaid, m0 = p.margin0 || p.margin, cf = S.cfg, lad = cf.ladder;
@@ -1008,6 +1015,8 @@ svg text{font-family:var(--mono)}
         ctl:[
           {key:"mode",label:"アクティブ度",opts:MODE_OPTS,val:S.cfg.mode},
           {key:"dir",label:"方向",opts:[{l:"両方",v:"both"},{l:"ロングのみ",v:"long"},{l:"ショートのみ",v:"short"}],val:S.cfg.dir},
+          {key:"strategy",label:"戦略",opts:[{l:"順張り",v:"momentum"},{l:"逆張り（行き過ぎ狩り）",v:"fade"}],val:S.cfg.strategy},
+          {key:"fadeThresh",label:"逆張りのしきい値（5分変化）",opts:ALLOW.fadeThresh.map(v=>({l:"±"+v+"%",v})),val:S.cfg.fadeThresh},
           {key:"lev",label:"レバレッジ",opts:ALLOW.lev.map(v=>({l:v+"x",v})),val:S.cfg.lev},
           {key:"size",label:"1回の証拠金（評価額比）",opts:ALLOW.size.map(v=>({l:Math.round(v*100)+"%",v})),val:S.cfg.size},
           {key:"sl",label:"損切り（価格の逆行）",opts:ALLOW.sl.map(v=>({l:v+"%",v})),val:S.cfg.sl},
