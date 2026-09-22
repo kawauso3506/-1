@@ -717,7 +717,7 @@ svg text{font-family:var(--mono)}
 
     function fresh(){
       return { startedAt:Date.now(), running:true, cash:START_USD, positions:[], trades:[], log:[], hist:[{t:Date.now(),v:START_USD}],
-        skips:0, polls:0, events:0, logSeq:0, lastPollAt:0, cooldown:{}, cfg:{mode:"active",dir:"both",lev:3,size:0.1,sl:1.5,tp:3,trail:true,gate:"std",scale:true,ladder:true,be:"tp2",live:false,strategy:"surge",fadeThresh:5,surgeThresh:5,pyramid:false} };
+        skips:0, polls:0, events:0, logSeq:0, lastPollAt:0, cooldown:{}, retry:{}, cfg:{mode:"active",dir:"both",lev:3,size:0.1,sl:1.5,tp:3,trail:true,gate:"std",scale:true,ladder:true,be:"tp2",live:false,strategy:"surge",fadeThresh:5,surgeThresh:5,pyramid:false} };
     }
     let S = fresh();
     const tokens = new Map();
@@ -890,7 +890,7 @@ svg text{font-family:var(--mono)}
         addLog("LIVE",base+" 実決済（"+label+"）: "+q,true);
       }catch(err){ addLog("LIVE",base+" 実決済に失敗（"+label+"）: "+err.message,true); }
     }
-    const PYR_SL = 35, PYR_ADD1 = 20, PYR_ADD2 = 28, PYR_TP1 = 50, PYR_TP2 = 80, PYR_TP3 = 120, PYR_STEP = 20, PYR_MAX_ADD2 = 3;
+    const PYR_SL = 35, PYR_ADD1 = 20, PYR_ADD2 = 28, PYR_TP1 = 50, PYR_TP2 = 80, PYR_TP3 = 120, PYR_STEP = 20, PYR_MAX_ADD2 = 3, PYR_MAX_RETRY = 8;
     function openPos(t,e){
       let margin = Math.min(S.cash*0.98, equity()*S.cfg.size);
       if (S.cfg.scale && !S.cfg.pyramid) margin *= clamp(1 - e.m.risk/150, 0.4, 1);
@@ -997,6 +997,11 @@ svg text{font-family:var(--mono)}
       S.trades.unshift({symbol:baseOf(p.sym),mint:p.sym,side:p.side>0?"long":"short",lev:p.lev,entryTs:p.ts,exitTs:Date.now(),pnlUsd:pnl,pct:pnl/m0*100,reason:why,kind:p.kind});
       if (S.trades.length>100) S.trades.pop();
       S.cooldown[p.sym] = Date.now(); S.events++;
+      if (p.pyramid && reason.indexOf("初期固定")>=0){
+        const n = (S.retry[p.sym]||0)+1;
+        if (n <= PYR_MAX_RETRY){ S.retry[p.sym] = n; delete S.cooldown[p.sym]; addLog("SYS",baseOf(p.sym)+" 固定損切りで再エントリー待機なし（"+n+"/"+PYR_MAX_RETRY+"回目）",true); }
+        else { addLog("SYS",baseOf(p.sym)+" 再エントリーの上限（"+PYR_MAX_RETRY+"回）に達したため、通常のクールダウンに戻します",true); }
+      } else if (p.pyramid && S.retry[p.sym]){ delete S.retry[p.sym]; }
       addLog("TRADE",baseOf(p.sym)+" "+(p.side>0?"ロング":"ショート")+" 決済（"+why+"） "+(pnl>=0?"+":"−")+"$"+Math.abs(pnl).toFixed(2),true);
     }
     function accrueFunding(){
@@ -1029,7 +1034,7 @@ svg text{font-family:var(--mono)}
       if (!S.running || S.positions.length >= P.maxPos) return;
       const held = new Set(S.positions.map(p=>p.sym)), cands = [];
       for (const t of tokens.values()){
-        if (held.has(t.sym) || (S.cooldown[t.sym] && now - S.cooldown[t.sym] < msMin(P.cool))) continue;
+        if (held.has(t.sym) || (!S.retry[t.sym] && S.cooldown[t.sym] && now - S.cooldown[t.sym] < msMin(P.cool))) continue;
         const e = evalEntry(t); if (!e.basic) continue;
         if (e.gateWhy){ if (!t.skipAt || now - t.skipAt > msMin(10)){ t.skipAt = now; S.skips++; addLog("RISK",baseOf(t.sym)+" 見送り: "+e.gateWhy,true); } continue; }
         cands.push({t,e});
