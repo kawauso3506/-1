@@ -200,6 +200,8 @@ svg text{font-family:var(--mono)}
 #ctlDyn{display:contents}
 .lv.liq .bar i{background:var(--red);opacity:.5}
 .posline{line-height:1.9}
+.posrow{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
+.btn.sm{padding:3px 10px;min-height:0;font-size:11.5px;border-radius:6px}
 .banner{margin-bottom:10px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12px;color:var(--ink2)}
 .banner b{color:var(--ink);font-weight:500}
 .pill.err{background:var(--red);color:#fff}.pill.err i{background:#fff}
@@ -688,6 +690,7 @@ svg text{font-family:var(--mono)}
       if (c==="pause"){ S.running = false; addLog("SYS","新規エントリーを停止"); }
       else if (c==="resume"){ S.running = true; addLog("SYS","新規エントリーを再開"); }
       else if (c==="close"){ for (const p of [...S.positions]) closePos(p,"手動クローズ"); }
+      else if (c==="closeOne" && b.mint){ const p = S.positions.find(x=>x.mint===b.mint); if (p) closePos(p,"手動クローズ"); }
       else if (c==="reset"){ const cfg = S.cfg; S = fresh(); S.cfg = cfg; addLog("SYS","セッションをリセット（ペーパー）"); }
       else if (c==="cfg" && b.cfg){ for (const k of Object.keys(b.cfg)) if (ALLOW[k] && ALLOW[k].includes(b.cfg[k])) S.cfg[k] = b.cfg[k]; }
       persist();
@@ -1151,6 +1154,7 @@ svg text{font-family:var(--mono)}
       if (c==="pause"){ S.running = false; addLog("SYS","新規エントリーを停止"); }
       else if (c==="resume"){ S.running = true; addLog("SYS","新規エントリーを再開"); }
       else if (c==="close"){ for (const p of [...S.positions]) closePos(p,"手動クローズ"); }
+      else if (c==="closeOne" && b.mint){ const p = S.positions.find(x=>x.sym===b.mint); if (p) closePos(p,"手動クローズ"); }
       else if (c==="reset"){ const cfg = S.cfg; S = fresh(); S.cfg = cfg; addLog("SYS","セッションをリセット（ペーパー）"); }
       else if (c==="cfg" && b.cfg){
         for (const k of Object.keys(b.cfg)) if (ALLOW[k] && ALLOW[k].includes(b.cfg[k])){
@@ -1245,7 +1249,7 @@ svg text{font-family:var(--mono)}
     $("clock").textContent = mmss(Math.floor((s.now-s.startedAt)/1000));
     $("skips").textContent = s.stats.skips;
     $("posline").innerHTML = s.positions.length
-      ? "保有中 "+s.positions.map(x=>sideBadge(x)+"<b>"+esc(x.symbol)+"</b> <b class='"+(x.retPct>=0?"pos":"neg")+"'>"+pct(x.retPct)+"</b> ("+usd(x.valueUsd)+")"+(x.pyrInfo?" <small style='color:var(--ink2)'>"+esc(x.pyrInfo)+"</small>":"")).join("<br>")
+      ? "保有中<br>"+s.positions.map(x=>"<span class='posrow'>"+sideBadge(x)+"<b>"+esc(x.symbol)+"</b> <b class='"+(x.retPct>=0?"pos":"neg")+"'>"+pct(x.retPct)+"</b> ("+usd(x.valueUsd)+")"+(x.pyrInfo?" <small style='color:var(--ink2)'>"+esc(x.pyrInfo)+"</small>":"")+" <button type='button' class='btn ghost sm' data-close='"+esc(x.mint)+"'>決済</button></span>").join("<br>")
       : (s.running ? "ポジションなし（条件を満たす銘柄を待機）" : "ポジションなし（新規エントリー停止中）");
 
     const b = spark(s.hist,320,130,16), base = (1-(s.startUsd-b.mn)/((b.mx-b.mn)||1))*98+16;
@@ -1346,6 +1350,12 @@ svg text{font-family:var(--mono)}
   $("tabSpot").addEventListener("click", () => setTab("spot"));
   $("tabPerp").addEventListener("click", () => setTab("perp"));
   document.addEventListener("click", e => { const tr = e.target.closest("tr.row"); if (!tr) return; focusBy[cur] = tr.dataset.m; render(); });
+  document.addEventListener("click", e => {
+    const btn = e.target.closest("button[data-close]"); if (!btn) return;
+    const mint = btn.dataset.close, sym = STs[cur] && STs[cur].positions.find(p=>p.mint===mint);
+    const label = sym ? sym.symbol : mint;
+    if (confirm(label+" を決済します。よろしいですか？")) cmd({cmd:"closeOne", mint});
+  });
   $("bPause").addEventListener("click", () => cmd({cmd: STs[cur].running ? "pause" : "resume"}));
   $("bClose").addEventListener("click", () => cmd({cmd:"close"}));
   $("bReset").addEventListener("click", () => { if (confirm("この口座（"+STs[cur].title+"）の損益と取引履歴をリセットします。よろしいですか？")) cmd({cmd:"reset"}); });
