@@ -388,14 +388,15 @@ svg text{font-family:var(--mono)}
   }
   async function getPrecision(symBase){
     if (precisionCache.has(symBase)) return precisionCache.get(symBase);
-    let prec = 3;
+    let out = {qty:3, price:4};
     try{
       const j = await relay("/contracts?symbol="+symBase+"USDT");
       const d = Array.isArray(j.result && j.result.data) ? j.result.data[0] : (j.result && j.result.data);
-      if (d && d.quantityPrecision != null) prec = d.quantityPrecision;
+      if (d && d.quantityPrecision != null) out.qty = d.quantityPrecision;
+      if (d && d.pricePrecision != null) out.price = d.pricePrecision;
     }catch(_){}
-    precisionCache.set(symBase, prec);
-    return prec;
+    precisionCache.set(symBase, out);
+    return out;
   }
   function floorTo(v, prec){ const f = Math.pow(10,Math.max(0,prec)); return Number((Math.floor(v*f + 1e-6)/f).toFixed(Math.max(0,prec))); }
   let MANUAL = (Q.get("watch") || store.get(WKEY)).split(",").map(s=>s.trim()).filter(Boolean);
@@ -927,20 +928,21 @@ svg text{font-family:var(--mono)}
       const base = baseOf(p.sym);
       try{
         const prec = await getPrecision(base);
-        const qty = floorTo(LIVE_MAX*p.lev/p.entry, prec);
+        const qty = floorTo(LIVE_MAX*p.lev/p.entry, prec.qty);
         if (!(qty>0)){ addLog("LIVE",base+": 実発注スキップ（数量が最小単位未満）",true); p.live = null; return; }
         const j = await relay("/order","POST",{symbol:base+"USDT", side:p.side>0?"BUY":"SELL", positionSide:p.side>0?"LONG":"SHORT", quantity:qty});
-        p.live = {qty, prec, status:"open"};
+        p.live = {qty, prec:prec.qty, status:"open"};
         const fillPx = parseFloat(j.result && j.result.data && j.result.data.avgPrice) || p.entry;
         addLog("LIVE",base+" 実発注: "+(p.side>0?"ロング":"ショート")+" "+qty+"（BingXデモ）",true);
         // 利確・損切りを、実際の約定価格を基準にBingX側へも置く（画面を閉じても取引所側で発動する）
+        // 価格にも数量と同じく「小数点以下は何桁まで」という決まりがあるため、それに合わせて丸める
         const slPct = p.pyramid ? PYR_SL/100/p.lev : S.cfg.sl/100;
         const tpPct = p.pyramid ? null : S.cfg.tp/100; // ピラミッド式は多段利確なので、単発のTP注文は置かない（SLのみ）
-        const slPrice = fillPx*(1 - p.side*slPct);
-        const tpPrice = tpPct!=null ? fillPx*(1 + p.side*tpPct) : null;
+        const slPrice = floorTo(fillPx*(1 - p.side*slPct), prec.price);
+        const tpPrice = tpPct!=null ? floorTo(fillPx*(1 + p.side*tpPct), prec.price) : null;
         try{
-          const br = await relay("/bracket-only","POST",{symbol:base+"USDT", positionSide:p.side>0?"LONG":"SHORT", slPrice: slPrice.toFixed(8), tpPrice: tpPrice!=null?tpPrice.toFixed(8):undefined});
-          if (br.errors && br.errors.length) addLog("LIVE",base+" 利確/損切り注文の一部に失敗: "+br.errors.map(e=>e.which).join(","),true);
+          const br = await relay("/bracket-only","POST",{symbol:base+"USDT", positionSide:p.side>0?"LONG":"SHORT", slPrice: String(slPrice), tpPrice: tpPrice!=null?String(tpPrice):undefined});
+          if (br.errors && br.errors.length) addLog("LIVE",base+" 利確/損切り注文の一部に失敗: "+br.errors.map(e=>e.which+"（"+(typeof e.detail==="string"?e.detail:JSON.stringify(e.detail))+"）").join(", "),true);
           else addLog("LIVE",base+" BingX側に損切り"+(tpPrice!=null?"・利確":"")+"を設置（画面を閉じても発動）",true);
         }catch(err){ addLog("LIVE",base+" 利確/損切り注文の設置に失敗: "+err.message,true); }
       }catch(err){ p.live = null; addLog("LIVE",base+" 実発注に失敗: "+err.message,true); }
@@ -986,7 +988,7 @@ svg text{font-family:var(--mono)}
       const base = baseOf(p.sym);
       try{
         const prec = await getPrecision(base);
-        const qty = floorTo(LIVE_MAX*p.lev/p.entry, prec);
+        const qty = floorTo(LIVE_MAX*p.lev/p.entry, prec.qty);
         if (!(qty>0)) return;
         await relay("/order","POST",{symbol:base+"USDT", side:p.side>0?"BUY":"SELL", positionSide:p.side>0?"LONG":"SHORT", quantity:qty});
         p.live.qty += qty;
