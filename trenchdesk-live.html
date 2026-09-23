@@ -330,6 +330,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
         <button class="btn ghost" id="bSaveConn">保存</button>
       </div>
       <div class="why" id="diag"></div>
+      <p class="foot" id="liveNote" style="display:none"></p>
     </details>
 
     <details class="panel a-ctl">
@@ -1099,7 +1100,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
   function render(){
     const s = STs[cur], f = pickFocus(s);
     setPill(s);
-    $("pnlTitle").textContent = s.title; $("thTaker").textContent = s.colTaker;
+    $("pnlTitle").textContent = s.title;
     $("lblVol").textContent = s.labels.vol; $("lblDown").textContent = s.labels.down;
     $("src").textContent = s.health.source;
     $("sWatch").textContent = s.stats.watching;
