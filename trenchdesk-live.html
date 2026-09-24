@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>TrenchDesk Live v4（iPhone版）</title>
+<title>TrenchDesk Live v8（iPhone版）</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <style>
 :root{
@@ -227,7 +227,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
   <header class="top">
     <div class="brand">
       <svg width="36" height="36" viewBox="0 0 36 36" aria-hidden="true"><rect width="36" height="36" rx="8" fill="var(--purple)"/><path d="M9 11h18v4.5h-6.8V27h-4.4V15.5H9z" fill="var(--lime)"/></svg>
-      <div><h1>TrenchDesk Live</h1><p>実データ × ペーパー売買（先物ロング/ショート）</p></div>
+      <div><h1>TrenchDesk Live v8</h1><p>実データ × ペーパー売買（先物ロング/ショート）</p></div>
     </div>
     <span class="pill off" id="pill"><i></i><span id="pillTxt">接続中</span></span>
   </header>
@@ -1140,7 +1140,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     setPill(s);
     $("pnlTitle").textContent = s.title;
     $("lblVol").textContent = s.labels.vol; $("lblDown").textContent = s.labels.down;
-    $("src").textContent = s.health.source;
+    { const se = $("src"); if (se) se.textContent = s.health.source; }
     $("sWatch").textContent = s.stats.watching;
     $("sTrades").textContent = s.stats.trades+" / "+s.stats.wins;
     $("sFocus").textContent = f ? f.symbol : "–";
