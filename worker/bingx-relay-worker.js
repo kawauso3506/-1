@@ -48,6 +48,7 @@ async function bingxRequest(env, method, path, params = {}) {
   const text = await r.text();
   let data;
   try { data = JSON.parse(text); } catch (_) { data = { raw: text }; }
+  if (data && typeof data === "object") { const m = text.match(/"orderId"\s*:\s*"?(\d+)"?/); if (m) data._orderId = m[1]; }
   if (!r.ok || (data && typeof data.code !== "undefined" && data.code !== 0)) {
     throw { httpStatus: r.ok ? 200 : r.status, bingxCode: data && data.code, body: data };
   }
@@ -63,21 +64,22 @@ function toBingxSymbol(sym) {
 async function placeTriggers(env, b, isDemo) {
   const sym = toBingxSymbol(b.symbol);
   const closeSide = b.positionSide === "LONG" ? "SELL" : "BUY";
-  const placed = [], errors = [];
+  const placed = [], errors = [], ids = {};
   const place = async (which, type, price) => {
     try {
-      await bingxRequest(env, "POST", "/openApi/swap/v2/trade/order", {
+      const rr = await bingxRequest(env, "POST", "/openApi/swap/v2/trade/order", {
         symbol: sym, side: closeSide, positionSide: b.positionSide,
         type, quantity: b.quantity, stopPrice: price, workingType: "MARK_PRICE",
       });
       placed.push(which);
+      if (rr && rr._orderId) ids[which] = rr._orderId;
     } catch (e) {
       errors.push({ which, detail: e.body || e.message || String(e) });
     }
   };
   if (b.slPrice) await place("sl", "STOP_MARKET", b.slPrice);
   if (b.tpPrice) await place("tp", "TAKE_PROFIT_MARKET", b.tpPrice);
-  return { demo: isDemo, placed, errors };
+  return { demo: isDemo, placed, errors, ids };
 }
 
 async function route(req, env) {
@@ -167,6 +169,14 @@ async function route(req, env) {
         });
         const t = await placeTriggers(env, b, isDemo);
         return json({ demo: isDemo, result: entry, placed: t.placed, errors: t.errors });
+      }
+
+      // 注文を1件だけ取消（損切りラインの引き上げで、古い注文を外すのに使う）
+      if (req.method === "POST" && u.pathname === "/cancel-order") {
+        const b = await req.json().catch(() => ({}));
+        if (!b.symbol || !b.orderId) return json({ error: "symbol, orderId は必須です" }, 400);
+        const r = await bingxRequest(env, "DELETE", "/openApi/swap/v2/trade/order", { symbol: toBingxSymbol(b.symbol), orderId: String(b.orderId) });
+        return json({ demo: isDemo, result: r });
       }
 
       // 銘柄の未約定注文をすべて取消
@@ -531,6 +541,31 @@ async function fetchJson(url, opt){
         return avg;
       }catch(_){ return 0; }
     }
+    function ceilTo(v, prec){ const f = Math.pow(10,Math.max(0,prec)); return Number((Math.ceil(v*f - 1e-6)/f).toFixed(Math.max(0,prec))); }
+    const trailBusy = new Set();
+    async function liveRestop(p, target){
+      const base = baseOf(p.sym), side = p.side>0 ? "LONG" : "SHORT", prec = await getPrecision(base);
+      const q = floorTo(p.live.qty, prec.qty); if (!(q>0)) return false;
+      const br = await relay("/bracket-only","POST",{symbol:base+"USDT", positionSide:side, quantity:q, slPrice:String(target)});
+      if (br.errors && br.errors.length) throw new Error(br.errors.map(e=>typeof e.detail==="string"?e.detail:JSON.stringify(e.detail)).join(", "));
+      const oldId = p.live.stopId;
+      p.live.stopId = (br.ids && br.ids.sl) || null; p.live.stopPx = target;
+      if (oldId){ try{ await relay("/cancel-order","POST",{symbol:base+"USDT", orderId:oldId}); }catch(_){} }
+      return true;
+    }
+    async function liveTrail(p, hbPx){
+      if (!S.cfg.live || !p.live || p.live.status!=="open" || trailBusy.has(p.sym)) return;
+      trailBusy.add(p.sym);
+      try{
+        const base = baseOf(p.sym), prec = await getPrecision(base);
+        const target = p.side>0 ? floorTo(hbPx, prec.price) : ceilTo(hbPx, prec.price), last = p.live.stopPx;
+        if (!(target>0)) return;
+        const better = last ? (p.side>0 ? target/last-1 : 1-target/last) : 1;
+        if (better < 0.0025) return;
+        if (await liveRestop(p, target)) addLog("LIVE", base+" BingX側の損切りを半戻しライン $"+px(target)+" に引き上げ（通信が切れても利益を守ります）", true);
+      }catch(err){ addLog("LIVE", baseOf(p.sym)+" 損切りの引き上げに失敗: "+err.message, true); }
+      finally{ trailBusy.delete(p.sym); }
+    }
     async function liveOpen(p){
       if (!S.cfg.live) return;
       const base = baseOf(p.sym);
@@ -554,6 +589,7 @@ async function fetchJson(url, opt){
         const tpPrice = tpPct!=null ? floorTo(fillPx*(1 + p.side*tpPct), prec.price) : null;
         try{
           const br = await relay("/bracket-only","POST",{symbol:base+"USDT", positionSide:p.side>0?"LONG":"SHORT", quantity: qty, slPrice: String(slPrice), tpPrice: tpPrice!=null?String(tpPrice):undefined});
+          if (p.live){ if (br.ids && br.ids.sl) p.live.stopId = br.ids.sl; p.live.stopPx = slPrice; }
           if (br.errors && br.errors.length) addLog("LIVE",base+" 利確/損切り注文の一部に失敗: "+br.errors.map(e=>e.which+"（"+(typeof e.detail==="string"?e.detail:JSON.stringify(e.detail))+"）").join(", "),true);
           else addLog("LIVE",base+" BingX側に損切り"+(tpPrice!=null?"・利確":"")+"を設置（画面を閉じても発動）",true);
         }catch(err){ addLog("LIVE",base+" 利確/損切り注文の設置に失敗: "+err.message,true); }
@@ -614,6 +650,7 @@ async function fetchJson(url, opt){
         await relay("/order","POST",{symbol:base+"USDT", side:p.side>0?"BUY":"SELL", positionSide:p.side>0?"LONG":"SHORT", quantity:qty});
         p.live.qty += qty;
         await liveSyncEntry(p, false);
+        try{ if (p.live.stopPx) await liveRestop(p, p.live.stopPx); }catch(err){ addLog("LIVE",base+" 追加後の損切り数量の更新に失敗: "+err.message,true); }
         addLog("LIVE",base+" 追加の実発注: "+qty+"（BingXデモ）",true);
       }catch(err){ addLog("LIVE",base+" 追加発注に失敗: "+err.message,true); }
     }
@@ -684,6 +721,7 @@ async function fetchJson(url, opt){
       }
       p.peak = p.side>0 ? Math.max(p.peak,t.px) : Math.min(p.peak,t.px);
       const fav = p.side*(t.px/p.entry-1)*100, best = p.side*(p.peak/p.entry-1)*100;
+      if (best >= HB_MIN_PEAK && !(fav <= best/2)) liveTrail(p, p.entry*(1+p.side*best/200));
       if (best >= HB_MIN_PEAK && fav <= best/2){ closePos(p,"利確（半戻し）"); return; }
     }
     function fillExit(p,t,q,last){
