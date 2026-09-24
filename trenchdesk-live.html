@@ -310,7 +310,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
 
     <section class="panel a-trades" id="sigSec" style="display:none">
       <h2>シグナル検証<em id="sigAge"></em></h2>
-      <p class="foot" style="margin:0 0 10px">入る・入らないに関係なく、条件を満たした瞬間の価格を記録し、30秒〜15分後にどれだけ動いたかを測っています。「純」は、往復の手数料0.10%とスプレッドを引いた値です。「基準」はランダムに選んだ銘柄で、シグナルがこれより良ければ、入り方に意味があります。</p>
+      <p class="foot" style="margin:0 0 10px">入る・入らないに関係なく、条件を満たした瞬間の価格を記録し、30秒〜15分後にどれだけ動いたかを測っています。「純」は、往復の手数料0.10%とスプレッドを引いた値です。「基準」はランダムに選んだ銘柄で、シグナルがこれより良ければ、入り方に意味があります。「±」は誤差の幅（同じ銘柄の重複を考慮）、「前半・後半」は記録を時間で半分に分けた純で、両方黒字なら偶然の可能性が下がります。</p>
       <div id="sigBody"></div>
       <div class="btns" style="margin-top:10px">
         <button class="btn ghost" id="bSigCopy">検証結果をコピー</button>
@@ -692,6 +692,31 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
         return avg;
       }catch(_){ return 0; }
     }
+    function ceilTo(v, prec){ const f = Math.pow(10,Math.max(0,prec)); return Number((Math.ceil(v*f - 1e-6)/f).toFixed(Math.max(0,prec))); }
+    const trailBusy = new Set();
+    async function liveRestop(p, target){
+      const base = baseOf(p.sym), side = p.side>0 ? "LONG" : "SHORT", prec = await getPrecision(base);
+      const q = floorTo(p.live.qty, prec.qty); if (!(q>0)) return false;
+      const br = await relay("/bracket-only","POST",{symbol:base+"USDT", positionSide:side, quantity:q, slPrice:String(target)});
+      if (br.errors && br.errors.length) throw new Error(br.errors.map(e=>typeof e.detail==="string"?e.detail:JSON.stringify(e.detail)).join(", "));
+      const oldId = p.live.stopId;
+      p.live.stopId = (br.ids && br.ids.sl) || null; p.live.stopPx = target;
+      if (oldId){ try{ await relay("/cancel-order","POST",{symbol:base+"USDT", orderId:oldId}); }catch(_){} }
+      return true;
+    }
+    async function liveTrail(p, hbPx){
+      if (!S.cfg.live || !p.live || p.live.status!=="open" || trailBusy.has(p.sym)) return;
+      trailBusy.add(p.sym);
+      try{
+        const base = baseOf(p.sym), prec = await getPrecision(base);
+        const target = p.side>0 ? floorTo(hbPx, prec.price) : ceilTo(hbPx, prec.price), last = p.live.stopPx;
+        if (!(target>0)) return;
+        const better = last ? (p.side>0 ? target/last-1 : 1-target/last) : 1;
+        if (better < 0.0025) return;
+        if (await liveRestop(p, target)) addLog("LIVE", base+" BingX側の損切りを半戻しライン $"+px(target)+" に引き上げ（通信が切れても利益を守ります）", true);
+      }catch(err){ addLog("LIVE", baseOf(p.sym)+" 損切りの引き上げに失敗: "+err.message, true); }
+      finally{ trailBusy.delete(p.sym); }
+    }
     async function liveOpen(p){
       if (!S.cfg.live) return;
       const base = baseOf(p.sym);
@@ -700,6 +725,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
         const qty = liveQty(p.qty, p, prec.qty);
         if (!(qty>0)){ addLog("LIVE",base+": 実発注スキップ（数量が最小単位未満）",true); p.live = null; return; }
         p.live = {qty:0, prec:prec.qty, status:"opening"};
+        try{ await relay("/cancel-all","POST",{symbol:base+"USDT"}); }catch(_){}
         try{ await relay("/leverage","POST",{symbol:base+"USDT", side:p.side>0?"LONG":"SHORT", leverage:p.lev}); }
         catch(err){ addLog("LIVE",base+" レバレッジ "+p.lev+"x の設定に失敗（"+err.message+"）。BingX側の現在の設定のまま発注します",true); }
         const j = await relay("/order","POST",{symbol:base+"USDT", side:p.side>0?"BUY":"SELL", positionSide:p.side>0?"LONG":"SHORT", quantity:qty});
@@ -715,6 +741,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
         const tpPrice = tpPct!=null ? floorTo(fillPx*(1 + p.side*tpPct), prec.price) : null;
         try{
           const br = await relay("/bracket-only","POST",{symbol:base+"USDT", positionSide:p.side>0?"LONG":"SHORT", quantity: qty, slPrice: String(slPrice), tpPrice: tpPrice!=null?String(tpPrice):undefined});
+          if (p.live){ if (br.ids && br.ids.sl) p.live.stopId = br.ids.sl; p.live.stopPx = slPrice; }
           if (br.errors && br.errors.length) addLog("LIVE",base+" 利確/損切り注文の一部に失敗: "+br.errors.map(e=>e.which+"（"+(typeof e.detail==="string"?e.detail:JSON.stringify(e.detail))+"）").join(", "),true);
           else addLog("LIVE",base+" BingX側に損切り"+(tpPrice!=null?"・利確":"")+"を設置（画面を閉じても発動）",true);
         }catch(err){ addLog("LIVE",base+" 利確/損切り注文の設置に失敗: "+err.message,true); }
@@ -775,6 +802,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
         await relay("/order","POST",{symbol:base+"USDT", side:p.side>0?"BUY":"SELL", positionSide:p.side>0?"LONG":"SHORT", quantity:qty});
         p.live.qty += qty;
         await liveSyncEntry(p, false);
+        try{ if (p.live.stopPx) await liveRestop(p, p.live.stopPx); }catch(err){ addLog("LIVE",base+" 追加後の損切り数量の更新に失敗: "+err.message,true); }
         addLog("LIVE",base+" 追加の実発注: "+qty+"（BingXデモ）",true);
       }catch(err){ addLog("LIVE",base+" 追加発注に失敗: "+err.message,true); }
     }
@@ -845,6 +873,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
       }
       p.peak = p.side>0 ? Math.max(p.peak,t.px) : Math.min(p.peak,t.px);
       const fav = p.side*(t.px/p.entry-1)*100, best = p.side*(p.peak/p.entry-1)*100;
+      if (best >= HB_MIN_PEAK && !(fav <= best/2)) liveTrail(p, p.entry*(1+p.side*best/200));
       if (best >= HB_MIN_PEAK && fav <= best/2){ closePos(p,"利確（半戻し）"); return; }
     }
     function fillExit(p,t,q,last){
@@ -949,9 +978,19 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
       if (now - sigSavedAt > 60000){ sigSavedAt = now; store.set(SIGKEY, JSON.stringify(SIG)); }
     }
     function sigStat(recs, h){
-      let n = 0, sum = 0, net = 0, win = 0;
-      for (const r of recs){ const v = r.f[h]; if (v == null) continue; n++; sum += v; const c = SIG_COST + (r.m.sp||0); net += v - c; if (v - c > 0) win++; }
-      return n ? {n, mean:+(sum/n).toFixed(3), net:+(net/n).toFixed(3), hit:Math.round(win/n*1000)/10} : {n:0};
+      const xs = [];
+      for (const r of recs){ const v = r.f[h]; if (v == null) continue; xs.push({t:r.t, s:r.sym, v, x:v - SIG_COST - (r.m.sp||0)}); }
+      const n = xs.length; if (!n) return {n:0};
+      xs.sort((a,b)=>a.t-b.t);
+      let sum = 0, net = 0, win = 0; const grp = {};
+      for (const o of xs){ sum += o.v; net += o.x; if (o.x > 0) win++; }
+      const mu = net/n;
+      for (const o of xs) grp[o.s] = (grp[o.s]||0) + (o.x - mu);
+      let ss = 0, k = 0; for (const g in grp){ ss += grp[g]*grp[g]; k++; }
+      const ci = 1.96*Math.sqrt(ss)/n;
+      const half = Math.floor(n/2), m1 = half ? xs.slice(0,half).reduce((a,o)=>a+o.x,0)/half : 0, m2 = (n-half) ? xs.slice(half).reduce((a,o)=>a+o.x,0)/(n-half) : 0;
+      const sig = (n >= 30 && k >= 5 && mu - ci > 0 && m1 > 0 && m2 > 0) ? "有意（前後半とも黒字）" : (m1 > 0 && m2 > 0 ? "有望（誤差内）" : "なし");
+      return {n, k, mean:+(sum/n).toFixed(3), net:+mu.toFixed(3), ci:+ci.toFixed(3), hit:Math.round(win/n*1000)/10, h1:+m1.toFixed(3), h2:+m2.toFixed(3), sig};
     }
     function sigBuckets(by, h){
       const KN = {s:"出来高急増", f:"逆張り"};
@@ -1446,10 +1485,10 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
         let h = "<div class='note'>記録 出来高急増 "+sg.n.s+"件 ／ 逆張り "+sg.n.f+"件 ／ 基準 "+sg.n.c+"件（計測中 "+sg.n.pending+"件）</div>";
         ["s","f","c"].forEach(k => {
           h += "<div class='epoch'><div class='hd'><span>"+NM[k]+"</span><span>"+sg.n[k]+"件</span></div>" + HH.map(hh => { const x = sg.tables[k][hh];
-            return "<div class='cfgline'>"+hl(hh)+"："+(x && x.n ? "平均 "+pct(x.mean,3)+" ／ 純 "+pct(x.net,3)+" ／ 勝率 "+x.hit+"%（"+x.n+"件）" : "データ待ち")+"</div>"; }).join("") + "</div>";
+            return "<div class='cfgline'>"+hl(hh)+"："+(x && x.n ? sigFmt(x) : "データ待ち")+"</div>"; }).join("") + "</div>";
         });
         h += "<details style='margin-top:8px'><summary style='cursor:pointer;color:var(--ink2);font-size:13px'>条件別の内訳（5分後）</summary>" + (sg.buckets.length ? sg.buckets.map(b =>
-          "<div class='epoch'><div class='hd'><span>"+esc(b.title)+"</span></div>"+b.rows.map(r => "<div class='cfgline'>"+esc(r.l)+"："+pct(r.mean,3)+" ／ 純 "+pct(r.net,3)+" ／ 勝率 "+r.hit+"%（"+r.n+"件）</div>").join("")+"</div>").join("") : "<div class='empty'>データ待ち</div>") + "</details>";
+          "<div class='epoch'><div class='hd'><span>"+esc(b.title)+"</span></div>"+b.rows.map(r => "<div class='cfgline'>"+esc(r.l)+"："+sigFmt(r)+"</div>").join("")+"</div>").join("") : "<div class='empty'>データ待ち</div>") + "</details>";
         $("sigBody").innerHTML = h;
       } else { sgSec.style.display = "none"; } }
     $("bPause").textContent = s.running ? "新規エントリー停止" : "新規エントリー再開";
@@ -1489,15 +1528,16 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     if (!confirm("先物の設定を、証拠金$20・20倍・利確/損切りとも約$5（1.25%）・単発決済（分割OFF）・トレーリングOFFに変更します。よろしいですか？")) return;
     cmd({cmd:"cfg", cfg:{lev:20, size:0.04, sl:1.25, tp:1.25, ladder:false, trail:false, scale:false}});
   });
+  const sigFmt = x => "平均 "+pct(x.mean,3)+" ／ 純 "+pct(x.net,3)+(x.ci==null?"":"（±"+x.ci.toFixed(3)+"）")+" ／ 勝率 "+x.hit+"%（"+x.n+"件"+(x.k==null?"":"・"+x.k+"銘柄")+"）"+(x.h1==null?"":" ／ 前半 "+pct(x.h1,2)+" 後半 "+pct(x.h2,2)+" ／ 判定: "+x.sig);
   $("bSigReset").addEventListener("click", () => { if (confirm("シグナル検証の記録をリセットします。よろしいですか？")) cmd({cmd:"sigReset"}); });
   $("bSigCopy").addEventListener("click", async () => {
     const s = STs.perp, msg = $("sigCopyMsg"), sg = s && s.sig; if (!sg) return;
     const HH = [30,60,180,300,900], NM = {s:"出来高急増", f:"逆張り", c:"基準（ランダム）"}, hl = h => h>=60 ? (h/60)+"分後" : h+"秒後";
     const L = ["=== TrenchDesk シグナル検証（"+new Date(s.now).toLocaleString("ja-JP")+"）===", "計測開始: "+new Date(sg.since).toLocaleString("ja-JP")+" ／ 手数料込みの純 = 平均 − 0.10% − スプレッド",
       "記録: 出来高急増 "+sg.n.s+" ／ 逆張り "+sg.n.f+" ／ 基準 "+sg.n.c+" ／ 計測中 "+sg.n.pending, ""];
-    ["s","f","c"].forEach(k => { L.push("[" + NM[k] + "]"); HH.forEach(hh => { const x = sg.tables[k][hh]; L.push("  "+hl(hh)+": "+(x && x.n ? "平均 "+pct(x.mean,3)+" 純 "+pct(x.net,3)+" 勝率 "+x.hit+"% ("+x.n+"件)" : "データ待ち")); }); });
+    ["s","f","c"].forEach(k => { L.push("[" + NM[k] + "]"); HH.forEach(hh => { const x = sg.tables[k][hh]; L.push("  "+hl(hh)+": "+(x && x.n ? sigFmt(x) : "データ待ち")); }); });
     L.push("", "--- 条件別（5分後） ---");
-    sg.buckets.forEach(b => { L.push("[" + b.title + "]"); b.rows.forEach(r => L.push("  "+r.l+": 平均 "+pct(r.mean,3)+" 純 "+pct(r.net,3)+" 勝率 "+r.hit+"% ("+r.n+"件)")); });
+    sg.buckets.forEach(b => { L.push("[" + b.title + "]"); b.rows.forEach(r => L.push("  "+r.l+": "+sigFmt(r))); });
     const text = L.join("\n");
     try{ await navigator.clipboard.writeText(text); msg.style.display = ""; msg.textContent = "コピーしました。このままチャットに貼ってください。"; }
     catch(e){ msg.style.display = ""; msg.innerHTML = "自動コピーができませんでした。下のテキストを長押しして選択・コピーしてください。<br><textarea readonly style='width:100%;min-height:120px;margin-top:6px;font-family:var(--mono);font-size:11px'>"+esc(text)+"</textarea>"; }
