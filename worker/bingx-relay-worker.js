@@ -510,9 +510,26 @@ async function fetchJson(url, opt){
     const impactOf = (t,side,N) => { const depth = (side>0 ? t.askSz*t.ask : t.bidSz*t.bid) || 0; return 0.0003 + 0.001*Math.min(N/Math.max(depth,1),5); };
 
     function liveQty(rawQty, p, precQty){
-      const capQty = LIVE_MAX*p.lev/p.entry;
-      if (rawQty > capQty) addLog("LIVE", baseOf(p.sym)+": アプリの数量が実発注の上限（証拠金 $"+LIVE_MAX.toFixed(2)+"）を超えるため、上限まで縮小して発注します", true);
-      return floorTo(Math.min(rawQty, capQty), precQty);
+      return floorTo(rawQty, precQty);
+    }
+    async function liveSyncEntry(p, isOpen){
+      try{
+        const j = await relay("/positions?symbol="+baseOf(p.sym)+"USDT");
+        const raw = (j.result && j.result.data) || [];
+        const list = Array.isArray(raw) ? raw : [raw];
+        const side = p.side>0 ? "LONG" : "SHORT";
+        const pos = list.find(x => x && x.positionSide===side && Math.abs(parseFloat(x.positionAmt))>0);
+        const avg = pos ? parseFloat(pos.avgPrice || pos.entryPrice) : 0;
+        if (!(avg>0)) return 0;
+        p.entry = avg;
+        p.liq = p.side>0 ? avg*(1-1/p.lev+MMR) : avg*(1+1/p.lev-MMR);
+        if (isOpen){
+          p.peak = avg;
+          if (p.initEntry) p.initEntry = avg;
+          if (p.slPriceFixed){ const k = (p.pyramid ? PYR_SL : HB_SL)/100/p.lev; p.slPriceFixed = p.side>0 ? avg*(1-k) : avg*(1+k); }
+        }
+        return avg;
+      }catch(_){ return 0; }
     }
     async function liveOpen(p){
       if (!S.cfg.live) return;
@@ -525,7 +542,8 @@ async function fetchJson(url, opt){
         catch(err){ addLog("LIVE",base+" レバレッジ "+p.lev+"x の設定に失敗（"+err.message+"）。BingX側の現在の設定のまま発注します",true); }
         const j = await relay("/order","POST",{symbol:base+"USDT", side:p.side>0?"BUY":"SELL", positionSide:p.side>0?"LONG":"SHORT", quantity:qty});
         p.live = {qty, prec:prec.qty, status:"open"};
-        const fillPx = parseFloat(j.result && j.result.data && j.result.data.avgPrice) || p.entry;
+        const syncedPx = await liveSyncEntry(p, true);
+        const fillPx = syncedPx || parseFloat(j.result && j.result.data && j.result.data.avgPrice) || p.entry;
         addLog("LIVE",base+" 実発注: "+(p.side>0?"ロング":"ショート")+" "+qty+"（BingXデモ）",true);
         // 利確・損切りを、実際の約定価格を基準にBingX側へも置く（画面を閉じても取引所側で発動する）
         // 価格にも数量と同じく「小数点以下は何桁まで」という決まりがあるため、それに合わせて丸める
@@ -590,6 +608,7 @@ async function fetchJson(url, opt){
         if (!(qty>0)) return;
         await relay("/order","POST",{symbol:base+"USDT", side:p.side>0?"BUY":"SELL", positionSide:p.side>0?"LONG":"SHORT", quantity:qty});
         p.live.qty += qty;
+        await liveSyncEntry(p, false);
         addLog("LIVE",base+" 追加の実発注: "+qty+"（BingXデモ）",true);
       }catch(err){ addLog("LIVE",base+" 追加発注に失敗: "+err.message,true); }
     }
@@ -841,7 +860,7 @@ async function fetchJson(url, opt){
           {key:"pyramid",label:"資金管理: ピラミッド式（固定ルール）",opts:YN,val:S.cfg.pyramid},
           {key:"halfback",label:"資金管理: 半戻し利確（-15%で1回追加・-32%固定損切り）",opts:YN,val:S.cfg.halfback}
         ],
-        liveNote:"実発注は1回あたり証拠金 $"+LIVE_MAX.toFixed(2)+"（"+S.cfg.lev+"x）を上限に、接続設定のリレー経由でBingXデモ口座に送信します。リレー未設定の場合はONにできません。",
+        liveNote:"実発注は、アプリのペーパーと同じ数量（"+S.cfg.lev+"x）で、接続設定のリレー経由でBingXデモ口座に送信します。リレー未設定の場合はONにできません。",
         liveAccount: S.cfg.live ? { data: liveAccount, err: liveAccountErr, updatedAt: lastLiveAccountAt } : null,
         pdca: epochStats(),
         slots: S.slots || [{id:"main", label:"メイン"}],
