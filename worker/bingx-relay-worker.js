@@ -827,9 +827,19 @@ async function fetchJson(url, opt){
       if (now - sigSavedAt > 60000){ sigSavedAt = now; store.set(SIGKEY, JSON.stringify(SIG)); }
     }
     function sigStat(recs, h){
-      let n = 0, sum = 0, net = 0, win = 0;
-      for (const r of recs){ const v = r.f[h]; if (v == null) continue; n++; sum += v; const c = SIG_COST + (r.m.sp||0); net += v - c; if (v - c > 0) win++; }
-      return n ? {n, mean:+(sum/n).toFixed(3), net:+(net/n).toFixed(3), hit:Math.round(win/n*1000)/10} : {n:0};
+      const xs = [];
+      for (const r of recs){ const v = r.f[h]; if (v == null) continue; xs.push({t:r.t, s:r.sym, v, x:v - SIG_COST - (r.m.sp||0)}); }
+      const n = xs.length; if (!n) return {n:0};
+      xs.sort((a,b)=>a.t-b.t);
+      let sum = 0, net = 0, win = 0; const grp = {};
+      for (const o of xs){ sum += o.v; net += o.x; if (o.x > 0) win++; }
+      const mu = net/n;
+      for (const o of xs) grp[o.s] = (grp[o.s]||0) + (o.x - mu);
+      let ss = 0, k = 0; for (const g in grp){ ss += grp[g]*grp[g]; k++; }
+      const ci = 1.96*Math.sqrt(ss)/n;
+      const half = Math.floor(n/2), m1 = half ? xs.slice(0,half).reduce((a,o)=>a+o.x,0)/half : 0, m2 = (n-half) ? xs.slice(half).reduce((a,o)=>a+o.x,0)/(n-half) : 0;
+      const sig = (n >= 30 && k >= 5 && mu - ci > 0 && m1 > 0 && m2 > 0) ? "有意（前後半とも黒字）" : (m1 > 0 && m2 > 0 ? "有望（誤差内）" : "なし");
+      return {n, k, mean:+(sum/n).toFixed(3), net:+mu.toFixed(3), ci:+ci.toFixed(3), hit:Math.round(win/n*1000)/10, h1:+m1.toFixed(3), h2:+m2.toFixed(3), sig};
     }
     function sigBuckets(by, h){
       const KN = {s:"出来高急増", f:"逆張り"};
