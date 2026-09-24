@@ -574,6 +574,7 @@ async function fetchJson(url, opt){
         const qty = liveQty(p.qty, p, prec.qty);
         if (!(qty>0)){ addLog("LIVE",base+": 実発注スキップ（数量が最小単位未満）",true); p.live = null; return; }
         p.live = {qty:0, prec:prec.qty, status:"opening"};
+        try{ await relay("/cancel-all","POST",{symbol:base+"USDT"}); }catch(_){}
         try{ await relay("/leverage","POST",{symbol:base+"USDT", side:p.side>0?"LONG":"SHORT", leverage:p.lev}); }
         catch(err){ addLog("LIVE",base+" レバレッジ "+p.lev+"x の設定に失敗（"+err.message+"）。BingX側の現在の設定のまま発注します",true); }
         const j = await relay("/order","POST",{symbol:base+"USDT", side:p.side>0?"BUY":"SELL", positionSide:p.side>0?"LONG":"SHORT", quantity:qty});
