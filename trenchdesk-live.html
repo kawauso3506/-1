@@ -535,6 +535,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
       const out = [];
       for (const o of (Array.isArray(tk.data)?tk.data:[tk.data])){
         if (!o || !o.symbol || !o.symbol.endsWith("-USDT")) continue;
+        { const b0 = o.symbol.replace(/-USDT$/,""); if (/^NC[A-Z]{2}/.test(b0) || /2USD$/.test(b0)) continue; }
         const pxv = parseFloat(o.lastPrice), f = fund.get(o.symbol) || {};
         out.push({sym:o.symbol, px:pxv, mark:f.mark>0?f.mark:pxv, bid:parseFloat(o.bidPrice)||0, ask:parseFloat(o.askPrice)||0, bidSz:parseFloat(o.bidQty)||0, askSz:parseFloat(o.askQty)||0,
           turn:parseFloat(o.quoteVolume), oi:0, fr:f.fr, chg24:parseFloat(o.priceChangePercent)||0, chg1h:null, hi:parseFloat(o.highPrice)||pxv, lo:parseFloat(o.lowPrice)||pxv});
@@ -625,6 +626,9 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     function evalEntry(t){
       const m = metricsOf(t), P = PM(), r = {basic:false, dir:null, kind:"", why:null, gateWhy:null, score:0, m};
       if (!isFresh(t)){ r.why = "データ未更新"; return r; }
+      { const sm = t.samples, n = sm.length;
+        if (n >= 10){ let same = true; for (let i=n-10;i<n;i++){ if (sm[i].px !== sm[n-1].px){ same = false; break; } }
+          if (same){ r.why = "価格が動いていません（休場・取引停止の可能性）"; return r; } } }
       if (t.turn < P.minTurn){ r.why = "売買代金 "+money(t.turn)+" < "+money(P.minTurn); return r; }
       if (m.spread > MAX_SPREAD){ r.why = "スプレッド "+(m.spread*100).toFixed(2)+"% が広い"; return r; }
       if (m.r5==null || m.r1==null || m.vrel==null){ r.why = "ウォームアップ中"; return r; }
