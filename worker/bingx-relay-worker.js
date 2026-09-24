@@ -516,6 +516,8 @@ async function fetchJson(url, opt){
         const prec = await getPrecision(base);
         const qty = floorTo(LIVE_MAX*p.lev/p.entry, prec.qty);
         if (!(qty>0)){ addLog("LIVE",base+": 実発注スキップ（数量が最小単位未満）",true); p.live = null; return; }
+        try{ await relay("/leverage","POST",{symbol:base+"USDT", side:p.side>0?"LONG":"SHORT", leverage:p.lev}); }
+        catch(err){ addLog("LIVE",base+" レバレッジ "+p.lev+"x の設定に失敗（"+err.message+"）。BingX側の現在の設定のまま発注します",true); }
         const j = await relay("/order","POST",{symbol:base+"USDT", side:p.side>0?"BUY":"SELL", positionSide:p.side>0?"LONG":"SHORT", quantity:qty});
         p.live = {qty, prec:prec.qty, status:"open"};
         const fillPx = parseFloat(j.result && j.result.data && j.result.data.avgPrice) || p.entry;
