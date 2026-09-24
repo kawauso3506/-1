@@ -509,12 +509,17 @@ async function fetchJson(url, opt){
     function equity(){ let v = S.cash; for (const p of S.positions){ const t = tokens.get(p.sym); v += p.margin + unreal(p,t) - p.fundingPaid; } return v; }
     const impactOf = (t,side,N) => { const depth = (side>0 ? t.askSz*t.ask : t.bidSz*t.bid) || 0; return 0.0003 + 0.001*Math.min(N/Math.max(depth,1),5); };
 
+    function liveQty(rawQty, p, precQty){
+      const capQty = LIVE_MAX*p.lev/p.entry;
+      if (rawQty > capQty) addLog("LIVE", baseOf(p.sym)+": アプリの数量が実発注の上限（証拠金 $"+LIVE_MAX.toFixed(2)+"）を超えるため、上限まで縮小して発注します", true);
+      return floorTo(Math.min(rawQty, capQty), precQty);
+    }
     async function liveOpen(p){
       if (!S.cfg.live) return;
       const base = baseOf(p.sym);
       try{
         const prec = await getPrecision(base);
-        const qty = floorTo(LIVE_MAX*p.lev/p.entry, prec.qty);
+        const qty = liveQty(p.qty, p, prec.qty);
         if (!(qty>0)){ addLog("LIVE",base+": 実発注スキップ（数量が最小単位未満）",true); p.live = null; return; }
         try{ await relay("/leverage","POST",{symbol:base+"USDT", side:p.side>0?"LONG":"SHORT", leverage:p.lev}); }
         catch(err){ addLog("LIVE",base+" レバレッジ "+p.lev+"x の設定に失敗（"+err.message+"）。BingX側の現在の設定のまま発注します",true); }
@@ -576,12 +581,12 @@ async function fetchJson(url, opt){
       addLog("TRADE",baseOf(t.sym)+" "+(side>0?"ロング":"ショート")+" "+lev+"x（"+e.kind+"）証拠金 $"+margin.toFixed(2)+" ／ 5分 "+pct(e.m.r5,2)+" 出来高×"+e.m.vrel.toFixed(1),true);
       return true;
     }
-    async function liveAdd(p){
+    async function liveAdd(p, addQty){
       if (!S.cfg.live || !p.live || p.live.status!=="open") return;
       const base = baseOf(p.sym);
       try{
         const prec = await getPrecision(base);
-        const qty = floorTo(LIVE_MAX*p.lev/p.entry, prec.qty);
+        const qty = liveQty(addQty, p, prec.qty);
         if (!(qty>0)) return;
         await relay("/order","POST",{symbol:base+"USDT", side:p.side>0?"BUY":"SELL", positionSide:p.side>0?"LONG":"SHORT", quantity:qty});
         p.live.qty += qty;
@@ -604,7 +609,7 @@ async function fetchJson(url, opt){
       p.liq = p.side>0 ? p.entry*(1-1/p.lev+MMR) : p.entry*(1+1/p.lev-MMR);
       S.events++;
       addLog("TRADE",baseOf(p.sym)+" 追加エントリー（"+label+"） 新しい建値 $"+px(p.entry),true);
-      liveAdd(p);
+      liveAdd(p, addQty);
     }
     const WS_MIN_GAP_MS = 45000; // ノイズ対策: 前回のカウントから最低45秒は間を空ける
     function whipsawHit(p, value, threshold, now){
