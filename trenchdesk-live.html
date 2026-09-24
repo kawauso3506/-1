@@ -232,7 +232,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     <span class="pill off" id="pill"><i></i><span id="pillTxt">接続中</span></span>
   </header>
 
-  <div class="banner">価格・売買数は <b id="src">BingX</b> の実データ。売買は<b>仮想（ペーパー）</b>で、ウォレットや実資金は使いません。<b>この画面を開いている間だけ</b>更新・売買判定されます（閉じる／ロックすると止まります）。</div>
+  <div class="banner" id="banner">価格・売買数は <b id="src">BingX</b> の実データ。売買は<b>仮想（ペーパー）</b>で、ウォレットや実資金は使いません。<b>この画面を開いている間だけ</b>更新・売買判定されます（閉じる／ロックすると止まります）。</div>
 
   <div class="strip">
     <div><span>監視銘柄</span><b id="sWatch">0</b></div>
@@ -327,6 +327,13 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
         <div class="grp" style="flex:1;min-width:220px"><span>リレーのACCESS_TOKEN</span><input id="inRelayToken" class="inp" type="password" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="Bearerの後ろに付ける文字列"></div>
         <div class="grp" style="min-width:160px"><span>実発注1回の上限（証拠金USD）</span><input id="inLiveMax" class="inp" type="number" min="1" step="1" placeholder="5"></div>
         <div class="grp" style="min-width:160px"><span>先物データ元</span><select id="selSrc" class="inp"><option value="bingx">BingX</option><option value="bybit">Bybit</option></select></div>
+        <label class="chk" style="flex-basis:100%"><input type="checkbox" id="chkServer"> サーバー版を表示・操作する（Cloudflare側で売買。画面を閉じても動きます）</label>
+        <div class="grp" style="min-width:160px"><span>1日の損失上限（USD・超えたら新規停止）</span><input id="inDailyStop" class="inp" type="number" min="1" step="1" placeholder="50"></div>
+        <div class="btns">
+          <button class="btn" id="bSrvOn">サーバー売買を開始</button>
+          <button class="btn ghost" id="bSrvOff">サーバー売買を停止</button>
+        </div>
+        <p class="foot" id="srvStatus" style="flex-basis:100%;margin:0"></p>
         <button class="btn ghost" id="bSaveConn">保存</button>
       </div>
       <div class="why" id="diag"></div>
@@ -1054,7 +1061,38 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
   }
 
   /* ============================ UI ============================ */
-  const engines = { perp: makePerp() };
+  const SRVKEY = "trenchdesk_server_mode", DSKEY = "trenchdesk_daily_stop";
+  const SERVER_MODE = store.get(SRVKEY) === "1" && !!RELAY_URL && !!RELAY_TOKEN;
+  let DAILY_STOP = parseFloat(store.get(DSKEY)) || 50;
+  function makeRemote(){
+    let st = null, srv = null, err = null, busy = false, onUpdate = () => {};
+    const blank = () => ({ kind:"perp", title:"先物 ロング/ショート（サーバー）", now:Date.now(), running:false, startUsd:500, equity:500, pnlUsd:0, cash:500,
+      cfg:{gate:"std"}, gates:{off:null,std:{risk:65,label:"標準"},strict:{risk:50,label:"厳しめ"}}, labels:{vol:"危険度・ボラ（激しさ）",down:"逆行リスク（過熱度）"},
+      chips:[], stats:{trades:0,wins:0,skips:0,watching:0}, health:{lastPollAt:0,lastError:null,pollMs:10000,source:"サーバー"},
+      positions:[], watch:[], trades:[], log:[], errors:[], calendar:{daily:[],monthly:[],yearly:[]}, hist:[500,500], startedAt:Date.now(),
+      ctl:[], liveNote:"", liveAccount:null, pdca:[], foot:"" });
+    async function pull(){
+      if (busy) return; busy = true;
+      try{ const j = await relay("/server/state"); st = j.state; srv = j.server; err = null; }
+      catch(e){ err = e.message; }
+      busy = false; onUpdate();
+    }
+    return { kind:"perp",
+      publicState(){
+        const b = st ? Object.assign({}, st) : blank();
+        b.server = srv;
+        if (err) b.health = Object.assign({}, b.health, {lastError:"サーバーに接続できません: "+err});
+        else if (!st) b.health = Object.assign({}, b.health, {lastError:"サーバー接続待ち"});
+        return b;
+      },
+      handleCmd(b){
+        relay("/server/cmd","POST",b).then(j => { st = j.state; srv = j.server; err = null; onUpdate(); }).catch(e => { err = e.message; onUpdate(); });
+      },
+      setSource(){}, getSource:()=>"bingx", test:{relay, fetchLiveAccount:()=>{}},
+      start(cb){ onUpdate = cb; pull(); setInterval(pull, 3000); },
+      kick(){ pull(); }, applyConn(){ pull(); } };
+  }
+  const engines = { perp: SERVER_MODE ? makeRemote() : makePerp() };
   const cur = "perp"; let STs = { perp:null }, focusBy = { perp:null }, lastLogId = { perp:0 }, pulseAmt = 0, ctlSig = "", ctlRefs = [];
 
   function refresh(){ STs.perp = engines.perp.publicState(); render(); }
@@ -1119,6 +1157,11 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     else { blw.style.display = "none"; }
     $("clock").textContent = mmss(Math.floor((s.now-s.startedAt)/1000));
     $("skips").textContent = s.stats.skips;
+    { const ss = $("srvStatus"), bn = $("banner");
+      if (SERVER_MODE){
+        ss.textContent = s.server ? "サーバー売買: "+(s.server.enabled?"稼働中":"停止中")+" ／ 本日の損益 "+usd(s.server.dayPnl,true)+" ／ 損失上限 −$"+s.server.dailyStop+(s.server.stoppedDay?" ／ 本日は上限到達で新規停止済み":"") : "サーバーに接続しています…";
+        bn.innerHTML = s.server && s.server.enabled ? "<b>サーバー常駐モード</b>: Cloudflare上で売買判定中です。画面を閉じても動き続けます。この画面は状況の表示と設定変更用です。" : "<b>サーバー版を表示中</b>（売買は停止中です）。「サーバー売買を開始」を押すと、画面を閉じても動きます。";
+      } else { ss.textContent = "ローカルモード（この画面を閉じると止まります）"; } }
     $("posline").innerHTML = s.positions.length
       ? "保有中<br>"+s.positions.map(x=>"<span class='posrow'>"+sideBadge(x)+"<b>"+esc(x.symbol)+"</b> <b class='"+(x.retPct>=0?"pos":"neg")+"'>"+pct(x.retPct)+"</b> ("+usd(x.valueUsd)+")"+(x.pyrInfo?" <small style='color:var(--ink2)'>"+esc(x.pyrInfo)+"</small>":"")+" <button type='button' class='btn ghost sm' data-close='"+esc(x.mint)+"'>決済</button></span>").join("<br>")
       : (s.running ? "ポジションなし（条件を満たす銘柄を待機）" : "ポジションなし（新規エントリー停止中）");
@@ -1285,7 +1328,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
 
   /* ---- 接続設定 ---- */
   $("selSrc").value = engines.perp.getSource(); $("inProxy").value = PROXY;
-  $("inRelayUrl").value = RELAY_URL; $("inRelayToken").value = RELAY_TOKEN; $("inLiveMax").value = LIVE_MAX; $("inWatch").value = MANUAL.join(","); $("chkPump").checked = PUMP_ONLY;
+  $("inRelayUrl").value = RELAY_URL; $("inRelayToken").value = RELAY_TOKEN; $("inLiveMax").value = LIVE_MAX; $("inWatch").value = MANUAL.join(","); $("chkPump").checked = PUMP_ONLY; $("chkServer").checked = SERVER_MODE; $("inDailyStop").value = DAILY_STOP;
   $("bSaveConn").addEventListener("click", () => {
     PROXY = $("inProxy").value.trim(); store.set(PKEY, PROXY);
     MANUAL = $("inWatch").value.split(",").map(s=>s.trim()).filter(Boolean); store.set(WKEY, MANUAL.join(","));
@@ -1294,8 +1337,21 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     RELAY_TOKEN = $("inRelayToken").value.trim(); store.set(RELAYTOKKEY, RELAY_TOKEN);
     LIVE_MAX = parseFloat($("inLiveMax").value) || 5; store.set(LIVEMAXKEY, String(LIVE_MAX));
     precisionCache.clear();
+    { const wantSrv = $("chkServer").checked, wasSrv = store.get(SRVKEY) === "1";
+      store.set(SRVKEY, wantSrv ? "1" : "0");
+      DAILY_STOP = parseFloat($("inDailyStop").value) || 50; store.set(DSKEY, String(DAILY_STOP));
+      if (SERVER_MODE) engines.perp.handleCmd({cmd:"srvCfg", dailyStop:DAILY_STOP, liveMax:LIVE_MAX});
+      if (wantSrv !== wasSrv){ $("diag").textContent = "保存しました。画面を再読み込みします…"; setTimeout(() => location.reload(), 600); return; } }
     engines.perp.setSource($("selSrc").value);
     $("diag").textContent = "保存しました。次の更新から反映されます."; engines.perp.applyConn();
+  });
+  $("bSrvOn").addEventListener("click", () => {
+    if (!SERVER_MODE){ alert("先に「サーバー版を表示・操作する」にチェックを入れて保存してください（リレーURLとトークンも必要です）。"); return; }
+    if (confirm("サーバーでの売買を開始します。「BingXデモへ実発注」がONなら、画面を閉じても実際に注文が出続けます。よろしいですか？")){ cmd({cmd:"srvCfg", dailyStop:DAILY_STOP, liveMax:LIVE_MAX}); cmd({cmd:"srvOn"}); }
+  });
+  $("bSrvOff").addEventListener("click", () => {
+    if (!SERVER_MODE){ alert("サーバー版を表示していません。"); return; }
+    if (confirm("サーバーでの売買を停止します（新規エントリーも決済判定も止まります。取引所側の損切りは残ります）。よろしいですか？")) cmd({cmd:"srvOff"});
   });
   $("bTest").addEventListener("click", async () => {
     const out = $("diag"); out.innerHTML = "テスト中…"; const rows = [];
