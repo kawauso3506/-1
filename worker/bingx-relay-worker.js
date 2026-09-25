@@ -1045,6 +1045,8 @@ async function fetchJson(url, opt){
       const out = {since:SIG.startedAt, from:isFinite(from)?from:null, h:300, cost:SIG_COST, n:{pending:SIG.pending.length}, tables:{}, buckets:[]};
       for (const k of SIG_KINDS){ out.n[k] = by[k].length; out.tables[k] = {}; for (const h of SIG_H) out.tables[k][h] = sigStat(by[k], h); }
       out.buckets = sigBuckets(by, 300);
+      { let h1max=0, h4max=0, cnt=0; for (const c of Object.values(CDL)){ h1max = Math.max(h1max, c.h1.length); h4max = Math.max(h4max, c.h4.length); cnt++; }
+        out.candles = {h1:h1max, h4:h4max, h1need:EMA1_PERIOD, h4need:EMA4_PERIOD, tokens:cnt}; }
       return out;
     }
     function sigSummaryCached(){
