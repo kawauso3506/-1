@@ -198,6 +198,11 @@ svg text{font-family:var(--mono)}
 .calTabs{display:flex;gap:6px;margin-bottom:10px}
 .calTab{flex:1;padding:6px 0;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink2);font-size:12.5px;font-family:inherit;cursor:pointer}
 .calTab.sel{background:var(--purple);color:#fff;border-color:var(--purple)}
+.sigTabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.sigTab{padding:5px 10px;border:1px solid var(--line);border-radius:999px;background:transparent;color:var(--ink2);font-size:11.5px;font-family:inherit;cursor:pointer;white-space:nowrap}
+.sigTab.sel{background:var(--purple);color:#fff;border-color:var(--purple)}
+.sigScroll{max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:2px 10px}
+.cdlProgress{font-size:11.5px;color:var(--ink2);margin-bottom:10px}
 .calRow{display:grid;grid-template-columns:1fr auto auto;gap:8px;padding:7px 0;border-top:1px solid var(--line);font-size:12.5px;font-family:var(--mono)}
 .calRow:first-child{border-top:0}
 .calRow .cum{color:var(--ink2);font-size:11px}
@@ -310,8 +315,10 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
 
     <section class="panel a-trades" id="sigSec" style="display:none">
       <h2>シグナル検証<em id="sigAge"></em></h2>
-      <p class="foot" style="margin:0 0 10px">入る・入らないに関係なく、条件を満たした瞬間の価格を記録し、30秒〜15分後にどれだけ動いたかを測っています。「純」は、往復の手数料0.10%とスプレッドを引いた値です。出来高急増・逆張りのほか、板の偏り、トレンド継続、高値・安値ブレイク、反転確認の4種類も同時に測っています。「基準」はランダムに選んだ銘柄で、シグナルがこれより良ければ、入り方に意味があります。「±」は誤差の幅（同じ銘柄の重複を考慮）、「前半・後半」は記録を時間で半分に分けた純で、両方黒字なら偶然の可能性が下がります。</p>
-      <div id="sigBody"></div>
+      <p class="foot" style="margin:0 0 10px">入る・入らないに関係なく、条件を満たした瞬間の価格を記録し、30秒〜15分後にどれだけ動いたかを測っています。「純」は、往復の手数料0.10%とスプレッドを引いた値です。「基準」はランダムに選んだ銘柄で、シグナルがこれより良ければ、入り方に意味があります。「±」は誤差の幅（同じ銘柄の重複を考慮）、「前半・後半」は記録を時間で半分に分けた純で、両方黒字なら偶然の可能性が下がります。</p>
+      <div class="cdlProgress" id="cdlProgress"></div>
+      <div class="sigTabs" id="sigTabs"></div>
+      <div class="sigScroll"><div id="sigBody"></div></div>
       <div class="btns" style="margin-top:10px">
         <button class="btn ghost" id="bSigCopy">検証結果をコピー</button>
         <button class="btn ghost" id="bSigReset">検証記録をリセット</button>
@@ -1194,6 +1201,8 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
       const out = {since:SIG.startedAt, from:isFinite(from)?from:null, h:300, cost:SIG_COST, n:{pending:SIG.pending.length}, tables:{}, buckets:[]};
       for (const k of SIG_KINDS){ out.n[k] = by[k].length; out.tables[k] = {}; for (const h of SIG_H) out.tables[k][h] = sigStat(by[k], h); }
       out.buckets = sigBuckets(by, 300);
+      { let h1max=0, h4max=0, cnt=0; for (const c of Object.values(CDL)){ h1max = Math.max(h1max, c.h1.length); h4max = Math.max(h4max, c.h4.length); cnt++; }
+        out.candles = {h1:h1max, h4:h4max, h1need:EMA1_PERIOD, h4need:EMA4_PERIOD, tokens:cnt}; }
       return out;
     }
     function sigSummaryCached(){
@@ -1654,14 +1663,24 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
         const hl = h => h>=60 ? (h/60)+"分後" : h+"秒後";
         const d0 = new Date(sg.since);
         $("sigAge").textContent = "計測開始 "+pad(d0.getMonth()+1,2)+"/"+pad(d0.getDate(),2)+" "+pad(d0.getHours(),2)+":"+pad(d0.getMinutes(),2);
-        let h = "<div class='note'>記録の期間: "+(sg.from?new Date(sg.from).toLocaleString("ja-JP",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"}):"–")+" 〜 ／ "+Object.keys(NM).map(k=>NM[k]+" "+(sg.n[k]||0)+"件").join(" ／ ")+"（計測中 "+sg.n.pending+"件）</div>";
-        Object.keys(NM).forEach(k => {
-          h += "<div class='epoch'><div class='hd'><span>"+NM[k]+"</span><span>"+sg.n[k]+"件</span></div>" + HH.map(hh => { const x = sg.tables[k][hh];
+        if (sg.candles){
+          const c = sg.candles;
+          $("cdlProgress").textContent = "1時間ろうそく: 最大"+c.h1+"本（"+c.h1need+"本でEMA使用可）／ 4時間ろうそく: 最大"+c.h4+"本（"+c.h4need+"本でEMA使用可）／ 追跡銘柄 "+c.tokens+"件";
+        }
+        const tabDefs = Object.keys(NM).map(k=>({k, l:NM[k]+"（"+(sg.n[k]||0)+"）"})).concat([{k:"__buckets", l:"条件別の内訳"}]);
+        if (!sigTab || !tabDefs.find(t=>t.k===sigTab)) sigTab = Object.keys(NM)[0];
+        const tabsHtml = tabDefs.map(t => "<button class='sigTab"+(sigTab===t.k?" sel":"")+"' data-sigtab='"+t.k+"'>"+esc(t.l)+"</button>").join("");
+        $("sigTabs").innerHTML = tabsHtml;
+        let body;
+        if (sigTab === "__buckets"){
+          body = sg.buckets.length ? sg.buckets.map(b =>
+            "<div class='epoch'><div class='hd'><span>"+esc(b.title)+"</span></div>"+b.rows.map(r => "<div class='cfgline'>"+esc(r.l)+"："+sigFmt(r)+"</div>").join("")+"</div>").join("") : "<div class='empty'>データ待ち</div>";
+        } else {
+          const k = sigTab;
+          body = "<div class='epoch'><div class='hd'><span>"+esc(NM[k])+"</span><span>"+(sg.n[k]||0)+"件</span></div>" + HH.map(hh => { const x = sg.tables[k][hh];
             return "<div class='cfgline'>"+hl(hh)+"："+(x && x.n ? sigFmt(x) : "データ待ち")+"</div>"; }).join("") + "</div>";
-        });
-        h += "<details style='margin-top:8px'><summary style='cursor:pointer;color:var(--ink2);font-size:13px'>条件別の内訳（5分後）</summary>" + (sg.buckets.length ? sg.buckets.map(b =>
-          "<div class='epoch'><div class='hd'><span>"+esc(b.title)+"</span></div>"+b.rows.map(r => "<div class='cfgline'>"+esc(r.l)+"："+sigFmt(r)+"</div>").join("")+"</div>").join("") : "<div class='empty'>データ待ち</div>") + "</details>";
-        $("sigBody").innerHTML = h;
+        }
+        $("sigBody").innerHTML = body;
       } else { sgSec.style.display = "none"; } }
     $("bPause").textContent = s.running ? "新規エントリー停止" : "新規エントリー再開";
     $("foot").textContent = s.foot;
@@ -1671,9 +1690,14 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
   }
 
   let calMode = "daily";
+  let sigTab = null;
   document.addEventListener("click", e => {
     const ct = e.target.closest(".calTab"); if (!ct) return;
     calMode = ct.dataset.cal; render();
+  });
+  document.addEventListener("click", e => {
+    const st = e.target.closest(".sigTab"); if (!st) return;
+    sigTab = st.dataset.sigtab; render();
   });
   document.addEventListener("click", e => {
     const btn = e.target.closest("button[data-close]"); if (!btn) return;
@@ -1706,7 +1730,8 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     const s = STs.perp, msg = $("sigCopyMsg"), sg = s && s.sig; if (!sg) return;
     const HH = [30,60,180,300,900], NM = {s:"出来高急増", f:"逆張り", b:"板の偏り", t:"トレンド継続", k:"高値・安値ブレイク", r:"逆張り（反転確認）", p:"トレンド逆行後の反発", c:"基準（ランダム）"}, hl = h => h>=60 ? (h/60)+"分後" : h+"秒後";
     const L = ["=== TrenchDesk シグナル検証（"+new Date(s.now).toLocaleString("ja-JP")+"）===", "計測開始: "+new Date(sg.since).toLocaleString("ja-JP")+" ／ 手数料込みの純 = 平均 − 0.10% − スプレッド",
-      "記録の期間: "+(sg.from?new Date(sg.from).toLocaleString("ja-JP"):"–")+" 〜 ／ 記録: "+Object.keys(NM).map(k=>NM[k]+" "+(sg.n[k]||0)).join(" ／ ")+" ／ 計測中 "+sg.n.pending, ""];
+      "記録の期間: "+(sg.from?new Date(sg.from).toLocaleString("ja-JP"):"–")+" 〜 ／ 記録: "+Object.keys(NM).map(k=>NM[k]+" "+(sg.n[k]||0)).join(" ／ ")+" ／ 計測中 "+sg.n.pending,
+      sg.candles ? ("1時間ろうそく最大"+sg.candles.h1+"本（"+sg.candles.h1need+"本で使用可）／ 4時間ろうそく最大"+sg.candles.h4+"本（"+sg.candles.h4need+"本で使用可）") : "", ""];
     Object.keys(NM).forEach(k => { L.push("[" + NM[k] + "]"); HH.forEach(hh => { const x = sg.tables[k][hh]; L.push("  "+hl(hh)+": "+(x && x.n ? sigFmt(x) : "データ待ち")); }); });
     L.push("", "--- 条件別（5分後） ---");
     sg.buckets.forEach(b => { L.push("[" + b.title + "]"); b.rows.forEach(r => L.push("  "+r.l+": "+sigFmt(r))); });
