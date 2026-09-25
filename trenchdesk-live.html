@@ -1638,7 +1638,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     const pdSec = $("pdcaSec");
     if (s.kind==="perp" && s.pdca && s.pdca.length){
       pdSec.style.display = "";
-      const cfgLine = c => "戦略:"+({momentum:"順張り",fade:"逆張り",surge:"出来高急増"}[c.strategy]||c.strategy)+
+      const cfgLine = c => "戦略:"+({momentum:"順張り",fade:"逆張り",surge:"出来高急増",dual:"併用",trend:"トレンド"}[c.strategy]||c.strategy)+
         (c.strategy==="fade"?"(±"+c.fadeThresh+"%)":c.strategy==="surge"?"(×"+c.surgeThresh+")":"")+
         " ／ "+c.lev+"x ／ "+Math.round(c.size*100)+"% ／ SL"+c.sl+"%・TP"+c.tp+"% ／ ゲート:"+({off:"OFF",std:"標準",strict:"厳しめ"}[c.gate]||c.gate)+
         (c.halfback?" ／ 半戻し利確":"")+(c.scalp?" ／ スキャルピング(+$"+c.scalpTp+"/-$"+c.scalpSl+"/"+c.scalpHold+"秒)":"")+(c.timeout?" ／ 時間切れ"+c.timeout+"分":"")+(c.maxPos?" ／ 最大"+c.maxPos+"件":"");
@@ -1659,14 +1659,21 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
         $("sigAge").textContent = "計測開始 "+pad(d0.getMonth()+1,2)+"/"+pad(d0.getDate(),2)+" "+pad(d0.getHours(),2)+":"+pad(d0.getMinutes(),2);
         if (sg.candles){
           const c = sg.candles;
-          $("cdlProgress").textContent = "1時間ろうそく: 最大"+c.h1+"本（"+c.h1need+"本でEMA使用可）／ 4時間ろうそく: 最大"+c.h4+"本（"+c.h4need+"本でEMA使用可）／ 追跡銘柄 "+c.tokens+"件";
+          const tc = sg.trend && sg.trend.candles;
+          $("cdlProgress").textContent = tc ? ("ろうそく: 15分足 最大"+tc.m15+"本 ／ 1時間足 最大"+tc.h1+"本 ／ 4時間足 最大"+tc.h4+"本（EMA200には200本必要）／ 取得銘柄 "+tc.tokens+"件 ／ 大きな流れ: 上昇 "+sg.trend.trendUp+"銘柄・下降 "+sg.trend.trendDn+"銘柄")
+            : ("1時間ろうそく: 最大"+c.h1+"本 ／ 4時間ろうそく: 最大"+c.h4+"本 ／ 追跡銘柄 "+c.tokens+"件");
         }
-        const tabDefs = Object.keys(NM).map(k=>({k, l:NM[k]+"（"+(sg.n[k]||0)+"）"})).concat([{k:"__buckets", l:"条件別の内訳"}]);
-        if (!sigTab || !tabDefs.find(t=>t.k===sigTab)) sigTab = Object.keys(NM)[0];
+        const tabDefs = (sg.trend ? [{k:"__trend", l:"トレンド戦略（"+(sg.trend.rows[0].n)+"）"}] : []).concat(Object.keys(NM).map(k=>({k, l:NM[k]+"（"+(sg.n[k]||0)+"）"}))).concat([{k:"__buckets", l:"条件別の内訳"}]);
+        if (!sigTab || !tabDefs.find(t=>t.k===sigTab)) sigTab = tabDefs[0].k;
         const tabsHtml = tabDefs.map(t => "<button class='sigTab"+(sigTab===t.k?" sel":"")+"' data-sigtab='"+t.k+"'>"+esc(t.l)+"</button>").join("");
         $("sigTabs").innerHTML = tabsHtml;
         let body;
-        if (sigTab === "__buckets"){
+        if (sigTab === "__trend"){
+          const tr = sg.trend, th = h => (h/3600)+"時間後";
+          body = "<div class='note'>15分足が確定した瞬間に、4時間・1時間の流れと同じ向きのパターンが出たら記録し、1時間・4時間・24時間後の値動きを測っています（計測中 "+tr.pending+"件）。</div>" +
+            tr.rows.map(rw => "<div class='epoch'><div class='hd'><span>"+esc(rw.label)+"</span><span>"+rw.n+"件</span></div>" + tr.H.map(h => { const x = rw.st[h];
+              return "<div class='cfgline'>"+th(h)+"："+(x && x.n ? sigFmt(x) : "データ待ち")+"</div>"; }).join("") + "</div>").join("");
+        } else if (sigTab === "__buckets"){
           body = sg.buckets.length ? sg.buckets.map(b =>
             "<div class='epoch'><div class='hd'><span>"+esc(b.title)+"</span></div>"+b.rows.map(r => "<div class='cfgline'>"+esc(r.l)+"："+sigFmt(r)+"</div>").join("")+"</div>").join("") : "<div class='empty'>データ待ち</div>";
         } else {
@@ -1726,6 +1733,11 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     const L = ["=== TrenchDesk シグナル検証（"+new Date(s.now).toLocaleString("ja-JP")+"）===", "計測開始: "+new Date(sg.since).toLocaleString("ja-JP")+" ／ 手数料込みの純 = 平均 − 0.10% − スプレッド",
       "記録の期間: "+(sg.from?new Date(sg.from).toLocaleString("ja-JP"):"–")+" 〜 ／ 記録: "+Object.keys(NM).map(k=>NM[k]+" "+(sg.n[k]||0)).join(" ／ ")+" ／ 計測中 "+sg.n.pending,
       sg.candles ? ("1時間ろうそく最大"+sg.candles.h1+"本（"+sg.candles.h1need+"本で使用可）／ 4時間ろうそく最大"+sg.candles.h4+"本（"+sg.candles.h4need+"本で使用可）") : "", ""];
+    if (sg.trend){ const tr = sg.trend;
+      if (tr.candles) L.push("ろうそく: 15分"+tr.candles.m15+"本 / 1時間"+tr.candles.h1+"本 / 4時間"+tr.candles.h4+"本 ／ 大きな流れ 上昇"+tr.trendUp+"・下降"+tr.trendDn+"銘柄");
+      L.push("--- トレンド戦略（15分足パターン・計測中 "+tr.pending+"件） ---");
+      tr.rows.forEach(rw => { L.push("["+rw.label+"] "+rw.n+"件"); tr.H.forEach(h => { const x = rw.st[h]; L.push("  "+(h/3600)+"時間後: "+(x && x.n ? sigFmt(x) : "データ待ち")); }); });
+      L.push("", "--- 短期シグナル ---"); }
     Object.keys(NM).forEach(k => { L.push("[" + NM[k] + "]"); HH.forEach(hh => { const x = sg.tables[k][hh]; L.push("  "+hl(hh)+": "+(x && x.n ? sigFmt(x) : "データ待ち")); }); });
     L.push("", "--- 条件別（5分後） ---");
     sg.buckets.forEach(b => { L.push("[" + b.title + "]"); b.rows.forEach(r => L.push("  "+r.l+": "+sigFmt(r))); });
