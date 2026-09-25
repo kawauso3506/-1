@@ -104,6 +104,16 @@ async function route(req, env) {
         let data; try { data = JSON.parse(text); } catch (_) { data = { raw: text }; }
         return json({ demo: isDemo, result: data }, r.ok ? 200 : r.status);
       }
+      if (req.method === "GET" && u.pathname === "/market/klines") {
+        const symbol = u.searchParams.get("symbol"), interval = u.searchParams.get("interval") || "1h", limit = u.searchParams.get("limit") || "100";
+        if (!symbol) return json({ error: "symbol is required" }, 400);
+        // ろうそく（K線）は公開データで署名不要。実勢の値動きを見るため、常にリアル環境（デモではなく本番の公開API）から取得する
+        const qs = "?symbol=" + encodeURIComponent(toBingxSymbol(symbol)) + "&interval=" + encodeURIComponent(interval) + "&limit=" + encodeURIComponent(limit);
+        const r = await fetch("https://open-api.bingx.com/openApi/swap/v3/quote/klines" + qs);
+        const text = await r.text();
+        let data; try { data = JSON.parse(text); } catch (_) { data = { raw: text }; }
+        return json({ demo: isDemo, result: data }, r.ok ? 200 : r.status);
+      }
 
       if (req.method === "GET" && u.pathname === "/balance") {
         const r = await bingxRequest(env, "GET", "/openApi/swap/v2/user/balance");
@@ -445,6 +455,48 @@ async function fetchJson(url, opt){
     function pruneCandles(){
       const keep = new Set(tokens.keys());
       for (const k of Object.keys(CDL)) if (!keep.has(k)){ delete CDL[k]; cdlDirty = true; }
+    }
+    // ---- 起動直後や再起動後、まだ十分な本数が無い銘柄には、BingXの過去ろうそくを取りにいく ----
+    // （毎回0から積み上げ直すのを避け、待ち時間をほぼなくすため。1サイクルあたり数銘柄ずつに絞って、通信を集中させない）
+    const cdlSeeded = new Set(), CDL_SEED_PER_CYCLE = 3;
+    function parseKlineArr(j){
+      const raw = (j && j.result && j.result.data) || (j && j.data) || [];
+      const arr = Array.isArray(raw) ? raw : [];
+      return arr.map(x => Array.isArray(x)
+        ? {t:+x[0], o:+x[1], h:+x[2], l:+x[3], c:+x[4]}
+        : {t:+(x.time!=null?x.time:(x.openTime!=null?x.openTime:x.t)), o:+(x.open!=null?x.open:x.o), h:+(x.high!=null?x.high:x.h), l:+(x.low!=null?x.low:x.l), c:+(x.close!=null?x.close:x.c)}
+      ).filter(c => c.t>0 && c.c>0).sort((a,b)=>a.t-b.t);
+    }
+    async function seedCandles(sym){
+      const base = baseOf(sym);
+      try{
+        const [r1, r4] = await Promise.all([
+          relay("/market/klines?symbol="+base+"USDT&interval=1h&limit="+CDL_CAP),
+          relay("/market/klines?symbol="+base+"USDT&interval=4h&limit="+CDL_CAP)
+        ]);
+        const h1arr = parseKlineArr(r1), h4arr = parseKlineArr(r4);
+        if (h1arr.length || h4arr.length){
+          let c = CDL[sym]; if (!c){ c = {h1:[], h4:[], cur1:null, cur4:null}; CDL[sym] = c; }
+          if (h1arr.length > c.h1.length) c.h1 = h1arr.slice(-CDL_CAP);
+          if (h4arr.length > c.h4.length) c.h4 = h4arr.slice(-CDL_CAP);
+          cdlDirty = true;
+          addLog("SYS", base+" 過去のろうそくを取得（1h "+c.h1.length+"本／4h "+c.h4.length+"本）", true);
+        } else {
+          const codeOf = j => j && j.result && j.result.code!=null ? j.result.code : (j && j.code!=null ? j.code : "?");
+          addLog("SYS", base+" 過去ろうそくの応答が空でした（1h code:"+codeOf(r1)+" ／4h code:"+codeOf(r4)+"）。ライブでの積み上げに切り替えます", true);
+        }
+      }catch(err){ addLog("SYS", base+" 過去ろうそくの取得に失敗: "+err.message, true); }
+    }
+    async function seedCandlesStep(){
+      let n = 0;
+      for (const sym of tokens.keys()){
+        if (n >= CDL_SEED_PER_CYCLE) break;
+        if (cdlSeeded.has(sym)) continue;
+        const c = CDL[sym];
+        if (c && c.h1.length >= EMA1_PERIOD && c.h4.length >= EMA4_PERIOD) { cdlSeeded.add(sym); continue; }
+        cdlSeeded.add(sym); n++;
+        await seedCandles(sym);
+      }
     }
     async function pollTickers(){
       const rows = src === "bingx" ? await fetchBingx() : await fetchBybit();
@@ -1084,6 +1136,7 @@ async function fetchJson(url, opt){
     function agentStep(){
       const now = Date.now(), P = PM(), cf = S.cfg, MAXTP = cf.tp;
       accrueFunding();
+      seedCandlesStep().catch(()=>{});
       try{ sigStep(now); }catch(_){}
       for (const p of [...S.positions]){
         const t = tokens.get(p.sym); if (!t || !isFresh(t)) continue;
