@@ -787,13 +787,47 @@ async function fetchJson(url, opt){
       const now = Date.now();
       for (const p of S.positions){ const t = tokens.get(p.sym), dt = (now-p.lastFund)/1000; p.lastFund = now; if (t && dt>0 && dt<3600) p.fundingPaid += p.side*t.fr*p.notional*dt/(8*3600); }
     }
-        const SIGKEY = "trenchdesk_sig_v1", SIG_H = [30,60,180,300,900], SIG_COST = 0.10, SIG_GAP_MS = 60000, SIG_MAX_PENDING = 300, SIG_MAX_DONE = 2500;
-    let SIG = {pending:[], done:[], startedAt:Date.now(), lastCtl:0}, sigSavedAt = 0, sigCache = null, sigCacheAt = 0;
-    try{ const j = JSON.parse(store.get(SIGKEY) || "null"); if (j && Array.isArray(j.done) && Array.isArray(j.pending)) SIG = j; }catch(_){}
+        const SIGKEY = "trenchdesk_sig_v1", SIG_H = [30,60,180,300,900], SIG_COST = 0.10, SIG_GAP_MS = 120000, SIG_MAX_PENDING = 600, SIG_MAX_DONE = 8000;
+    const SIG_CHUNK = 1000, SIG_KINDS = ["s","f","b","t","k","r","c"];
+    let SIG = {pending:[], done:[], startedAt:Date.now(), lastCtl:0, seq:0, n0:0, savedSeq:0}, sigSavedAt = 0, sigCache = null, sigCacheAt = 0;
+    function sigLoad(){
+      try{
+        const j = JSON.parse(store.get(SIGKEY) || "null");
+        if (!j || !Array.isArray(j.pending)) return;
+        SIG = {pending:j.pending, done:[], startedAt:j.startedAt||Date.now(), lastCtl:j.lastCtl||0, seq:j.seq||0, n0:j.n0||0, savedSeq:j.seq||0};
+        if (Array.isArray(j.done)){
+          for (const r of j.done){ r.q = SIG.seq++; SIG.done.push(r); }
+          SIG.n0 = SIG.done.length ? SIG.done[0].q : SIG.seq; SIG.savedSeq = 0;
+        } else {
+          for (let c=Math.floor(SIG.n0/SIG_CHUNK); c<=Math.floor((SIG.seq-1)/SIG_CHUNK); c++){
+            try{ for (const r of JSON.parse(store.get(SIGKEY+"_d"+c) || "[]")) SIG.done.push(r); }catch(_){}
+          }
+        }
+      }catch(_){}
+    }
+    sigLoad();
+    function sigSave(force){
+      const now = Date.now(); if (!force && now - sigSavedAt < 60000) return; sigSavedAt = now;
+      const c0 = Math.floor((SIG.done.length ? SIG.done[0].q : SIG.seq)/SIG_CHUNK), c1 = Math.floor((SIG.seq-1)/SIG_CHUNK);
+      for (let c=Math.max(c0, Math.floor((SIG.savedSeq||0)/SIG_CHUNK)); c<=c1; c++)
+        store.set(SIGKEY+"_d"+c, JSON.stringify(SIG.done.filter(r => Math.floor(r.q/SIG_CHUNK) === c)));
+      SIG.savedSeq = SIG.seq;
+      store.set(SIGKEY, JSON.stringify({pending:SIG.pending, startedAt:SIG.startedAt, lastCtl:SIG.lastCtl, seq:SIG.seq, n0:SIG.done.length ? SIG.done[0].q : SIG.seq}));
+    }
+    function sigResetAll(){
+      const c0 = Math.floor((SIG.n0||0)/SIG_CHUNK), c1 = Math.floor(Math.max(0,SIG.seq-1)/SIG_CHUNK);
+      for (let c=c0; c<=c1; c++) store.set(SIGKEY+"_d"+c, "");
+      SIG = {pending:[], done:[], startedAt:Date.now(), lastCtl:0, seq:0, n0:0, savedSeq:0}; sigCache = null;
+      store.set(SIGKEY, JSON.stringify({pending:[], startedAt:SIG.startedAt, lastCtl:0, seq:0, n0:0}));
+    }
     function sigFrozen(t){
       const sm = t.samples, n = sm.length; if (n < 10) return false;
       for (let i=n-10;i<n;i++) if (sm[i].px !== sm[n-1].px) return false;
       return true;
+    }
+    function sigPush(now, t, m, kind, d, act, hr){
+      SIG.pending.push({t:now, sym:t.sym, k:kind, d, p0:t.px, act, f:{}, mfe:0, mae:0,
+        m:{iv:m.instVrel==null?null:+m.instVrel.toFixed(1), v1:m.vrel==null?null:+m.vrel.toFixed(1), r30:m.r30s==null?null:+m.r30s.toFixed(3), r1:+m.r1.toFixed(3), r5:+m.r5.toFixed(2), sp:+(m.spread*100).toFixed(3), rk:m.risk, fr:+(t.fr*100).toFixed(4), c24:+t.chg24.toFixed(1), tn:Math.round(t.turn), hr}});
     }
     function sigStep(now){
       const P = PM(), MAXP = S.cfg.maxPos || P.maxPos;
@@ -806,11 +840,16 @@ async function fetchJson(url, opt){
       const keep = [];
       for (const r of SIG.pending){
         const el = (now - r.t)/1000/WARP;
-        if (r.f[900] != null || el > 1500){ if (r.f[30] != null){ r.mfe = +r.mfe.toFixed(3); r.mae = +r.mae.toFixed(3); SIG.done.push(r); } }
+        if (r.f[900] != null || el > 1500){ if (r.f[30] != null){ r.mfe = +r.mfe.toFixed(3); r.mae = +r.mae.toFixed(3); r.q = SIG.seq++; SIG.done.push(r); } }
         else keep.push(r);
       }
       SIG.pending = keep;
-      if (SIG.done.length > SIG_MAX_DONE) SIG.done.splice(0, SIG.done.length - SIG_MAX_DONE);
+      if (SIG.done.length > SIG_MAX_DONE){
+        const oldC = Math.floor(SIG.done[0].q/SIG_CHUNK);
+        SIG.done.splice(0, SIG.done.length - SIG_MAX_DONE);
+        const newC = Math.floor(SIG.done[0].q/SIG_CHUNK);
+        for (let c=oldC; c<newC; c++) store.set(SIGKEY+"_d"+c, "");
+      }
       const hr = new Date(now + 9*3600e3).getUTCHours(), cand = [];
       for (const t of tokens.values()){
         if (!isFresh(t) || t.turn < P.minTurn || sigFrozen(t)) continue;
@@ -818,26 +857,44 @@ async function fetchJson(url, opt){
         if (m.r5 == null || m.r1 == null || m.vrel == null || m.spread > MAX_SPREAD) continue;
         cand.push({t, m});
         if (SIG.pending.length >= SIG_MAX_PENDING) continue;
-        if (t.sigAt && now - t.sigAt < SIG_GAP_MS*WARP) continue;
+        const ak = t.sigAtK || (t.sigAtK = {}), ok = k => !ak[k] || now - ak[k] >= SIG_GAP_MS*WARP;
         let kind = null, d = 0;
-        if (m.instVrel != null && m.r30s != null && m.instVrel >= 2 && m.r30s !== 0){ kind = "s"; d = m.r30s > 0 ? 1 : -1; }
-        else if (Math.abs(m.r5) >= 3){ kind = "f"; d = m.r5 > 0 ? -1 : 1; }
-        if (!kind) continue;
-        const e = evalEntry(t);
-        const act = e.basic ? (e.gateWhy ? "gate" : (S.positions.length >= MAXP ? "cap" : "enter")) : "none";
-        t.sigAt = now;
-        SIG.pending.push({t:now, sym:t.sym, k:kind, d, p0:t.px, act, f:{}, mfe:0, mae:0,
-          m:{iv:m.instVrel==null?null:+m.instVrel.toFixed(1), v1:m.vrel==null?null:+m.vrel.toFixed(1), r30:m.r30s==null?null:+m.r30s.toFixed(3), r1:+m.r1.toFixed(3), r5:+m.r5.toFixed(2), sp:+(m.spread*100).toFixed(3), rk:m.risk, fr:+(t.fr*100).toFixed(4), c24:+t.chg24.toFixed(1), tn:Math.round(t.turn), hr}});
+        if (ok("s") && m.instVrel != null && m.r30s != null && m.instVrel >= 2 && m.r30s !== 0){ kind = "s"; d = m.r30s > 0 ? 1 : -1; }
+        else if (ok("f") && Math.abs(m.r5) >= 3){ kind = "f"; d = m.r5 > 0 ? -1 : 1; }
+        if (kind){
+          const e = evalEntry(t);
+          const act = e.basic ? (e.gateWhy ? "gate" : (S.positions.length >= MAXP ? "cap" : "enter")) : "none";
+          ak[kind] = now; sigPush(now, t, m, kind, d, act, hr);
+        }
+        if (ok("b") && t.bid > 0 && t.ask > 0){
+          const bq = t.bidSz*t.bid, aq = t.askSz*t.ask, tot = bq + aq;
+          if (tot > 0){ const im = (bq-aq)/tot; if (Math.abs(im) >= 0.6){ ak.b = now; sigPush(now, t, m, "b", im > 0 ? 1 : -1, "none", hr); } }
+        }
+        if (ok("t") && m.r15 != null && m.vrel >= 1.5 && Math.abs(m.r5) >= 1 && Math.abs(m.r15) >= 2 && (m.r5 > 0) === (m.r15 > 0)){ ak.t = now; sigPush(now, t, m, "t", m.r5 > 0 ? 1 : -1, "none", hr); }
+        if (ok("k") && m.vrel >= 1.5){
+          const hl = hiLoOver(t, 900);
+          if (hl && hl.lo > 0 && (hl.hi - hl.lo)/hl.lo >= 0.005){
+            if (t.px >= hl.hi){ ak.k = now; sigPush(now, t, m, "k", 1, "none", hr); }
+            else if (t.px <= hl.lo){ ak.k = now; sigPush(now, t, m, "k", -1, "none", hr); }
+          }
+        }
+        if (ok("r") && Math.abs(m.r5) >= 3){
+          const hl = hiLoOver(t, 300);
+          if (hl){
+            const backUp = hl.hi > 0 ? (hl.hi - t.px)/hl.hi*100 : 0, backDn = hl.lo > 0 ? (t.px - hl.lo)/hl.lo*100 : 0;
+            if (m.r5 > 0 && backUp >= 1){ ak.r = now; sigPush(now, t, m, "r", -1, "none", hr); }
+            else if (m.r5 < 0 && backDn >= 1){ ak.r = now; sigPush(now, t, m, "r", 1, "none", hr); }
+          }
+        }
       }
       if (now - (SIG.lastCtl||0) >= 60000*WARP && cand.length && SIG.pending.length < SIG_MAX_PENDING){
         SIG.lastCtl = now;
         for (let i=0;i<2;i++){
-          const c = cand[Math.floor(Math.random()*cand.length)], t = c.t, m = c.m;
-          SIG.pending.push({t:now, sym:t.sym, k:"c", d:Math.random()<0.5?1:-1, p0:t.px, act:"ctl", f:{}, mfe:0, mae:0,
-            m:{iv:m.instVrel==null?null:+m.instVrel.toFixed(1), v1:+m.vrel.toFixed(1), r30:m.r30s==null?null:+m.r30s.toFixed(3), r1:+m.r1.toFixed(3), r5:+m.r5.toFixed(2), sp:+(m.spread*100).toFixed(3), rk:m.risk, fr:+(t.fr*100).toFixed(4), c24:+t.chg24.toFixed(1), tn:Math.round(t.turn), hr}});
+          const c = cand[Math.floor(Math.random()*cand.length)];
+          sigPush(now, c.t, c.m, "c", Math.random() < 0.5 ? 1 : -1, "ctl", hr);
         }
       }
-      if (now - sigSavedAt > 60000){ sigSavedAt = now; store.set(SIGKEY, JSON.stringify(SIG)); }
+      sigSave(false);
     }
     function sigStat(recs, h){
       const xs = [];
@@ -881,10 +938,12 @@ async function fetchJson(url, opt){
       return out;
     }
     function sigSummary(){
-      const all = SIG.done.concat(SIG.pending), by = {s:[], f:[], c:[]};
-      for (const r of all) if (by[r.k]) by[r.k].push(r);
-      const out = {since:SIG.startedAt, h:300, cost:SIG_COST, n:{s:by.s.length, f:by.f.length, c:by.c.length, pending:SIG.pending.length}, tables:{s:{}, f:{}, c:{}}, buckets:[]};
-      for (const k of ["s","f","c"]) for (const h of SIG_H) out.tables[k][h] = sigStat(by[k], h);
+      const all = SIG.done.concat(SIG.pending), by = {};
+      for (const k of SIG_KINDS) by[k] = [];
+      let from = Infinity;
+      for (const r of all){ if (by[r.k]) by[r.k].push(r); if (r.t < from) from = r.t; }
+      const out = {since:SIG.startedAt, from:isFinite(from)?from:null, h:300, cost:SIG_COST, n:{pending:SIG.pending.length}, tables:{}, buckets:[]};
+      for (const k of SIG_KINDS){ out.n[k] = by[k].length; out.tables[k] = {}; for (const h of SIG_H) out.tables[k][h] = sigStat(by[k], h); }
       out.buckets = sigBuckets(by, 300);
       return out;
     }
@@ -1108,7 +1167,7 @@ async function fetchJson(url, opt){
       else if (c==="close"){ for (const p of [...S.positions]) closePos(p,"手動クローズ"); }
       else if (c==="closeOne" && b.mint){ const p = S.positions.find(x=>x.sym===b.mint); if (p) closePos(p,"手動クローズ"); }
       else if (c==="reset"){ const cfg = S.cfg; S = fresh(); S.cfg = cfg; noteEpoch(); addLog("SYS","セッションをリセット（ペーパー）"); }
-      else if (c==="sigReset"){ SIG = {pending:[], done:[], startedAt:Date.now(), lastCtl:0}; sigCache = null; store.set(SIGKEY, JSON.stringify(SIG)); addLog("SYS","シグナル検証の記録をリセット"); }
+      else if (c==="sigReset"){ sigResetAll(); addLog("SYS","シグナル検証の記録をリセット"); }
       else if (c==="cfg" && b.cfg){
         let changed = false;
         for (const k of Object.keys(b.cfg)) if (ALLOW[k] && ALLOW[k].includes(b.cfg[k])){
