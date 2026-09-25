@@ -544,15 +544,31 @@ async function fetchJson(url, opt){
     }
     function ceilTo(v, prec){ const f = Math.pow(10,Math.max(0,prec)); return Number((Math.ceil(v*f - 1e-6)/f).toFixed(Math.max(0,prec))); }
     const trailBusy = new Set();
-    async function liveRestop(p, target){
+    async function liveRestop(p, target, silent){
       const base = baseOf(p.sym), side = p.side>0 ? "LONG" : "SHORT", prec = await getPrecision(base);
       const q = floorTo(p.live.qty, prec.qty); if (!(q>0)) return false;
+      const errText = errs => errs.map(e=>typeof e.detail==="string"?e.detail:JSON.stringify(e.detail)).join(", ");
+      const isGoneErr = txt => /109420|position not exist/i.test(txt);
+      const isDupErr = txt => /110424|available amount/i.test(txt);
       let br = await relay("/bracket-only","POST",{symbol:base+"USDT", positionSide:side, quantity:q, slPrice:String(target)});
-      if (br.errors && br.errors.length && /110424|available amount/i.test(JSON.stringify(br.errors))){
-        if (p.live.stopId){ try{ await relay("/cancel-order","POST",{symbol:base+"USDT", orderId:p.live.stopId}); }catch(_){} p.live.stopId = null; }
-        br = await relay("/bracket-only","POST",{symbol:base+"USDT", positionSide:side, quantity:q, slPrice:String(target)});
+      if (br.errors && br.errors.length){
+        const txt = errText(br.errors);
+        if (isGoneErr(txt)){
+          p.live.status = "closed"; p.live.stopId = null;
+          if (!silent) addLog("LIVE", base+" BingX側にポジションが見当たりません。決済済みとして扱います", true);
+          return false;
+        }
+        if (isDupErr(txt)){
+          if (p.live.stopId){ try{ await relay("/cancel-order","POST",{symbol:base+"USDT", orderId:p.live.stopId}); }catch(_){} p.live.stopId = null; }
+          try{ await relay("/cancel-all","POST",{symbol:base+"USDT"}); }catch(_){}
+          br = await relay("/bracket-only","POST",{symbol:base+"USDT", positionSide:side, quantity:q, slPrice:String(target)});
+        }
       }
-      if (br.errors && br.errors.length) throw new Error(br.errors.map(e=>typeof e.detail==="string"?e.detail:JSON.stringify(e.detail)).join(", "));
+      if (br.errors && br.errors.length){
+        const txt = errText(br.errors);
+        if (isGoneErr(txt)){ p.live.status = "closed"; p.live.stopId = null; if (!silent) addLog("LIVE", base+" BingX側にポジションが見当たりません。決済済みとして扱います", true); return false; }
+        throw new Error(txt);
+      }
       const oldId = p.live.stopId;
       p.live.stopId = (br.ids && br.ids.sl) || null; p.live.stopPx = target;
       if (oldId){ try{ await relay("/cancel-order","POST",{symbol:base+"USDT", orderId:oldId}); }catch(_){} }
@@ -562,8 +578,16 @@ async function fetchJson(url, opt){
       if (!S.cfg.live || !p.live || p.live.status!=="open" || trailBusy.has(p.sym)) return;
       trailBusy.add(p.sym);
       try{
-        const base = baseOf(p.sym), prec = await getPrecision(base);
-        const target = p.side>0 ? floorTo(hbPx, prec.price) : ceilTo(hbPx, prec.price), last = p.live.stopPx;
+        const base = baseOf(p.sym), prec = await getPrecision(base), t = tokens.get(p.sym);
+        let target = p.side>0 ? floorTo(hbPx, prec.price) : ceilTo(hbPx, prec.price);
+        const cur = t ? (t.mark || t.px) : null;
+        if (cur > 0){
+          // 損切りは現在価格より必ず不利側（ロング=下、ショート=上）でなければ取引所に拒否されるため、安全マージンを取る
+          const margin = Math.max(cur*0.0008, Math.pow(10,-prec.price));
+          if (p.side>0 && target >= cur - margin) target = floorTo(cur - margin, prec.price);
+          if (p.side<0 && target <= cur + margin) target = ceilTo(cur + margin, prec.price);
+        }
+        const last = p.live.stopPx;
         if (!(target>0)) return;
         const better = last ? (p.side>0 ? target/last-1 : 1-target/last) : 1;
         if (better < 0.0025) return;
@@ -664,7 +688,7 @@ async function fetchJson(url, opt){
         await relay("/order","POST",{symbol:base+"USDT", side:p.side>0?"BUY":"SELL", positionSide:p.side>0?"LONG":"SHORT", quantity:qty});
         p.live.qty += qty;
         await liveSyncEntry(p, false);
-        try{ if (p.live.stopPx) await liveRestop(p, p.live.stopPx); }catch(err){ addLog("LIVE",base+" 追加後の損切り数量の更新に失敗: "+err.message,true); }
+        try{ if (p.live.stopPx) await liveRestop(p, p.live.stopPx, true); }catch(err){ addLog("LIVE",base+" 追加後の損切り数量の更新に失敗: "+err.message,true); }
         addLog("LIVE",base+" 追加の実発注: "+qty+"（BingXデモ）",true);
       }catch(err){ addLog("LIVE",base+" 追加発注に失敗: "+err.message,true); }
     }
