@@ -3,6 +3,13 @@ main = "bingx-relay-worker.js"
 compatibility_date = "2025-01-01"
 keep_vars = true
 
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
 [[durable_objects.bindings]]
 name = "ENGINE"
 class_name = "Engine"
@@ -10,4 +17,3 @@ class_name = "Engine"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Engine"]
-
