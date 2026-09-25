@@ -324,7 +324,7 @@ async function fetchJson(url, opt){
     const MMR = 0.005, MAX_SPREAD = 0.0015;
     const FEEF = () => src === "bingx" ? 0.0005 : 0.00055;
     const GATES = { off:null, std:{risk:65,label:"標準"}, strict:{risk:50,label:"厳しめ"} };
-    const ALLOW = {mode:["calm","normal","active"],dir:["both","long","short"],lev:[1,2,3,5,8,10,20],size:[0.04,0.05,0.1,0.2],sl:[0.8,1.25,1.5,3,5],tp:[1,1.25,2,4,8],gate:["off","std","strict"],scale:[true,false],live:[true,false],strategy:["momentum","fade","surge","dual"],fadeThresh:[3,5,8],surgeThresh:[3,5,10],halfback:[true,false],scalp:[true,false],scalpTp:[1,2,3,4,5,6,7,8,9,10],scalpSl:[1,2,3,4,5,6,7,8,9,10],scalpHold:[30,45,60],maxPos:[3,5,8,10,15,20],orphan:[true,false],timeout:[0,30,60,180,360]};
+    const ALLOW = {mode:["calm","normal","active"],dir:["both","long","short"],lev:[1,2,3,5,8,10,20],size:[0.04,0.05,0.1,0.2],sl:[0.8,1.25,1.5,3,5],tp:[1,1.25,2,4,8],gate:["off","std","strict"],scale:[true,false],live:[true,false],strategy:["momentum","fade","surge","dual","trend"],fadeThresh:[3,5,8],surgeThresh:[3,5,10],halfback:[true,false],scalp:[true,false],scalpTp:[1,2,3,4,5,6,7,8,9,10],scalpSl:[1,2,3,4,5,6,7,8,9,10],scalpHold:[30,45,60],maxPos:[3,5,8,10,15,20],orphan:[true,false],timeout:[0,30,60,180,360]};
     const PM = () => PERP_MODE[S.cfg.mode] || PERP_MODE.active;
     const pollMs = () => POLL_OVERRIDE || PM().poll;
 
@@ -411,43 +411,35 @@ async function fetchJson(url, opt){
       return out;
     }
 
-    // ---- 1時間・4時間ろうそく（トレンド判定用）----
-    // 自分で1本ずつ組み立てるのではなく、BingXの過去ろうそくAPIから、定期的にまとめて取得する
-    const CDL_CAP = 300, EMA1_PERIOD = 8, EMA4_PERIOD = 6, CDL_REFRESH_MS = 300000, CDL_SAVE_GAP = 300000;
-    // 1個の保存キーに全銘柄分をまとめると、銘柄数が増えたときに保存容量の上限（SQLITE_TOOBIG）を超える恐れがあるため、
-    // 銘柄名で32個の保存キーに分けて持つ（1件が大きくなりすぎないようにする）
-    const CDL_SHARDS = 32;
-    function cdlShardKey(i){ return "trenchdesk_cdl_v2_"+i; }
-    function cdlShardOf(sym){ let h=0; for (let i=0;i<sym.length;i++) h=(h*31+sym.charCodeAt(i))|0; return Math.abs(h)%CDL_SHARDS; }
-    let CDL = {}, cdlDirtyShards = new Set(), cdlSavedAt = 0;
-    function cdlLoad(){
-      for (let i=0;i<CDL_SHARDS;i++){
-        try{ const j = JSON.parse(store.get(cdlShardKey(i)) || "null"); if (j && typeof j === "object") Object.assign(CDL, j); }catch(_){}
-      }
-      // 旧形式（単一キー）からの引き継ぎ。あれば読み込んで、次回保存時に新形式へ移す
-      try{ const old = JSON.parse(store.get("trenchdesk_cdl_v1") || "null"); if (old && typeof old === "object"){ for (const k of Object.keys(old)) if (!CDL[k]) CDL[k] = old[k]; for (const k of Object.keys(old)) cdlDirtyShards.add(cdlShardOf(k)); } }catch(_){}
-    }
-    cdlLoad();
-    function cdlMarkDirty(sym){ cdlDirtyShards.add(cdlShardOf(sym)); }
-    function cdlSave(force){
-      const now = Date.now();
-      if (!cdlDirtyShards.size) return;
-      if (!force && now - cdlSavedAt < CDL_SAVE_GAP) return;
-      cdlSavedAt = now;
-      const shards = [...cdlDirtyShards]; cdlDirtyShards.clear();
-      for (const i of shards){
-        const part = {};
-        for (const sym of Object.keys(CDL)) if (cdlShardOf(sym) === i) part[sym] = CDL[sym];
-        store.set(cdlShardKey(i), JSON.stringify(part));
-      }
-    }
+    // ---- ろうそく（15分・1時間・4時間）とトレンド戦略 ----
+    // ろうそくはBingXの過去データAPIから取得する。保存はせず、再起動時は取り直す（取引所に同じデータがあるため、消えても困らない）
+    const CDL_CAP = 300, M15_CAP = 120, EMA1_PERIOD = 8, EMA4_PERIOD = 6;
+    const TF = {m15:900000, h1:3600000, h4:14400000};
+    const TR_MIN_TURN = 5e6;            // トレンド戦略の対象は24時間売買代金$5M以上（薄い銘柄はパターンがだましになりやすい）
+    const TR_EMAS = [12,21,75,200];     // 使うEMAは4本
+    const TR_ADD = 25, TR_SL = 35;      // -25%で1回だけ同額を追加、-35%で損切り（初回エントリー基準で固定）
+    const TR_TPS = [[50,0.4],[70,0.3],[100,1]]; // +50%で4割、+70%で3割、+100%で残り全部
+    const TR_PATS = {dbl:"ダブルトップ/ボトム", hs:"三尊/逆三尊", pb:"EMA21押し目・戻り", br:"ブレイク＆リテスト", en:"包み足", pin:"ピンバー"};
+    let CDL = {};
+    const cdlInflight = new Set();
+    function cdlSave(){ /* 保存しない（取引所から取り直す） */ }
     function emaOf(candles, period){
       if (!candles || candles.length < period) return null;
       const k = 2/(period+1); let e = candles[0].c;
       for (let i=1;i<candles.length;i++) e = candles[i].c*k + e*(1-k);
       return e;
     }
-    function trendOf(sym, px){
+    function emaSeries(candles, period){
+      const k = 2/(period+1), out = new Array(candles.length); let e = candles.length ? candles[0].c : 0;
+      for (let i=0;i<candles.length;i++){ e = i ? candles[i].c*k + e*(1-k) : e; out[i] = e; }
+      return out;
+    }
+    function atrOf(cs, n){
+      if (cs.length < n+1) return null; let s = 0;
+      for (let i=cs.length-n;i<cs.length;i++){ const a = cs[i], b = cs[i-1]; s += Math.max(a.h-a.l, Math.abs(a.h-b.c), Math.abs(a.l-b.c)); }
+      return s/n;
+    }
+    function trendOf(sym, px){ // シグナル検証の内訳用（旧方式・短いEMA）
       const c = CDL[sym]; if (!c) return {c1:0, c4:0, align:0, e1:null, e4:null};
       const e1 = emaOf(c.h1, EMA1_PERIOD), e4 = emaOf(c.h4, EMA4_PERIOD);
       const c1 = e1==null ? 0 : (px>e1 ? 1 : px<e1 ? -1 : 0);
@@ -455,50 +447,155 @@ async function fetchJson(url, opt){
       const align = (c1!==0 && c1===c4) ? c1 : 0;
       return {c1, c4, align, e1, e4};
     }
-    function pruneCandles(){
-      const keep = new Set(tokens.keys());
-      for (const k of Object.keys(CDL)) if (!keep.has(k)){ delete CDL[k]; cdlMarkDirty(k); }
+    // 1つの時間足のトレンド：EMA21 > EMA75 > EMA200 かつ 終値 > EMA75 ならロング方向（逆ならショート方向）
+    function tfTrend(cs){
+      if (!cs || cs.length < 200) return 0;
+      const e21 = emaOf(cs,21), e75 = emaOf(cs,75), e200 = emaOf(cs,200), cl = cs[cs.length-1].c;
+      if (e21>e75 && e75>e200 && cl>e75) return 1;
+      if (e21<e75 && e75<e200 && cl<e75) return -1;
+      return 0;
     }
-    function parseKlineArr(j){
+    function bigTrend(sym){ const c = CDL[sym]; if (!c) return 0; const a = tfTrend(c.h4), b = tfTrend(c.h1); return (a!==0 && a===b) ? a : 0; }
+    function pivots(cs, from, to){
+      const hi = [], lo = [];
+      for (let i=Math.max(2,from); i<=Math.min(cs.length-3,to); i++){
+        const x = cs[i];
+        if (x.h>=cs[i-1].h && x.h>=cs[i-2].h && x.h>cs[i+1].h && x.h>cs[i+2].h) hi.push(i);
+        if (x.l<=cs[i-1].l && x.l<=cs[i-2].l && x.l<cs[i+1].l && x.l<cs[i+2].l) lo.push(i);
+      }
+      return {hi, lo};
+    }
+    // 15分足（確定済み）で、トレンド方向と同じ向きのエントリーパターンを探す。見つかれば {pat, why}
+    function m15Pattern(cs, dir){
+      const n = cs.length; if (n < 60) return null;
+      const atr = atrOf(cs,14); if (!(atr>0)) return null;
+      const e12s = emaSeries(cs,12), e21s = emaSeries(cs,21), e12 = e12s[n-1], e21 = e21s[n-1];
+      const L = cs[n-1], P = cs[n-2], s = dir;
+      const up = x => s>0 ? x : -x;                      // ロング基準の式をショートにも使うための符号変換
+      const hiOf = x => s>0 ? x.h : -x.l, loOf = x => s>0 ? x.l : -x.h, clOf = x => up(x.c), opOf = x => up(x.o);
+      if (Math.abs(L.c - e21) > 3*atr) return null;       // 伸びすぎ（EMA21からATR3本分以上離れている）は見送り
+      const pv = pivots(cs, n-50, n-3), lows = s>0 ? pv.lo : pv.hi;
+      const neckBreak = (a,b) => { let neck = -Infinity; for (let i=a;i<=b;i++) neck = Math.max(neck, hiOf(cs[i])); return clOf(L) > neck && clOf(P) <= neck ? neck : null; };
+      // 1. ダブルボトム（ショートはダブルトップ）：ほぼ同じ安値が2回、間の高値（ネックライン）を上抜けた足で確定
+      if (lows.length >= 2){
+        const a = lows[lows.length-2], b = lows[lows.length-1];
+        if (b-a >= 5 && b >= n-15 && Math.abs(loOf(cs[a]) - loOf(cs[b])) <= 0.5*atr){
+          const neck = neckBreak(a,b);
+          if (neck!=null && neck - Math.min(loOf(cs[a]),loOf(cs[b])) >= 1.5*atr) return {pat:"dbl"};
+        }
+      }
+      // 2. 逆三尊（ショートは三尊）：真ん中の安値が一番深く、左右の安値がほぼ同じ。ネックライン上抜けで確定
+      if (lows.length >= 3){
+        const a = lows[lows.length-3], h = lows[lows.length-2], b = lows[lows.length-1];
+        if (b >= n-15 && loOf(cs[h]) < loOf(cs[a]) - 0.5*atr && loOf(cs[h]) < loOf(cs[b]) - 0.5*atr && Math.abs(loOf(cs[a]) - loOf(cs[b])) <= atr){
+          if (neckBreak(a,b) != null) return {pat:"hs"};
+        }
+      }
+      // 3. EMA21への押し目（ショートは戻り）：直前まで流れに乗っていて、EMA21に触れて反発した陽線（陰線）
+      { let above = 0; for (let i=n-9;i<n-1;i++) if (up(cs[i].c) > up(e21s[i])) above++;
+        if (above >= 6 && up(e12) > up(e21) && loOf(L) <= up(e21) + 0.2*atr && clOf(L) > up(e21) && clOf(L) > opOf(L)) return {pat:"pb"}; }
+      // 4. ブレイク＆リテスト：直近の高値（安値）の水平線を抜けたあと、その線まで戻って反発
+      { let lvl = -Infinity; for (let i=n-40;i<=n-7;i++) lvl = Math.max(lvl, hiOf(cs[i]));
+        let broke = false; for (let i=n-6;i<=n-2;i++) if (clOf(cs[i]) > lvl + 0.1*atr) broke = true;
+        if (broke && loOf(L) <= lvl + 0.3*atr && clOf(L) > lvl && clOf(L) > opOf(L)) return {pat:"br"}; }
+      // 5. 包み足：1本前の逆向きの足を、実体ごと包む強い足（押し目・戻りの位置に限る）
+      if (clOf(P) < opOf(P) && clOf(L) > opOf(L) && opOf(L) <= clOf(P) && clOf(L) >= opOf(P) && Math.abs(L.c-L.o) >= 0.6*atr && Math.min(loOf(L),loOf(P)) <= up(e21) + atr) return {pat:"en"};
+      // 6. ピンバー：下ヒゲ（ショートは上ヒゲ）が実体の2倍以上・値幅の6割以上で、EMA21付近
+      { const rng = L.h - L.l, body = Math.abs(L.c - L.o), wick = s>0 ? Math.min(L.o,L.c) - L.l : L.h - Math.max(L.o,L.c);
+        const closePos = s>0 ? (L.c - L.l)/(rng||1) : (L.h - L.c)/(rng||1);
+        if (rng >= 0.8*atr && wick >= 2*body && wick >= 0.6*rng && closePos >= 0.66 && loOf(L) <= up(e21) + 0.5*atr) return {pat:"pin"}; }
+      return null;
+    }
+    function parseKlineArr(j, tfMs, now){
       const raw = (j && j.result && j.result.data) || (j && j.data) || [];
       const arr = Array.isArray(raw) ? raw : [];
       return arr.map(x => Array.isArray(x)
         ? {t:+x[0], o:+x[1], h:+x[2], l:+x[3], c:+x[4]}
         : {t:+(x.time!=null?x.time:(x.openTime!=null?x.openTime:x.t)), o:+(x.open!=null?x.open:x.o), h:+(x.high!=null?x.high:x.h), l:+(x.low!=null?x.low:x.l), c:+(x.close!=null?x.close:x.c)}
-      ).filter(c => c.t>0 && c.c>0).sort((a,b)=>a.t-b.t);
+      ).filter(c => c.t>0 && c.c>0 && c.t + tfMs <= now).sort((a,b)=>a.t-b.t); // 確定した足だけを使う
     }
-    async function seedCandles(sym){
+    async function fetchTf(base, iv, tfMs, limit, now){
+      const r = await relay("/market/klines?symbol="+base+"USDT&interval="+iv+"&limit="+limit);
+      return parseKlineArr(r, tfMs, now);
+    }
+    async function refreshCandles(sym, needHi, need15, now){
       const base = baseOf(sym);
+      let c = CDL[sym]; if (!c){ c = {h1:[], h4:[], m15:[], fHi:0, f15:0, last15:0}; CDL[sym] = c; }
       try{
-        const [r1, r4] = await Promise.all([
-          relay("/market/klines?symbol="+base+"USDT&interval=1h&limit="+CDL_CAP),
-          relay("/market/klines?symbol="+base+"USDT&interval=4h&limit="+CDL_CAP)
-        ]);
-        const h1arr = parseKlineArr(r1), h4arr = parseKlineArr(r4);
-        let c = CDL[sym]; if (!c){ c = {h1:[], h4:[], fetchedAt:0}; CDL[sym] = c; }
-        if (h1arr.length || h4arr.length){
-          if (h1arr.length) c.h1 = h1arr.slice(-CDL_CAP);
-          if (h4arr.length) c.h4 = h4arr.slice(-CDL_CAP);
-          c.fetchedAt = Date.now();
-          cdlMarkDirty(sym);
-          addLog("SYS", base+" 過去のろうそくを取得（1h "+c.h1.length+"本／4h "+c.h4.length+"本）", true);
-        } else {
-          const codeOf = j => j && j.result && j.result.code!=null ? j.result.code : (j && j.code!=null ? j.code : "?");
-          c.fetchedAt = Date.now();
-          addLog("SYS", base+" 過去ろうそくの応答が空でした（1h code:"+codeOf(r1)+" ／4h code:"+codeOf(r4)+"）", true);
+        if (needHi){
+          const [h1, h4] = await Promise.all([fetchTf(base,"1h",TF.h1,CDL_CAP,now), fetchTf(base,"4h",TF.h4,CDL_CAP,now)]);
+          if (h1.length) c.h1 = h1; if (h4.length) c.h4 = h4; c.fHi = now;
         }
-      }catch(err){ addLog("SYS", base+" 過去ろうそくの取得に失敗: "+err.message, true); }
+        if (need15){
+          const m15 = await fetchTf(base,"15m",TF.m15,M15_CAP,now);
+          if (m15.length){ c.m15 = m15; } c.f15 = now;
+          const last = c.m15.length ? c.m15[c.m15.length-1].t : 0;
+          if (last && last !== c.last15){ c.last15 = last; onNew15(sym, c, now); }
+        }
+      }catch(err){ c.fHi = c.fHi || now - TF.h1 + 120000; c.f15 = now; if (!c.errLogged){ c.errLogged = true; addLog("SYS", base+" ろうそくの取得に失敗: "+err.message, true); } }
     }
-    const CDL_FETCH_PER_CYCLE = 3;
+    const CDL_FETCH_PER_CYCLE = 4;
     async function seedCandlesStep(now){
-      let n = 0;
-      for (const sym of tokens.keys()){
+      const P = PM(), cur15 = Math.floor(now/TF.m15)*TF.m15; let n = 0;
+      const held = new Set(S.positions.map(p=>p.sym));
+      for (const t of tokens.values()){
         if (n >= CDL_FETCH_PER_CYCLE) break;
+        const sym = t.sym; if (cdlInflight.has(sym)) continue;
+        if (!held.has(sym) && t.turn < Math.max(P.minTurn, TR_MIN_TURN)) continue;
         const c = CDL[sym];
-        if (c && c.fetchedAt && now - c.fetchedAt < CDL_REFRESH_MS) continue;
-        n++;
-        await seedCandles(sym);
+        const needHi = !c || now - (c.fHi||0) >= TF.h1;
+        const need15 = !c || ((c.f15||0) < cur15 + 20000 && now >= cur15 + 20000); // 15分足が確定して20秒後に取りに行く
+        if (!needHi && !need15) continue;
+        n++; cdlInflight.add(sym);
+        refreshCandles(sym, needHi, need15, now).finally(() => cdlInflight.delete(sym));
       }
+    }
+    function pruneCandles(){
+      const keep = new Set(tokens.keys());
+      for (const k of Object.keys(CDL)) if (!keep.has(k)) delete CDL[k];
+    }
+    // 15分足が1本確定するたびに呼ばれる：大きな流れ（4時間・1時間）と同じ向きのパターンが出ていれば、シグナルとして記録
+    function onNew15(sym, c, now){
+      const dir = bigTrend(sym); if (!dir) return;
+      if (S.cfg.dir === "long" && dir < 0) return; if (S.cfg.dir === "short" && dir > 0) return;
+      const hit = m15Pattern(c.m15, dir); if (!hit) return;
+      c.sig = {dir, pat:hit.pat, at:now, bar:c.last15};
+      const t = tokens.get(sym);
+      if (t && t.px > 0) tsigPush(now, t, dir, hit.pat);
+    }
+    // ---- トレンド戦略のシグナル検証（1時間・4時間・24時間後の値動きを測る）----
+    const TSIGKEY = "trenchdesk_tsig_v1", TSIG_H = [3600,14400,86400], TSIG_MAX_DONE = 1500, TSIG_MAX_PENDING = 500;
+    let TSIG = {pending:[], done:[]}, tsigDirty = false, tsigSavedAt = 0;
+    try{ const j = JSON.parse(store.get(TSIGKEY) || "null"); if (j && Array.isArray(j.pending)) TSIG = {pending:j.pending, done:j.done||[]}; }catch(_){}
+    function tsigPush(now, t, dir, pat){
+      if (TSIG.pending.length >= TSIG_MAX_PENDING) return;
+      const sp = t.bid>0 && t.ask>0 ? (t.ask-t.bid)/t.px*100 : 0;
+      TSIG.pending.push({t:now, sym:t.sym, d:dir, p0:t.px, pat, f:{}, mfe:0, mae:0, m:{sp:+sp.toFixed(3)}}); tsigDirty = true;
+    }
+    function tsigStep(now){
+      const keep = [];
+      for (const r of TSIG.pending){
+        const t = tokens.get(r.sym), el = (now - r.t)/1000/WARP;
+        if (t && t.px > 0){
+          const rr = r.d*(t.px/r.p0-1)*100; if (rr > r.mfe) r.mfe = +rr.toFixed(3); if (rr < r.mae) r.mae = +rr.toFixed(3);
+          for (const h of TSIG_H) if (r.f[h] == null && el >= h){ r.f[h] = +rr.toFixed(3); tsigDirty = true; }
+        }
+        if (r.f[86400] != null || el > 90000){ if (r.f[3600] != null){ TSIG.done.push(r); tsigDirty = true; } else tsigDirty = true; }
+        else keep.push(r);
+      }
+      TSIG.pending = keep;
+      if (TSIG.done.length > TSIG_MAX_DONE) TSIG.done.splice(0, TSIG.done.length - TSIG_MAX_DONE);
+      if (tsigDirty && now - tsigSavedAt > 60000){ tsigSavedAt = now; tsigDirty = false; store.set(TSIGKEY, JSON.stringify(TSIG)); }
+    }
+    function tsigSummary(){
+      const all = TSIG.done.concat(TSIG.pending), rows = [];
+      const mk = (label, recs) => { const o = {label, n:recs.length, st:{}}; for (const h of TSIG_H) o.st[h] = sigStat(recs, h); return o; };
+      rows.push(mk("全パターン合計", all));
+      for (const k of Object.keys(TR_PATS)) rows.push(mk(TR_PATS[k], all.filter(r => r.pat === k)));
+      rows.push(mk("ロング方向", all.filter(r => r.d > 0)), mk("ショート方向", all.filter(r => r.d < 0)));
+      let m15 = 0, h1 = 0, h4 = 0, up = 0, dn = 0;
+      for (const [s,c] of Object.entries(CDL)){ m15 = Math.max(m15, c.m15.length); h1 = Math.max(h1, c.h1.length); h4 = Math.max(h4, c.h4.length); const d = bigTrend(s); if (d>0) up++; else if (d<0) dn++; }
+      return {H:TSIG_H, rows, pending:TSIG.pending.length, done:TSIG.done.length, trendUp:up, trendDn:dn, candles:{m15, h1, h4, tokens:Object.keys(CDL).length}};
     }
 
     async function pollTickers(){
@@ -637,7 +734,7 @@ async function fetchJson(url, opt){
         if (isOpen){
           p.peak = avg;
           if (p.initEntry) p.initEntry = avg;
-          if (p.slPriceFixed){ const k = HB_SL/100/p.lev; p.slPriceFixed = p.side>0 ? avg*(1-k) : avg*(1+k); }
+          if (p.slPriceFixed){ const k = (p.slLev || HB_SL)/100/p.lev; p.slPriceFixed = p.side>0 ? avg*(1-k) : avg*(1+k); }
         }
         return avg;
       }catch(_){ return 0; }
@@ -737,8 +834,8 @@ async function fetchJson(url, opt){
           if (p.side>0 ? slPrice>=fillPx : slPrice<=fillPx) slPrice = floorTo(fillPx - p.side*tick, prec.price);
           if (p.side>0 ? tpPrice<=fillPx : tpPrice>=fillPx) tpPrice = floorTo(fillPx + p.side*tick, prec.price);
         } else {
-          const slPct = p.halfback ? HB_SL/100/p.lev : S.cfg.sl/100;
-          const tpPct = p.halfback ? null : S.cfg.tp/100; // 半戻し利確は決済ラインが動くので、単発のTP注文は置かない（SLのみ）
+          const slPct = p.trend ? TR_SL/100/p.lev : p.halfback ? HB_SL/100/p.lev : S.cfg.sl/100;
+          const tpPct = (p.halfback || p.trend) ? null : S.cfg.tp/100; // 半戻し利確は決済ラインが動くので、単発のTP注文は置かない（SLのみ）
           slPrice = floorTo(fillPx*(1 - p.side*slPct), prec.price);
           tpPrice = tpPct!=null ? floorTo(fillPx*(1 + p.side*tpPct), prec.price) : null;
         }
@@ -779,7 +876,8 @@ async function fetchJson(url, opt){
     const HB_ADD = 15, HB_SL = 32, HB_MIN_PEAK = 1.0; // 半戻し利確: -15%で1回だけ追加、-32%で固定損切り、ピークが+1%以上ついたら半戻し判定を有効化
     function openPos(t,e){
       let margin = Math.min(S.cash*0.98, equity()*S.cfg.size);
-      if (S.cfg.scale && !S.cfg.halfback && !S.cfg.scalp) margin *= clamp(1 - e.m.risk/150, 0.4, 1);
+      const trendMode = S.cfg.strategy === "trend";
+      if (S.cfg.scale && !S.cfg.halfback && !S.cfg.scalp && !trendMode) margin *= clamp(1 - e.m.risk/150, 0.4, 1);
       if (margin < 5) return false;
       const lev = S.cfg.lev, N = margin*lev, side = e.dir==="long" ? 1 : -1;
       const base = side>0 ? (t.ask||t.px) : (t.bid||t.px), fill = base*(1 + side*impactOf(t,side,N)), fee = N*FEEF();
@@ -787,7 +885,11 @@ async function fetchJson(url, opt){
       const liq = side>0 ? fill*(1-1/lev+MMR) : fill*(1+1/lev-MMR);
       const posObj = {sym:t.sym, side, lev, margin, margin0:margin, notional:N, qty:N/fill, origQty:N/fill, entry:fill, liq, ts:Date.now(), peak:fill, fundingPaid:0, feeOpen:fee, lastFund:Date.now(), kind:e.kind, slot:"main", realizedNet:0, tpHit:0, beOn:false, live:null, wsSign:null, wsCrosses:0, mfe:0, mae:0,
         ent:{ivrel:e.m.instVrel==null?null:+e.m.instVrel.toFixed(1), vrel:e.m.vrel==null?null:+e.m.vrel.toFixed(1), r30s:e.m.r30s==null?null:+e.m.r30s.toFixed(3), r5:e.m.r5==null?null:+e.m.r5.toFixed(2), spread:+(e.m.spread*100).toFixed(3), risk:e.m.risk, fr:+(t.fr*100).toFixed(4), chg24:+t.chg24.toFixed(1), buy:+e.m.buyShare.toFixed(2), hr:new Date(Date.now()+9*3600e3).getUTCHours()}};
-      if (S.cfg.halfback){
+      if (trendMode){
+        posObj.trend = true; posObj.initEntry = fill; posObj.initMargin = margin; posObj.slLev = TR_SL;
+        posObj.slPriceFixed = side>0 ? fill*(1-TR_SL/100/lev) : fill*(1+TR_SL/100/lev);
+        posObj.trAdded = false; posObj.tpDone = 0; posObj.pat = e.pat || null;
+      } else if (S.cfg.halfback){
         posObj.halfback = true; posObj.initEntry = fill; posObj.initMargin = margin;
         posObj.slPriceFixed = side>0 ? fill*(1-HB_SL/100/lev) : fill*(1+HB_SL/100/lev);
         posObj.hbAdded = false;
@@ -797,7 +899,7 @@ async function fetchJson(url, opt){
       S.positions.push(posObj);
       liveOpen(posObj);
       S.events++;
-      addLog("TRADE",baseOf(t.sym)+" "+(side>0?"ロング":"ショート")+" "+lev+"x（"+e.kind+"）証拠金 $"+margin.toFixed(2)+" ／ 5分 "+pct(e.m.r5,2)+" 出来高×"+e.m.vrel.toFixed(1),true);
+      addLog("TRADE",baseOf(t.sym)+" "+(side>0?"ロング":"ショート")+" "+lev+"x（"+e.kind+"）証拠金 $"+margin.toFixed(2)+(trendMode ? "" : " ／ 5分 "+pct(e.m.r5,2)+" 出来高×"+(e.m.vrel==null?"–":e.m.vrel.toFixed(1))),true);
       return true;
     }
     async function liveAdd(p, addQty){
@@ -842,6 +944,31 @@ async function fetchJson(url, opt){
         }
       }
       return (p.wsCrosses||0) >= 3;
+    }
+    function trendPartial(p, fracCur, label){
+      const t = tokens.get(p.sym), last = t ? t.px : p.entry, q = p.qty*fracCur;
+      if (!(q>0)) return;
+      liveClose(p, fracCur, label).then(() => { if (p.live && p.live.status==="open" && p.live.stopPx) return liveRestop(p, p.live.stopPx, true); })
+        .catch(err => addLog("LIVE", baseOf(p.sym)+" 部分利確後の損切り数量の更新に失敗: "+err.message, true));
+      const portion = fracCur, exitPx = fillExit(p,t,q,last), fee = q*exitPx*FEEF();
+      const marginPart = p.margin*portion, fundPart = p.fundingPaid*portion;
+      const back = Math.max(0, marginPart + p.side*(exitPx-p.entry)*q - fundPart - fee);
+      S.cash += back; p.realizedNet = (p.realizedNet||0) + (back - marginPart);
+      p.qty -= q; p.margin -= marginPart; p.notional *= (1-portion); p.fundingPaid -= fundPart; S.events++;
+      addLog("TRADE",baseOf(p.sym)+" "+label+" を利確 "+((back-marginPart)>=0?"+":"−")+"$"+Math.abs(back-marginPart).toFixed(2),true);
+    }
+    function trendCheck(p,t,now){
+      if ((p.side>0 && t.px<=p.liq) || (p.side<0 && t.px>=p.liq)){ closePos(p,"強制ロスカット"); return; }
+      if (p.side>0 ? t.px<=p.slPriceFixed : t.px>=p.slPriceFixed){ closePos(p,"損切り（初回基準 -"+TR_SL+"%・固定）"); return; }
+      if (!p.trAdded){
+        const levInit = p.side*(t.px/p.initEntry - 1)*100*p.lev;
+        if (levInit <= -TR_ADD){ p.trAdded = true; addOnce(p,"-"+TR_ADD+"%で1回だけ再エントリー"); }
+      }
+      const levAvg = p.side*(t.px/p.entry - 1)*100*p.lev;
+      // 利確は元の数量に対して 4割 → 3割 → 残り全部。残っている数量に対する割合に直して決済する
+      if (p.tpDone < 1 && levAvg >= TR_TPS[0][0]){ p.tpDone = 1; trendPartial(p, 0.4, "利確1（+"+TR_TPS[0][0]+"%・元の数量の4割）"); }
+      if (p.tpDone < 2 && levAvg >= TR_TPS[1][0]){ p.tpDone = 2; trendPartial(p, 0.5, "利確2（+"+TR_TPS[1][0]+"%・元の数量の3割）"); }
+      if (levAvg >= TR_TPS[2][0]){ closePos(p,"利確3（+"+TR_TPS[2][0]+"%・全決済）"); return; }
     }
     function halfbackCheck(p,t,now){
       if ((p.side>0 && t.px<=p.liq) || (p.side<0 && t.px>=p.liq)){ closePos(p,"強制ロスカット"); return; }
@@ -1085,6 +1212,7 @@ async function fetchJson(url, opt){
       out.buckets = sigBuckets(by, 300);
       { let h1max=0, h4max=0, cnt=0; for (const c of Object.values(CDL)){ h1max = Math.max(h1max, c.h1.length); h4max = Math.max(h4max, c.h4.length); cnt++; }
         out.candles = {h1:h1max, h4:h4max, h1need:EMA1_PERIOD, h4need:EMA4_PERIOD, tokens:cnt}; }
+      try{ out.trend = tsigSummary(); }catch(_){ out.trend = null; }
       return out;
     }
     function sigSummaryCached(){
@@ -1124,10 +1252,12 @@ async function fetchJson(url, opt){
       accrueFunding();
       seedCandlesStep(now).catch(()=>{});
       try{ sigStep(now); }catch(_){}
+      try{ tsigStep(now); }catch(_){}
       for (const p of [...S.positions]){
         const t = tokens.get(p.sym); if (!t || !isFresh(t)) continue;
         { const f0 = p.side*(t.px/p.entry-1)*100; if (f0 > (p.mfe||0)) p.mfe = f0; if (f0 < (p.mae||0)) p.mae = f0;
-          if (cf.timeout > 0 && now - p.ts > msMin(cf.timeout) && (p.mfe||0) < 0.3 && f0 < 0){ closePos(p,"時間切れ（"+cf.timeout+"分・含み益に届かず）"); continue; } }
+          if (!p.trend && cf.timeout > 0 && now - p.ts > msMin(cf.timeout) && (p.mfe||0) < 0.3 && f0 < 0){ closePos(p,"時間切れ（"+cf.timeout+"分・含み益に届かず）"); continue; } }
+        if (p.trend){ trendCheck(p,t,now); continue; }
         if (p.halfback){ halfbackCheck(p,t,now); continue; }
         if (p.scalp){ scalpCheck(p,t,now); continue; }
         p.peak = p.side>0 ? Math.max(p.peak,t.px) : Math.min(p.peak,t.px);
@@ -1145,6 +1275,19 @@ async function fetchJson(url, opt){
       const MAXP = S.cfg.maxPos || P.maxPos;
       if (!S.running || S.positions.length >= MAXP) return;
       const held = new Set(S.positions.map(p=>p.sym)), cands = [];
+      if (S.cfg.strategy === "trend"){
+        for (const t of tokens.values()){
+          const c = CDL[t.sym]; if (!c || !c.sig || c.sig.used) continue;
+          if (now - c.sig.at > 10*60000){ c.sig.used = true; continue; }     // 15分足の確定から10分以内だけ有効
+          if (held.has(t.sym) || !isFresh(t) || t.turn < TR_MIN_TURN) continue;
+          if (S.cooldown[t.sym] && now - S.cooldown[t.sym] < 15*60000) continue;
+          const m = metricsOf(t); if (m.spread > MAX_SPREAD) continue;
+          if (bigTrend(t.sym) !== c.sig.dir) { c.sig.used = true; continue; }
+          cands.push({t, e:{basic:true, dir:c.sig.dir>0?"long":"short", kind:"トレンド・"+TR_PATS[c.sig.pat], pat:c.sig.pat, score:1, m}, c});
+        }
+        for (const x of cands){ if (S.positions.length >= MAXP) break; x.c.sig.used = true; openPos(x.t, x.e); }
+        return;
+      }
       for (const t of tokens.values()){
         if (held.has(t.sym) || (!S.retry[t.sym] && S.cooldown[t.sym] && now - S.cooldown[t.sym] < msMin(P.cool))) continue;
         const e = evalEntry(t); if (!e.basic) continue;
@@ -1191,12 +1334,22 @@ async function fetchJson(url, opt){
       const dirL = {both:"ロング＋ショート",long:"ロングのみ",short:"ショートのみ"}[S.cfg.dir];
       return { kind:"perp", title:"先物 ロング/ショート（ペーパー）", colTaker:"出来高×", now, running:S.running, startUsd:START_USD, equity:eq, pnlUsd:eq-START_USD, cash:S.cash, cfg:S.cfg, gates:GATES,
         labels:{vol:"危険度・ボラ（激しさ）",down:"逆行リスク（過熱度）"},
-        chips:[dirL+" ・ "+S.cfg.lev+"x", S.cfg.strategy==="fade" ? "逆張り（5分±"+S.cfg.fadeThresh+"%＋高値/安値から"+WICK_PCT+"%のヒゲ確認）" : S.cfg.strategy==="surge" ? "出来高急増（通常比×"+S.cfg.surgeThresh+"で瞬時に順張り）" : S.cfg.strategy==="dual" ? "併用：出来高急増（初動）＋逆張り（失速）" : "順張り", S.cfg.halfback ? "資金管理: 半戻し利確（-"+HB_ADD+"%で1回追加・-"+HB_SL+"%固定損切り）" : S.cfg.scalp ? "資金管理: 超高速スキャルピング（+$"+S.cfg.scalpTp+"利確・-$"+S.cfg.scalpSl+"損切り・"+S.cfg.scalpHold+"秒）" : "SL "+S.cfg.sl+"% ／ 利確 "+S.cfg.tp+"%","モード: "+(MODE_OPTS.find(o=>o.v===S.cfg.mode)||{l:""}).l,"ゲート: "+(g?g.label:"OFF")].concat(S.cfg.live?["実発注 ON（BingXデモ）"]:[]).concat(S.cfg.timeout?["時間切れ決済 "+S.cfg.timeout+"分"]:[]).concat(warm>0?["ウォームアップ中（あと約"+warm+"秒）"]:[]),
+        chips:[dirL+" ・ "+S.cfg.lev+"x", S.cfg.strategy==="fade" ? "逆張り（5分±"+S.cfg.fadeThresh+"%＋高値/安値から"+WICK_PCT+"%のヒゲ確認）" : S.cfg.strategy==="surge" ? "出来高急増（通常比×"+S.cfg.surgeThresh+"で瞬時に順張り）" : S.cfg.strategy==="dual" ? "併用：出来高急増（初動）＋逆張り（失速）" : S.cfg.strategy==="trend" ? "トレンド（4h/1hのEMA12・21・75・200で方向確認→15分足パターンで入る）" : "順張り", S.cfg.strategy==="trend" ? "資金管理: -"+TR_ADD+"%で1回追加・-"+TR_SL+"%固定損切り・+50%で4割／+70%で3割／+100%で全利確" : S.cfg.halfback ? "資金管理: 半戻し利確（-"+HB_ADD+"%で1回追加・-"+HB_SL+"%固定損切り）" : S.cfg.scalp ? "資金管理: 超高速スキャルピング（+$"+S.cfg.scalpTp+"利確・-$"+S.cfg.scalpSl+"損切り・"+S.cfg.scalpHold+"秒）" : "SL "+S.cfg.sl+"% ／ 利確 "+S.cfg.tp+"%","モード: "+(MODE_OPTS.find(o=>o.v===S.cfg.mode)||{l:""}).l,"ゲート: "+(g?g.label:"OFF")].concat(S.cfg.live?["実発注 ON（BingXデモ）"]:[]).concat(S.cfg.timeout?["時間切れ決済 "+S.cfg.timeout+"分"]:[]).concat(warm>0?["ウォームアップ中（あと約"+warm+"秒）"]:[]),
         stats:{trades:S.trades.length,wins:S.trades.filter(x=>x.pnlUsd>0).length,skips:S.skips,polls:S.polls,watching:tokens.size,events:S.events},
         health:{lastPollAt,lastError,pollMs:pollMs(),source:"open-api.bingx.com（リレー経由）"},
         positions:S.positions.map(p=>{ const t = tokens.get(p.sym), pxv = t?t.px:p.entry, un = unreal(p,t)-p.fundingPaid, m0 = p.margin0 || p.margin, cf = S.cfg;
           let rows;
-          if (p.halfback){
+          if (p.trend){
+            const atA = k => p.entry*(1+p.side*k/100/p.lev);
+            rows = [];
+            rows.push({k:"tp"+(p.tpDone>=1?" hit":""), label:"利確1 +"+TR_TPS[0][0]+"%（4割）", px:atA(TR_TPS[0][0]), val:p.tpDone>=1?"済":"4割"});
+            rows.push({k:"tp"+(p.tpDone>=2?" hit":""), label:"利確2 +"+TR_TPS[1][0]+"%（3割）", px:atA(TR_TPS[1][0]), val:p.tpDone>=2?"済":"3割"});
+            rows.push({k:"tp", label:"利確3 +"+TR_TPS[2][0]+"%（残り全部）", px:atA(TR_TPS[2][0]), val:"全決済"});
+            rows.push({k:"tr", label:(p.side>0?"買い建値":"売り建値")+"（平均）", px:p.entry, val:usd(p.margin)});
+            if (!p.trAdded) rows.push({k:"sl", label:"再エントリー -"+TR_ADD+"%（1回のみ）", px:p.initEntry*(1-p.side*TR_ADD/100/p.lev), val:"同額を追加"});
+            rows.push({k:"sl", label:"損切り -"+TR_SL+"%（初回基準・固定）", px:p.slPriceFixed, val:"固定"});
+            rows.push({k:"liq", label:"ロスカット", px:p.liq, val:"全損"});
+          } else if (p.halfback){
             const bestPx = p.peak, best = p.side*(bestPx/p.entry-1)*100, halfPx = p.entry*(1+p.side*best/200);
             rows = [];
             rows.push({k:"tp", label:"ピーク（現在の最高値）", px:bestPx, val:pct(best,2)+" 到達"});
@@ -1226,7 +1379,7 @@ async function fetchJson(url, opt){
         ctl:[
           {key:"mode",label:"アクティブ度",opts:MODE_OPTS,val:S.cfg.mode},
           {key:"dir",label:"方向",opts:[{l:"両方",v:"both"},{l:"ロングのみ",v:"long"},{l:"ショートのみ",v:"short"}],val:S.cfg.dir},
-          {key:"strategy",label:"戦略",opts:[{l:"順張り",v:"momentum"},{l:"出来高急増（瞬間検知）",v:"surge"},{l:"逆張り（行き過ぎ狩り）",v:"fade"},{l:"併用（急増＋失速の両方）",v:"dual"}],val:S.cfg.strategy},
+          {key:"strategy",label:"戦略",opts:[{l:"順張り",v:"momentum"},{l:"出来高急増（瞬間検知）",v:"surge"},{l:"逆張り（行き過ぎ狩り）",v:"fade"},{l:"併用（急増＋失速の両方）",v:"dual"},{l:"トレンド（4h/1h＋15分足）",v:"trend"}],val:S.cfg.strategy},
           {key:"fadeThresh",label:"逆張りのしきい値（5分変化）",opts:ALLOW.fadeThresh.map(v=>({l:"±"+v+"%",v})),val:S.cfg.fadeThresh},
           {key:"surgeThresh",label:"出来高急増のしきい値（通常比）",opts:ALLOW.surgeThresh.map(v=>({l:"×"+v,v})),val:S.cfg.surgeThresh},
           {key:"lev",label:"レバレッジ",opts:ALLOW.lev.map(v=>({l:v+"x",v})),val:S.cfg.lev},
@@ -1248,7 +1401,9 @@ async function fetchJson(url, opt){
         liveNote:"実発注は、アプリのペーパーと同じ数量（"+S.cfg.lev+"x）で、接続設定のリレー経由でBingXデモ口座に送信します。リレー未設定の場合はONにできません。",
         liveAccount: S.cfg.live ? { data: liveAccount, err: liveAccountErr, updatedAt: lastLiveAccountAt } : null,
         pdca: epochStats(), sig: sigSummaryCached(),
-        foot:(S.cfg.halfback
+        foot:(S.cfg.strategy==="trend"
+          ? ("戦略: トレンド（"+S.cfg.lev+"x）。4時間足と1時間足の両方で、EMA21＞EMA75＞EMA200かつ終値がEMA75より上ならロング方向（逆ならショート方向）と判定します。その向きで、15分足が確定した瞬間に、ダブルトップ/ボトム・三尊/逆三尊・EMA21への押し目/戻り・ブレイク＆リテスト・包み足・ピンバーのどれかが出ていれば入ります。対象は24時間売買代金$5M以上の銘柄です。損益の%は証拠金に対する割合で、-"+TR_ADD+"%で同額を1回だけ追加、損切りは初回エントリー基準の-"+TR_SL+"%に固定（追加しても動きません）。平均建値から+50%で4割、+70%で3割、+100%で残り全部を利確します。時間切れ決済の対象外です。手数料は片道"+(FEEF()*100).toFixed(3)+"%で概算。実際の取引所とは異なり、この戦略に優位性があるとは限りません。")
+          : S.cfg.halfback
           ? ("資金管理: 半戻し利確（固定ルール・"+S.cfg.lev+"x）。出来高急増を検知した瞬間にその方向へ乗ります。証拠金維持率-"+HB_ADD+"%まで逆行したら、初期と同じサイズを1回だけ追加します。損切りラインは、初回エントリー時点を基準に証拠金維持率-"+HB_SL+"%の位置に固定し、追加しても動きません。利確は、その時点までの最高値（安値）を記録し、そこから伸びた分の半分まで戻ってきた時点で、残り全部を利確します。回転重視のため保有時間の上限はありません。手数料は片道"+(FEEF()*100).toFixed(3)+"%、強制ロスカットは維持証拠金率0.5%で概算。実際の取引所の約定・ロスカットとは異なります。")
           : S.cfg.scalp
           ? ("資金管理: 超高速スキャルピング（固定ルール・"+S.cfg.lev+"x）。含み益が+$"+S.cfg.scalpTp+"に届いたら利確、含み損が-$"+S.cfg.scalpSl+"に届いたら損切り、どちらも届かないまま"+S.cfg.scalpHold+"秒たったら、その時点の損益で強制決済します。1回あたりの証拠金・レバレッジに関係なく、常に固定の金額で判定します。手数料は片道"+(FEEF()*100).toFixed(3)+"%、強制ロスカットは維持証拠金率0.5%で概算。実際の取引所の約定・ロスカットとは異なります。")
