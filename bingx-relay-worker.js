@@ -48,6 +48,7 @@ async function bingxRequest(env, method, path, params = {}) {
   const text = await r.text();
   let data;
   try { data = JSON.parse(text); } catch (_) { data = { raw: text }; }
+  if (data && typeof data === "object") { const m = text.match(/"orderId"\s*:\s*"?(\d+)"?/); if (m) data._orderId = m[1]; }
   if (!r.ok || (data && typeof data.code !== "undefined" && data.code !== 0)) {
     throw { httpStatus: r.ok ? 200 : r.status, bingxCode: data && data.code, body: data };
   }
@@ -63,21 +64,22 @@ function toBingxSymbol(sym) {
 async function placeTriggers(env, b, isDemo) {
   const sym = toBingxSymbol(b.symbol);
   const closeSide = b.positionSide === "LONG" ? "SELL" : "BUY";
-  const placed = [], errors = [];
+  const placed = [], errors = [], ids = {};
   const place = async (which, type, price) => {
     try {
-      await bingxRequest(env, "POST", "/openApi/swap/v2/trade/order", {
+      const rr = await bingxRequest(env, "POST", "/openApi/swap/v2/trade/order", {
         symbol: sym, side: closeSide, positionSide: b.positionSide,
         type, quantity: b.quantity, stopPrice: price, workingType: "MARK_PRICE",
       });
       placed.push(which);
+      if (rr && rr._orderId) ids[which] = rr._orderId;
     } catch (e) {
       errors.push({ which, detail: e.body || e.message || String(e) });
     }
   };
   if (b.slPrice) await place("sl", "STOP_MARKET", b.slPrice);
   if (b.tpPrice) await place("tp", "TAKE_PROFIT_MARKET", b.tpPrice);
-  return { demo: isDemo, placed, errors };
+  return { demo: isDemo, placed, errors, ids };
 }
 
 async function route(req, env) {
@@ -167,6 +169,14 @@ async function route(req, env) {
         });
         const t = await placeTriggers(env, b, isDemo);
         return json({ demo: isDemo, result: entry, placed: t.placed, errors: t.errors });
+      }
+
+      // 注文を1件だけ取消（損切りラインの引き上げで、古い注文を外すのに使う）
+      if (req.method === "POST" && u.pathname === "/cancel-order") {
+        const b = await req.json().catch(() => ({}));
+        if (!b.symbol || !b.orderId) return json({ error: "symbol, orderId は必須です" }, 400);
+        const r = await bingxRequest(env, "DELETE", "/openApi/swap/v2/trade/order", { symbol: toBingxSymbol(b.symbol), orderId: String(b.orderId) });
+        return json({ demo: isDemo, result: r });
       }
 
       // 銘柄の未約定注文をすべて取消
@@ -306,7 +316,7 @@ async function fetchJson(url, opt){
     const MMR = 0.005, MAX_SPREAD = 0.0015;
     const FEEF = () => src === "bingx" ? 0.0005 : 0.00055;
     const GATES = { off:null, std:{risk:65,label:"標準"}, strict:{risk:50,label:"厳しめ"} };
-    const ALLOW = {mode:["calm","normal","active"],dir:["both","long","short"],lev:[1,2,3,5,8,10,20],size:[0.04,0.05,0.1,0.2],sl:[0.8,1.25,1.5,3,5],tp:[1,1.25,2,4,8],trail:[true,false],gate:["off","std","strict"],scale:[true,false],ladder:[true,false],be:["off","tp1","tp2"],live:[true,false],strategy:["momentum","fade","surge","dual"],fadeThresh:[3,5,8],surgeThresh:[3,5,10],pyramid:[true,false],halfback:[true,false],maxPos:[3,5,8,10,15,20],orphan:[true,false]};
+    const ALLOW = {mode:["calm","normal","active"],dir:["both","long","short"],lev:[1,2,3,5,8,10,20],size:[0.04,0.05,0.1,0.2],sl:[0.8,1.25,1.5,3,5],tp:[1,1.25,2,4,8],trail:[true,false],gate:["off","std","strict"],scale:[true,false],ladder:[true,false],be:["off","tp1","tp2"],live:[true,false],strategy:["momentum","fade","surge","dual"],fadeThresh:[3,5,8],surgeThresh:[3,5,10],pyramid:[true,false],halfback:[true,false],maxPos:[3,5,8,10,15,20],orphan:[true,false],timeout:[0,30,60,180,360]};
     const PM = () => PERP_MODE[S.cfg.mode] || PERP_MODE.active;
     const pollMs = () => POLL_OVERRIDE || PM().poll;
 
@@ -314,7 +324,7 @@ async function fetchJson(url, opt){
       return { startedAt:Date.now(), running:true, cash:START_USD, positions:[], trades:[], log:[], errors:[], hist:[{t:Date.now(),v:START_USD}],
         skips:0, polls:0, events:0, logSeq:0, lastPollAt:0, cooldown:{}, retry:{}, epochs:[], pnlDaily:{},
         slots:[{id:"main", label:"メイン"}], // 将来「サブ」を足すための下ごしらえ。今はmainだけを使う
-        cfg:{mode:"active",dir:"both",lev:8,size:0.04,sl:1.5,tp:3,trail:true,gate:"std",scale:true,ladder:true,be:"tp2",live:false,strategy:"surge",fadeThresh:5,surgeThresh:5,pyramid:false,halfback:true,maxPos:5,orphan:true} };
+        cfg:{mode:"active",dir:"both",lev:8,size:0.04,sl:1.5,tp:3,trail:true,gate:"std",scale:true,ladder:true,be:"tp2",live:false,strategy:"surge",fadeThresh:5,surgeThresh:5,pyramid:false,halfback:true,maxPos:5,orphan:true,timeout:0} };
     }
     let S = fresh();
     const tokens = new Map();
@@ -393,6 +403,49 @@ async function fetchJson(url, opt){
       if (!out.length) throw new Error("BingX: 銘柄データが空です");
       return out;
     }
+
+    // ---- 1時間・4時間ろうそく（トレンド判定用）----
+    // 取引記録などとは別に持つ：ここは「ろうそくが1本閉じたときだけ」変化する低頻度データなので、
+    // 他の状態（取引ごとに毎ループ書き直す部分）とは分けて、間引いて保存する（毎ループ数MBを書き続けないため）。
+    const CDLKEY = "trenchdesk_cdl_v1", H1_MS = 3600000, H4_MS = 14400000, CDL_CAP = 300, EMA1_PERIOD = 8, EMA4_PERIOD = 6, CDL_SAVE_GAP = 300000;
+    let CDL = {}, cdlSavedAt = 0, cdlDirty = false;
+    function cdlLoad(){
+      try{ const j = JSON.parse(store.get(CDLKEY) || "null"); if (j && typeof j === "object") CDL = j; }catch(_){}
+    }
+    cdlLoad();
+    function cdlSave(force){
+      const now = Date.now();
+      if (!cdlDirty) return;
+      if (!force && now - cdlSavedAt < CDL_SAVE_GAP) return;
+      cdlSavedAt = now; cdlDirty = false;
+      store.set(CDLKEY, JSON.stringify(CDL));
+    }
+    function updateCandles(sym, now, px){
+      let c = CDL[sym]; if (!c){ c = {h1:[], h4:[], cur1:null, cur4:null}; CDL[sym] = c; }
+      const b1 = Math.floor(now/H1_MS)*H1_MS, b4 = Math.floor(now/H4_MS)*H4_MS;
+      if (!c.cur1 || c.cur1.t !== b1){ if (c.cur1){ c.h1.push(c.cur1); if (c.h1.length>CDL_CAP) c.h1.shift(); cdlDirty = true; } c.cur1 = {t:b1,o:px,h:px,l:px,c:px}; }
+      else { c.cur1.h = Math.max(c.cur1.h,px); c.cur1.l = Math.min(c.cur1.l,px); c.cur1.c = px; }
+      if (!c.cur4 || c.cur4.t !== b4){ if (c.cur4){ c.h4.push(c.cur4); if (c.h4.length>CDL_CAP) c.h4.shift(); cdlDirty = true; } c.cur4 = {t:b4,o:px,h:px,l:px,c:px}; }
+      else { c.cur4.h = Math.max(c.cur4.h,px); c.cur4.l = Math.min(c.cur4.l,px); c.cur4.c = px; }
+    }
+    function emaOf(candles, period){
+      if (!candles || candles.length < period) return null;
+      const k = 2/(period+1); let e = candles[0].c;
+      for (let i=1;i<candles.length;i++) e = candles[i].c*k + e*(1-k);
+      return e;
+    }
+    function trendOf(sym, px){
+      const c = CDL[sym]; if (!c) return {c1:0, c4:0, align:0, e1:null, e4:null};
+      const e1 = emaOf(c.h1, EMA1_PERIOD), e4 = emaOf(c.h4, EMA4_PERIOD);
+      const c1 = e1==null ? 0 : (px>e1 ? 1 : px<e1 ? -1 : 0);
+      const c4 = e4==null ? 0 : (px>e4 ? 1 : px<e4 ? -1 : 0);
+      const align = (c1!==0 && c1===c4) ? c1 : 0;
+      return {c1, c4, align, e1, e4};
+    }
+    function pruneCandles(){
+      const keep = new Set(tokens.keys());
+      for (const k of Object.keys(CDL)) if (!keep.has(k)){ delete CDL[k]; cdlDirty = true; }
+    }
     async function pollTickers(){
       const rows = src === "bingx" ? await fetchBingx() : await fetchBybit();
       const now = Date.now(), P = PM(), heldSet = new Set(S.positions.map(p=>p.sym));
@@ -403,8 +456,11 @@ async function fetchJson(url, opt){
         t.px = o.px; t.mark = o.mark; t.bid = o.bid; t.ask = o.ask; t.bidSz = o.bidSz; t.askSz = o.askSz; t.turn = o.turn; t.oi = o.oi;
         t.fr = isFinite(o.fr) ? o.fr : 0; t.chg24 = o.chg24; t.chg1h = o.chg1h; t.hi = o.hi; t.lo = o.lo; t.updatedAt = now;
         t.samples.push({t:now,px:o.px,turn:o.turn,oi:o.oi}); if (t.samples.length>200) t.samples.shift();
+        updateCandles(o.sym, now, o.px);
       }
       for (const [k,t] of tokens) if (now - t.updatedAt > 90000 && !heldSet.has(k)) tokens.delete(k);
+      pruneCandles();
+      cdlSave(false);
     }
 
     function retOver(t,sec){
@@ -521,6 +577,7 @@ async function fetchJson(url, opt){
         const pos = list.find(x => x && x.positionSide===side && Math.abs(parseFloat(x.positionAmt))>0);
         const avg = pos ? parseFloat(pos.avgPrice || pos.entryPrice) : 0;
         if (!(avg>0)) return 0;
+        { const amt = Math.abs(parseFloat(pos.positionAmt)); if (p.live && amt>0) p.live.qty = amt; }
         p.entry = avg;
         p.liq = p.side>0 ? avg*(1-1/p.lev+MMR) : avg*(1+1/p.lev-MMR);
         if (isOpen){
@@ -531,6 +588,72 @@ async function fetchJson(url, opt){
         return avg;
       }catch(_){ return 0; }
     }
+    function ceilTo(v, prec){ const f = Math.pow(10,Math.max(0,prec)); return Number((Math.ceil(v*f - 1e-6)/f).toFixed(Math.max(0,prec))); }
+    const trailBusy = new Set();
+    async function liveActualAmt(p){
+      try{
+        const j = await relay("/positions?symbol="+baseOf(p.sym)+"USDT");
+        const raw = (j.result && j.result.data) || [];
+        const list = Array.isArray(raw) ? raw : [raw];
+        const side = p.side>0 ? "LONG" : "SHORT";
+        const pos = list.find(x => x && x.positionSide===side && Math.abs(parseFloat(x.positionAmt))>0);
+        return pos ? Math.abs(parseFloat(pos.positionAmt)) : 0;
+      }catch(_){ return 0; }
+    }
+    async function liveRestop(p, target, silent){
+      const base = baseOf(p.sym), side = p.side>0 ? "LONG" : "SHORT", prec = await getPrecision(base);
+      let q = floorTo(p.live.qty, prec.qty); if (!(q>0)) return false;
+      const errText = errs => errs.map(e=>typeof e.detail==="string"?e.detail:JSON.stringify(e.detail)).join(", ");
+      const isGoneErr = txt => /109420|position not exist/i.test(txt);
+      const isDupErr = txt => /110424|available amount/i.test(txt);
+      let br = await relay("/bracket-only","POST",{symbol:base+"USDT", positionSide:side, quantity:q, slPrice:String(target)});
+      if (br.errors && br.errors.length){
+        const txt = errText(br.errors);
+        if (isGoneErr(txt)){
+          p.live.status = "closed"; p.live.stopId = null;
+          if (!silent) addLog("LIVE", base+" BingX側にポジションが見当たりません。決済済みとして扱います", true);
+          return false;
+        }
+        if (isDupErr(txt)){
+          if (p.live.stopId){ try{ await relay("/cancel-order","POST",{symbol:base+"USDT", orderId:p.live.stopId}); }catch(_){} p.live.stopId = null; }
+          try{ await relay("/cancel-all","POST",{symbol:base+"USDT"}); }catch(_){}
+          // 数量そのものが実際のポジションを超えている場合があるため、BingX側の実数量に合わせ直す
+          const actual = await liveActualAmt(p);
+          if (actual > 0){ const q2 = floorTo(actual, prec.qty); if (q2 > 0 && q2 !== q){ q = q2; p.live.qty = q; } }
+          br = await relay("/bracket-only","POST",{symbol:base+"USDT", positionSide:side, quantity:q, slPrice:String(target)});
+        }
+      }
+      if (br.errors && br.errors.length){
+        const txt = errText(br.errors);
+        if (isGoneErr(txt)){ p.live.status = "closed"; p.live.stopId = null; if (!silent) addLog("LIVE", base+" BingX側にポジションが見当たりません。決済済みとして扱います", true); return false; }
+        throw new Error(txt);
+      }
+      const oldId = p.live.stopId;
+      p.live.stopId = (br.ids && br.ids.sl) || null; p.live.stopPx = target;
+      if (oldId){ try{ await relay("/cancel-order","POST",{symbol:base+"USDT", orderId:oldId}); }catch(_){} }
+      return true;
+    }
+    async function liveTrail(p, hbPx){
+      if (!S.cfg.live || !p.live || p.live.status!=="open" || trailBusy.has(p.sym)) return;
+      trailBusy.add(p.sym);
+      try{
+        const base = baseOf(p.sym), prec = await getPrecision(base), t = tokens.get(p.sym);
+        let target = p.side>0 ? floorTo(hbPx, prec.price) : ceilTo(hbPx, prec.price);
+        const cur = t ? (t.mark || t.px) : null;
+        if (cur > 0){
+          // 損切りは現在価格より必ず不利側（ロング=下、ショート=上）でなければ取引所に拒否されるため、安全マージンを取る
+          const margin = Math.max(cur*0.0008, Math.pow(10,-prec.price));
+          if (p.side>0 && target >= cur - margin) target = floorTo(cur - margin, prec.price);
+          if (p.side<0 && target <= cur + margin) target = ceilTo(cur + margin, prec.price);
+        }
+        const last = p.live.stopPx;
+        if (!(target>0)) return;
+        const better = last ? (p.side>0 ? target/last-1 : 1-target/last) : 1;
+        if (better < 0.0025) return;
+        if (await liveRestop(p, target)) addLog("LIVE", base+" BingX側の損切りを半戻しライン $"+px(target)+" に引き上げ（通信が切れても利益を守ります）", true);
+      }catch(err){ addLog("LIVE", baseOf(p.sym)+" 損切りの引き上げに失敗: "+err.message, true); }
+      finally{ trailBusy.delete(p.sym); }
+    }
     async function liveOpen(p){
       if (!S.cfg.live) return;
       const base = baseOf(p.sym);
@@ -539,6 +662,7 @@ async function fetchJson(url, opt){
         const qty = liveQty(p.qty, p, prec.qty);
         if (!(qty>0)){ addLog("LIVE",base+": 実発注スキップ（数量が最小単位未満）",true); p.live = null; return; }
         p.live = {qty:0, prec:prec.qty, status:"opening"};
+        try{ await relay("/cancel-all","POST",{symbol:base+"USDT"}); }catch(_){}
         try{ await relay("/leverage","POST",{symbol:base+"USDT", side:p.side>0?"LONG":"SHORT", leverage:p.lev}); }
         catch(err){ addLog("LIVE",base+" レバレッジ "+p.lev+"x の設定に失敗（"+err.message+"）。BingX側の現在の設定のまま発注します",true); }
         const j = await relay("/order","POST",{symbol:base+"USDT", side:p.side>0?"BUY":"SELL", positionSide:p.side>0?"LONG":"SHORT", quantity:qty});
@@ -553,7 +677,8 @@ async function fetchJson(url, opt){
         const slPrice = floorTo(fillPx*(1 - p.side*slPct), prec.price);
         const tpPrice = tpPct!=null ? floorTo(fillPx*(1 + p.side*tpPct), prec.price) : null;
         try{
-          const br = await relay("/bracket-only","POST",{symbol:base+"USDT", positionSide:p.side>0?"LONG":"SHORT", quantity: qty, slPrice: String(slPrice), tpPrice: tpPrice!=null?String(tpPrice):undefined});
+          const br = await relay("/bracket-only","POST",{symbol:base+"USDT", positionSide:p.side>0?"LONG":"SHORT", quantity: floorTo((p.live && p.live.qty>0) ? p.live.qty : qty, prec.qty), slPrice: String(slPrice), tpPrice: tpPrice!=null?String(tpPrice):undefined});
+          if (p.live){ if (br.ids && br.ids.sl) p.live.stopId = br.ids.sl; p.live.stopPx = slPrice; }
           if (br.errors && br.errors.length) addLog("LIVE",base+" 利確/損切り注文の一部に失敗: "+br.errors.map(e=>e.which+"（"+(typeof e.detail==="string"?e.detail:JSON.stringify(e.detail))+"）").join(", "),true);
           else addLog("LIVE",base+" BingX側に損切り"+(tpPrice!=null?"・利確":"")+"を設置（画面を閉じても発動）",true);
         }catch(err){ addLog("LIVE",base+" 利確/損切り注文の設置に失敗: "+err.message,true); }
@@ -575,7 +700,15 @@ async function fetchJson(url, opt){
           try{ await relay("/cancel-all","POST",{symbol:base+"USDT"}); }catch(_){ /* 置いたままのTP/SLが残っても実害は小さいので無視 */ }
         }
         addLog("LIVE",base+" 実決済（"+label+"）: "+q,true);
-      }catch(err){ addLog("LIVE",base+" 実決済に失敗（"+label+"）: "+err.message,true); }
+      }catch(err){
+        if (/101205|No position to close/i.test(String(err.message))){
+          p.live.qty = 0; p.live.status = "closed";
+          try{ await relay("/cancel-all","POST",{symbol:base+"USDT"}); }catch(_){}
+          addLog("LIVE",base+" BingX側の損切りで、すでに決済されていました（"+label+"）",true);
+          return;
+        }
+        addLog("LIVE",base+" 実決済に失敗（"+label+"）: "+err.message,true);
+      }
     }
     const PYR_SL = 35, PYR_ADD1 = 20, PYR_ADD2 = 28, PYR_TP1 = 40, PYR_TP2 = 70, PYR_TP3 = 100, PYR_STEP = 20, PYR_MAX_ADD2 = 3, PYR_MAX_RETRY = 8;
     const HB_ADD = 15, HB_SL = 32, HB_MIN_PEAK = 1.0; // 半戻し利確: -15%で1回だけ追加、-32%で固定損切り、ピークが+1%以上ついたら半戻し判定を有効化
@@ -614,6 +747,7 @@ async function fetchJson(url, opt){
         await relay("/order","POST",{symbol:base+"USDT", side:p.side>0?"BUY":"SELL", positionSide:p.side>0?"LONG":"SHORT", quantity:qty});
         p.live.qty += qty;
         await liveSyncEntry(p, false);
+        try{ if (p.live.stopPx) await liveRestop(p, p.live.stopPx, true); }catch(err){ addLog("LIVE",base+" 追加後の損切り数量の更新に失敗: "+err.message,true); }
         addLog("LIVE",base+" 追加の実発注: "+qty+"（BingXデモ）",true);
       }catch(err){ addLog("LIVE",base+" 追加発注に失敗: "+err.message,true); }
     }
@@ -684,6 +818,7 @@ async function fetchJson(url, opt){
       }
       p.peak = p.side>0 ? Math.max(p.peak,t.px) : Math.min(p.peak,t.px);
       const fav = p.side*(t.px/p.entry-1)*100, best = p.side*(p.peak/p.entry-1)*100;
+      if (best >= HB_MIN_PEAK && !(fav <= best/2)) liveTrail(p, p.entry*(1+p.side*best/200));
       if (best >= HB_MIN_PEAK && fav <= best/2){ closePos(p,"利確（半戻し）"); return; }
     }
     function fillExit(p,t,q,last){
@@ -735,13 +870,48 @@ async function fetchJson(url, opt){
       const now = Date.now();
       for (const p of S.positions){ const t = tokens.get(p.sym), dt = (now-p.lastFund)/1000; p.lastFund = now; if (t && dt>0 && dt<3600) p.fundingPaid += p.side*t.fr*p.notional*dt/(8*3600); }
     }
-        const SIGKEY = "trenchdesk_sig_v1", SIG_H = [30,60,180,300,900], SIG_COST = 0.10, SIG_GAP_MS = 60000, SIG_MAX_PENDING = 300, SIG_MAX_DONE = 2500;
-    let SIG = {pending:[], done:[], startedAt:Date.now(), lastCtl:0}, sigSavedAt = 0, sigCache = null, sigCacheAt = 0;
-    try{ const j = JSON.parse(store.get(SIGKEY) || "null"); if (j && Array.isArray(j.done) && Array.isArray(j.pending)) SIG = j; }catch(_){}
+        const SIGKEY = "trenchdesk_sig_v1", SIG_H = [30,60,180,300,900], SIG_COST = 0.10, SIG_GAP_MS = 120000, SIG_MAX_PENDING = 600, SIG_MAX_DONE = 8000;
+    const SIG_CHUNK = 1000, SIG_KINDS = ["s","f","b","t","k","r","p","c"];
+    let SIG = {pending:[], done:[], startedAt:Date.now(), lastCtl:0, seq:0, n0:0, savedSeq:0}, sigSavedAt = 0, sigCache = null, sigCacheAt = 0;
+    function sigLoad(){
+      try{
+        const j = JSON.parse(store.get(SIGKEY) || "null");
+        if (!j || !Array.isArray(j.pending)) return;
+        SIG = {pending:j.pending, done:[], startedAt:j.startedAt||Date.now(), lastCtl:j.lastCtl||0, seq:j.seq||0, n0:j.n0||0, savedSeq:j.seq||0};
+        if (Array.isArray(j.done)){
+          for (const r of j.done){ r.q = SIG.seq++; SIG.done.push(r); }
+          SIG.n0 = SIG.done.length ? SIG.done[0].q : SIG.seq; SIG.savedSeq = 0;
+        } else {
+          for (let c=Math.floor(SIG.n0/SIG_CHUNK); c<=Math.floor((SIG.seq-1)/SIG_CHUNK); c++){
+            try{ for (const r of JSON.parse(store.get(SIGKEY+"_d"+c) || "[]")) SIG.done.push(r); }catch(_){}
+          }
+        }
+      }catch(_){}
+    }
+    sigLoad();
+    function sigSave(force){
+      const now = Date.now(); if (!force && now - sigSavedAt < 60000) return; sigSavedAt = now;
+      const c0 = Math.floor((SIG.done.length ? SIG.done[0].q : SIG.seq)/SIG_CHUNK), c1 = Math.floor((SIG.seq-1)/SIG_CHUNK);
+      for (let c=Math.max(c0, Math.floor((SIG.savedSeq||0)/SIG_CHUNK)); c<=c1; c++)
+        store.set(SIGKEY+"_d"+c, JSON.stringify(SIG.done.filter(r => Math.floor(r.q/SIG_CHUNK) === c)));
+      SIG.savedSeq = SIG.seq;
+      store.set(SIGKEY, JSON.stringify({pending:SIG.pending, startedAt:SIG.startedAt, lastCtl:SIG.lastCtl, seq:SIG.seq, n0:SIG.done.length ? SIG.done[0].q : SIG.seq}));
+    }
+    function sigResetAll(){
+      const c0 = Math.floor((SIG.n0||0)/SIG_CHUNK), c1 = Math.floor(Math.max(0,SIG.seq-1)/SIG_CHUNK);
+      for (let c=c0; c<=c1; c++) store.set(SIGKEY+"_d"+c, "");
+      SIG = {pending:[], done:[], startedAt:Date.now(), lastCtl:0, seq:0, n0:0, savedSeq:0}; sigCache = null;
+      store.set(SIGKEY, JSON.stringify({pending:[], startedAt:SIG.startedAt, lastCtl:0, seq:0, n0:0}));
+    }
     function sigFrozen(t){
       const sm = t.samples, n = sm.length; if (n < 10) return false;
       for (let i=n-10;i<n;i++) if (sm[i].px !== sm[n-1].px) return false;
       return true;
+    }
+    function sigPush(now, t, m, kind, d, act, hr, tr){
+      SIG.pending.push({t:now, sym:t.sym, k:kind, d, p0:t.px, act, f:{}, mfe:0, mae:0,
+        m:{iv:m.instVrel==null?null:+m.instVrel.toFixed(1), v1:m.vrel==null?null:+m.vrel.toFixed(1), r30:m.r30s==null?null:+m.r30s.toFixed(3), r1:+m.r1.toFixed(3), r5:+m.r5.toFixed(2), sp:+(m.spread*100).toFixed(3), rk:m.risk, fr:+(t.fr*100).toFixed(4), c24:+t.chg24.toFixed(1), tn:Math.round(t.turn), hr,
+          c1:(tr&&tr.c1)||0, c4:(tr&&tr.c4)||0, tg:(tr&&tr.align)||0}});
     }
     function sigStep(now){
       const P = PM(), MAXP = S.cfg.maxPos || P.maxPos;
@@ -754,11 +924,16 @@ async function fetchJson(url, opt){
       const keep = [];
       for (const r of SIG.pending){
         const el = (now - r.t)/1000/WARP;
-        if (r.f[900] != null || el > 1500){ if (r.f[30] != null){ r.mfe = +r.mfe.toFixed(3); r.mae = +r.mae.toFixed(3); SIG.done.push(r); } }
+        if (r.f[900] != null || el > 1500){ if (r.f[30] != null){ r.mfe = +r.mfe.toFixed(3); r.mae = +r.mae.toFixed(3); r.q = SIG.seq++; SIG.done.push(r); } }
         else keep.push(r);
       }
       SIG.pending = keep;
-      if (SIG.done.length > SIG_MAX_DONE) SIG.done.splice(0, SIG.done.length - SIG_MAX_DONE);
+      if (SIG.done.length > SIG_MAX_DONE){
+        const oldC = Math.floor(SIG.done[0].q/SIG_CHUNK);
+        SIG.done.splice(0, SIG.done.length - SIG_MAX_DONE);
+        const newC = Math.floor(SIG.done[0].q/SIG_CHUNK);
+        for (let c=oldC; c<newC; c++) store.set(SIGKEY+"_d"+c, "");
+      }
       const hr = new Date(now + 9*3600e3).getUTCHours(), cand = [];
       for (const t of tokens.values()){
         if (!isFresh(t) || t.turn < P.minTurn || sigFrozen(t)) continue;
@@ -766,34 +941,68 @@ async function fetchJson(url, opt){
         if (m.r5 == null || m.r1 == null || m.vrel == null || m.spread > MAX_SPREAD) continue;
         cand.push({t, m});
         if (SIG.pending.length >= SIG_MAX_PENDING) continue;
-        if (t.sigAt && now - t.sigAt < SIG_GAP_MS*WARP) continue;
+        const ak = t.sigAtK || (t.sigAtK = {}), ok = k => !ak[k] || now - ak[k] >= SIG_GAP_MS*WARP;
+        const tr = trendOf(t.sym, t.px);
         let kind = null, d = 0;
-        if (m.instVrel != null && m.r30s != null && m.instVrel >= 2 && m.r30s !== 0){ kind = "s"; d = m.r30s > 0 ? 1 : -1; }
-        else if (Math.abs(m.r5) >= 3){ kind = "f"; d = m.r5 > 0 ? -1 : 1; }
-        if (!kind) continue;
-        const e = evalEntry(t);
-        const act = e.basic ? (e.gateWhy ? "gate" : (S.positions.length >= MAXP ? "cap" : "enter")) : "none";
-        t.sigAt = now;
-        SIG.pending.push({t:now, sym:t.sym, k:kind, d, p0:t.px, act, f:{}, mfe:0, mae:0,
-          m:{iv:m.instVrel==null?null:+m.instVrel.toFixed(1), v1:m.vrel==null?null:+m.vrel.toFixed(1), r30:m.r30s==null?null:+m.r30s.toFixed(3), r1:+m.r1.toFixed(3), r5:+m.r5.toFixed(2), sp:+(m.spread*100).toFixed(3), rk:m.risk, fr:+(t.fr*100).toFixed(4), c24:+t.chg24.toFixed(1), tn:Math.round(t.turn), hr}});
+        if (ok("s") && m.instVrel != null && m.r30s != null && m.instVrel >= 2 && m.r30s !== 0){ kind = "s"; d = m.r30s > 0 ? 1 : -1; }
+        else if (ok("f") && Math.abs(m.r5) >= 3){ kind = "f"; d = m.r5 > 0 ? -1 : 1; }
+        if (kind){
+          const e = evalEntry(t);
+          const act = e.basic ? (e.gateWhy ? "gate" : (S.positions.length >= MAXP ? "cap" : "enter")) : "none";
+          ak[kind] = now; sigPush(now, t, m, kind, d, act, hr, tr);
+        }
+        if (ok("b") && t.bid > 0 && t.ask > 0){
+          const bq = t.bidSz*t.bid, aq = t.askSz*t.ask, tot = bq + aq;
+          if (tot > 0){ const im = (bq-aq)/tot; if (Math.abs(im) >= 0.6){ ak.b = now; sigPush(now, t, m, "b", im > 0 ? 1 : -1, "none", hr, tr); } }
+        }
+        if (ok("t") && m.r15 != null && m.vrel >= 1.5 && Math.abs(m.r5) >= 1 && Math.abs(m.r15) >= 2 && (m.r5 > 0) === (m.r15 > 0)){ ak.t = now; sigPush(now, t, m, "t", m.r5 > 0 ? 1 : -1, "none", hr, tr); }
+        if (ok("k") && m.vrel >= 1.5){
+          const hl = hiLoOver(t, 900);
+          if (hl && hl.lo > 0 && (hl.hi - hl.lo)/hl.lo >= 0.005){
+            if (t.px >= hl.hi){ ak.k = now; sigPush(now, t, m, "k", 1, "none", hr, tr); }
+            else if (t.px <= hl.lo){ ak.k = now; sigPush(now, t, m, "k", -1, "none", hr, tr); }
+          }
+        }
+        if (ok("r") && Math.abs(m.r5) >= 3){
+          const hl = hiLoOver(t, 300);
+          if (hl){
+            const backUp = hl.hi > 0 ? (hl.hi - t.px)/hl.hi*100 : 0, backDn = hl.lo > 0 ? (t.px - hl.lo)/hl.lo*100 : 0;
+            if (m.r5 > 0 && backUp >= 1){ ak.r = now; sigPush(now, t, m, "r", -1, "none", hr, tr); }
+            else if (m.r5 < 0 && backDn >= 1){ ak.r = now; sigPush(now, t, m, "r", 1, "none", hr, tr); }
+          }
+        }
+        // トレンド逆行後の反発（1時間・4時間の両方が同じ方向のときだけ、その流れに乗る方向で、短期の逆行を待って入る）
+        if (ok("p") && tr.align !== 0 && m.r5 != null){
+          if (tr.align > 0 && m.r5 <= -1){ ak.p = now; sigPush(now, t, m, "p", 1, "none", hr, tr); }
+          else if (tr.align < 0 && m.r5 >= 1){ ak.p = now; sigPush(now, t, m, "p", -1, "none", hr, tr); }
+        }
       }
       if (now - (SIG.lastCtl||0) >= 60000*WARP && cand.length && SIG.pending.length < SIG_MAX_PENDING){
         SIG.lastCtl = now;
         for (let i=0;i<2;i++){
-          const c = cand[Math.floor(Math.random()*cand.length)], t = c.t, m = c.m;
-          SIG.pending.push({t:now, sym:t.sym, k:"c", d:Math.random()<0.5?1:-1, p0:t.px, act:"ctl", f:{}, mfe:0, mae:0,
-            m:{iv:m.instVrel==null?null:+m.instVrel.toFixed(1), v1:+m.vrel.toFixed(1), r30:m.r30s==null?null:+m.r30s.toFixed(3), r1:+m.r1.toFixed(3), r5:+m.r5.toFixed(2), sp:+(m.spread*100).toFixed(3), rk:m.risk, fr:+(t.fr*100).toFixed(4), c24:+t.chg24.toFixed(1), tn:Math.round(t.turn), hr}});
+          const c = cand[Math.floor(Math.random()*cand.length)];
+          sigPush(now, c.t, c.m, "c", Math.random() < 0.5 ? 1 : -1, "ctl", hr, trendOf(c.t.sym, c.t.px));
         }
       }
-      if (now - sigSavedAt > 60000){ sigSavedAt = now; store.set(SIGKEY, JSON.stringify(SIG)); }
+      sigSave(false);
     }
     function sigStat(recs, h){
-      let n = 0, sum = 0, net = 0, win = 0;
-      for (const r of recs){ const v = r.f[h]; if (v == null) continue; n++; sum += v; const c = SIG_COST + (r.m.sp||0); net += v - c; if (v - c > 0) win++; }
-      return n ? {n, mean:+(sum/n).toFixed(3), net:+(net/n).toFixed(3), hit:Math.round(win/n*1000)/10} : {n:0};
+      const xs = [];
+      for (const r of recs){ const v = r.f[h]; if (v == null) continue; xs.push({t:r.t, s:r.sym, v, x:v - SIG_COST - (r.m.sp||0)}); }
+      const n = xs.length; if (!n) return {n:0};
+      xs.sort((a,b)=>a.t-b.t);
+      let sum = 0, net = 0, win = 0; const grp = {};
+      for (const o of xs){ sum += o.v; net += o.x; if (o.x > 0) win++; }
+      const mu = net/n;
+      for (const o of xs) grp[o.s] = (grp[o.s]||0) + (o.x - mu);
+      let ss = 0, k = 0; for (const g in grp){ ss += grp[g]*grp[g]; k++; }
+      const ci = 1.96*Math.sqrt(ss)/n;
+      const half = Math.floor(n/2), m1 = half ? xs.slice(0,half).reduce((a,o)=>a+o.x,0)/half : 0, m2 = (n-half) ? xs.slice(half).reduce((a,o)=>a+o.x,0)/(n-half) : 0;
+      const sig = (n >= 30 && k >= 5 && mu - ci > 0 && m1 > 0 && m2 > 0) ? "有意（前後半とも黒字）" : (m1 > 0 && m2 > 0 ? "有望（誤差内）" : "なし");
+      return {n, k, mean:+(sum/n).toFixed(3), net:+mu.toFixed(3), ci:+ci.toFixed(3), hit:Math.round(win/n*1000)/10, h1:+m1.toFixed(3), h2:+m2.toFixed(3), sig};
     }
     function sigBuckets(by, h){
-      const KN = {s:"出来高急増", f:"逆張り"};
+      const KN = {s:"出来高急増", f:"逆張り", p:"トレンド逆行後の反発"};
       const defs = [
         ["出来高の急増倍率（瞬間）", r=>r.m.iv, [[0,3,"×2〜3"],[3,5,"×3〜5"],[5,10,"×5〜10"],[10,1e9,"×10以上"]], ["s"]],
         ["30秒の値動き（絶対値）", r=>r.m.r30==null?null:Math.abs(r.m.r30), [[0,0.05,"〜0.05%"],[0.05,0.15,"0.05〜0.15%"],[0.15,0.4,"0.15〜0.4%"],[0.4,1e9,"0.4%以上"]], ["s"]],
@@ -816,14 +1025,28 @@ async function fetchJson(url, opt){
         for (const [l,dv] of [["ロング方向",1],["ショート方向",-1]]){ const r = rowOf(l, by[k].filter(x=>x.d===dv)); if (r) rows.push(r); }
         if (rows.length) out.push({title:"実際の扱い・方向："+KN[k], rows});
       }
+      // 1時間・4時間EMAで見たトレンドと、シグナルの方向が一致していたか
+      for (const k of Object.keys(KN)){
+        const rows = [];
+        const withTrend = by[k].filter(x=>x.m.tg!==0);
+        const same = rowOf("トレンドと同方向（順行）", withTrend.filter(x=>x.m.tg===x.d));
+        const diff = rowOf("トレンドと逆方向（逆行）", withTrend.filter(x=>x.m.tg===-x.d));
+        const none = rowOf("トレンド不明・形成前", by[k].filter(x=>x.m.tg===0));
+        if (same) rows.push(same); if (diff) rows.push(diff); if (none) rows.push(none);
+        if (rows.length) out.push({title:"1h/4h EMAトレンドとの一致："+KN[k], rows});
+      }
       return out;
     }
     function sigSummary(){
-      const all = SIG.done.concat(SIG.pending), by = {s:[], f:[], c:[]};
-      for (const r of all) if (by[r.k]) by[r.k].push(r);
-      const out = {since:SIG.startedAt, h:300, cost:SIG_COST, n:{s:by.s.length, f:by.f.length, c:by.c.length, pending:SIG.pending.length}, tables:{s:{}, f:{}, c:{}}, buckets:[]};
-      for (const k of ["s","f","c"]) for (const h of SIG_H) out.tables[k][h] = sigStat(by[k], h);
+      const all = SIG.done.concat(SIG.pending), by = {};
+      for (const k of SIG_KINDS) by[k] = [];
+      let from = Infinity;
+      for (const r of all){ if (by[r.k]) by[r.k].push(r); if (r.t < from) from = r.t; }
+      const out = {since:SIG.startedAt, from:isFinite(from)?from:null, h:300, cost:SIG_COST, n:{pending:SIG.pending.length}, tables:{}, buckets:[]};
+      for (const k of SIG_KINDS){ out.n[k] = by[k].length; out.tables[k] = {}; for (const h of SIG_H) out.tables[k][h] = sigStat(by[k], h); }
       out.buckets = sigBuckets(by, 300);
+      { let h1max=0, h4max=0, cnt=0; for (const c of Object.values(CDL)){ h1max = Math.max(h1max, c.h1.length); h4max = Math.max(h4max, c.h4.length); cnt++; }
+        out.candles = {h1:h1max, h4:h4max, h1need:EMA1_PERIOD, h4need:EMA4_PERIOD, tokens:cnt}; }
       return out;
     }
     function sigSummaryCached(){
@@ -864,7 +1087,8 @@ async function fetchJson(url, opt){
       try{ sigStep(now); }catch(_){}
       for (const p of [...S.positions]){
         const t = tokens.get(p.sym); if (!t || !isFresh(t)) continue;
-        { const f0 = p.side*(t.px/p.entry-1)*100; if (f0 > (p.mfe||0)) p.mfe = f0; if (f0 < (p.mae||0)) p.mae = f0; }
+        { const f0 = p.side*(t.px/p.entry-1)*100; if (f0 > (p.mfe||0)) p.mfe = f0; if (f0 < (p.mae||0)) p.mae = f0;
+          if (cf.timeout > 0 && now - p.ts > msMin(cf.timeout) && (p.mfe||0) < 0.3 && f0 < 0){ closePos(p,"時間切れ（"+cf.timeout+"分・含み益に届かず）"); continue; } }
         if (p.pyramid){ pyramidCheck(p,t,now); continue; }
         if (p.halfback){ halfbackCheck(p,t,now); continue; }
         p.peak = p.side>0 ? Math.max(p.peak,t.px) : Math.min(p.peak,t.px);
@@ -936,7 +1160,7 @@ async function fetchJson(url, opt){
       const dirL = {both:"ロング＋ショート",long:"ロングのみ",short:"ショートのみ"}[S.cfg.dir];
       return { kind:"perp", title:"先物 ロング/ショート（ペーパー）", colTaker:"出来高×", now, running:S.running, startUsd:START_USD, equity:eq, pnlUsd:eq-START_USD, cash:S.cash, cfg:S.cfg, gates:GATES,
         labels:{vol:"危険度・ボラ（激しさ）",down:"逆行リスク（過熱度）"},
-        chips:[dirL+" ・ "+S.cfg.lev+"x", S.cfg.strategy==="fade" ? "逆張り（5分±"+S.cfg.fadeThresh+"%＋高値/安値から"+WICK_PCT+"%のヒゲ確認）" : S.cfg.strategy==="surge" ? "出来高急増（通常比×"+S.cfg.surgeThresh+"で瞬時に順張り）" : S.cfg.strategy==="dual" ? "併用：出来高急増（初動）＋逆張り（失速）" : "順張り", S.cfg.halfback ? "資金管理: 半戻し利確（-"+HB_ADD+"%で1回追加・-"+HB_SL+"%固定損切り）" : S.cfg.pyramid ? "資金管理: ピラミッド式" : (S.cfg.ladder ? "SL "+S.cfg.sl+"% ／ TP "+(S.cfg.tp/3).toFixed(2)+"/"+(S.cfg.tp*2/3).toFixed(2)+"/"+S.cfg.tp+"%" : "SL "+S.cfg.sl+"% ／ 利確 "+S.cfg.tp+"%"), beLabel(S.cfg.be),"モード: "+(MODE_OPTS.find(o=>o.v===S.cfg.mode)||{l:""}).l+(S.cfg.trail?" ・ トレーリング":""),"ゲート: "+(g?g.label:"OFF")].concat(S.cfg.live?["実発注 ON（BingXデモ）"]:[]).concat(warm>0?["ウォームアップ中（あと約"+warm+"秒）"]:[]),
+        chips:[dirL+" ・ "+S.cfg.lev+"x", S.cfg.strategy==="fade" ? "逆張り（5分±"+S.cfg.fadeThresh+"%＋高値/安値から"+WICK_PCT+"%のヒゲ確認）" : S.cfg.strategy==="surge" ? "出来高急増（通常比×"+S.cfg.surgeThresh+"で瞬時に順張り）" : S.cfg.strategy==="dual" ? "併用：出来高急増（初動）＋逆張り（失速）" : "順張り", S.cfg.halfback ? "資金管理: 半戻し利確（-"+HB_ADD+"%で1回追加・-"+HB_SL+"%固定損切り）" : S.cfg.pyramid ? "資金管理: ピラミッド式" : (S.cfg.ladder ? "SL "+S.cfg.sl+"% ／ TP "+(S.cfg.tp/3).toFixed(2)+"/"+(S.cfg.tp*2/3).toFixed(2)+"/"+S.cfg.tp+"%" : "SL "+S.cfg.sl+"% ／ 利確 "+S.cfg.tp+"%"), beLabel(S.cfg.be),"モード: "+(MODE_OPTS.find(o=>o.v===S.cfg.mode)||{l:""}).l+(S.cfg.trail?" ・ トレーリング":""),"ゲート: "+(g?g.label:"OFF")].concat(S.cfg.live?["実発注 ON（BingXデモ）"]:[]).concat(S.cfg.timeout?["時間切れ決済 "+S.cfg.timeout+"分"]:[]).concat(warm>0?["ウォームアップ中（あと約"+warm+"秒）"]:[]),
         stats:{trades:S.trades.length,wins:S.trades.filter(x=>x.pnlUsd>0).length,skips:S.skips,polls:S.polls,watching:tokens.size,events:S.events},
         health:{lastPollAt,lastError,pollMs:pollMs(),source:(src==="bingx"?BINGX:BYBIT).replace(/^https?:\/\//,"")+(src==="bingx"&&RELAY_URL&&RELAY_TOKEN?"（リレー経由）":PROXY?"（プロキシ経由）":"")},
         positions:S.positions.map(p=>{ const t = tokens.get(p.sym), pxv = t?t.px:p.entry, un = unreal(p,t)-p.fundingPaid, m0 = p.margin0 || p.margin, cf = S.cfg, lad = cf.ladder;
@@ -991,7 +1215,8 @@ async function fetchJson(url, opt){
           {key:"pyramid",label:"資金管理: ピラミッド式（固定ルール）",opts:YN,val:S.cfg.pyramid},
           {key:"halfback",label:"資金管理: 半戻し利確（-15%で1回追加・-32%固定損切り）",opts:YN,val:S.cfg.halfback},
           {key:"maxPos",label:"最大同時保有数",opts:ALLOW.maxPos.map(v=>({l:v+"件",v})),val:S.cfg.maxPos},
-          {key:"orphan",label:"BingXにだけあるポジションを自動決済",opts:YN,val:S.cfg.orphan}
+          {key:"orphan",label:"BingXにだけあるポジションを自動決済",opts:YN,val:S.cfg.orphan},
+          {key:"timeout",label:"時間切れ決済（含み益に届かず、マイナスのまま）",opts:[{l:"OFF",v:0},{l:"30分",v:30},{l:"1時間",v:60},{l:"3時間",v:180},{l:"6時間",v:360}],val:S.cfg.timeout}
         ],
         liveNote:"実発注は、アプリのペーパーと同じ数量（"+S.cfg.lev+"x）で、接続設定のリレー経由でBingXデモ口座に送信します。リレー未設定の場合はONにできません。",
         liveAccount: S.cfg.live ? { data: liveAccount, err: liveAccountErr, updatedAt: lastLiveAccountAt } : null,
@@ -1005,7 +1230,7 @@ async function fetchJson(url, opt){
           ? ("戦略「併用」は、出来高急増（初動に飛び乗る）と逆張り（行き過ぎの失速を狩る）を、同時に別々の銘柄で走らせます。ある銘柄で急な出来高が出た瞬間はそちらへ、別の銘柄が伸びきって失速したときはそちらへ、と両方の候補を毎回まとめて評価し、同時保有数（"+(PERP_MODE[S.cfg.mode]||PERP_MODE.active).maxPos+"件）の範囲でスコアの高い方から採用します。手数料は片道"+(FEEF()*100).toFixed(3)+"%、資金調達は保有中に連続的に概算、強制ロスカットは維持証拠金率0.5%で概算。実際の取引所とは異なります。レバレッジ取引は元本以上の損失に至ることがあり、この戦略に優位性があるとは限りません。")
           : (src==="bingx"?"BingX":"Bybit")+"公開データ（USDT無期限先物）で判定。戦略「出来高急増」は、直近のポーリング間隔（"+Math.round(pollMs()/1000)+"秒程度）だけを見た出来高の急増（通常ペースの何倍か）を検知し、価格がその方向にわずかでも動いていれば、その瞬間に順張りでエントリーします。1分・5分の平均を使う通常の順張りより反応が早いぶん、誤検知（すぐ反転する「フェイク」）も増えます。利確は MAX利確を3等分（TP1=1/3、TP2=2/3、TP3=MAX）し、TP1・TP2で約1/3ずつ決済、「建値撤退」をTP2後（またはTP1後）にすると損切りが建値に切り上がります。手数料は片道"+(FEEF()*100).toFixed(3)+"%、資金調達は保有中に連続的に概算、強制ロスカットは維持証拠金率0.5%で概算。実際の取引所の約定・ロスカット・資金調達とは異なります。レバレッジ取引は元本以上の損失に至ることがあり、この戦略に優位性があるとは限りません。") };
     }
-    const EPOCH_KEYS = ["mode","dir","strategy","fadeThresh","surgeThresh","lev","size","sl","tp","trail","gate","scale","ladder","be","pyramid","halfback"];
+    const EPOCH_KEYS = ["mode","dir","strategy","fadeThresh","surgeThresh","lev","size","sl","tp","trail","gate","scale","ladder","be","pyramid","halfback","maxPos","timeout"];
     function cfgSnapshot(){ const o={}; EPOCH_KEYS.forEach(k=>o[k]=S.cfg[k]); return o; }
     function currentEpoch(){ return (S.epochs && S.epochs[0]) || null; }
     function tradesSince(ts, until){ return S.trades.filter(t=>t.exitTs>=ts && t.exitTs<until); }
@@ -1044,7 +1269,7 @@ async function fetchJson(url, opt){
       else if (c==="close"){ for (const p of [...S.positions]) closePos(p,"手動クローズ"); }
       else if (c==="closeOne" && b.mint){ const p = S.positions.find(x=>x.sym===b.mint); if (p) closePos(p,"手動クローズ"); }
       else if (c==="reset"){ const cfg = S.cfg; S = fresh(); S.cfg = cfg; noteEpoch(); addLog("SYS","セッションをリセット（ペーパー）"); }
-      else if (c==="sigReset"){ SIG = {pending:[], done:[], startedAt:Date.now(), lastCtl:0}; sigCache = null; store.set(SIGKEY, JSON.stringify(SIG)); addLog("SYS","シグナル検証の記録をリセット"); }
+      else if (c==="sigReset"){ sigResetAll(); addLog("SYS","シグナル検証の記録をリセット"); }
       else if (c==="cfg" && b.cfg){
         let changed = false;
         for (const k of Object.keys(b.cfg)) if (ALLOW[k] && ALLOW[k].includes(b.cfg[k])){
