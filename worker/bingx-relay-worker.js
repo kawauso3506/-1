@@ -310,12 +310,10 @@ async function fetchJson(url, opt){
   const money = n => n>=1e9 ? "$"+(n/1e9).toFixed(2)+"B" : n>=1e6 ? "$"+(n/1e6).toFixed(2)+"M" : n>=1e3 ? "$"+(n/1e3).toFixed(1)+"K" : "$"+Math.round(n);
   const msMin = m => m*60e3*WARP;
   const baseOf = s => s.replace(/-?USDT$/,"");
+  const $ = id => document.getElementById(id);
   const MODE_OPTS = [{l:"控えめ",v:"calm"},{l:"標準",v:"normal"},{l:"積極",v:"active"}];
   const YN = [{l:"OFF",v:false},{l:"ON",v:true}];
   const GATE_OPTS = [{l:"OFF",v:"off"},{l:"標準",v:"std"},{l:"厳しめ",v:"strict"}];
-  const LADDER_OPTS = [{l:"OFF",v:false},{l:"3分割",v:true}];
-  const BE_OPTS = [{l:"OFF",v:"off"},{l:"TP1後",v:"tp1"},{l:"TP2後",v:"tp2"}];
-  const beLabel = v => v==="tp1" ? "建値撤退: TP1後" : v==="tp2" ? "建値撤退: TP2後" : "建値撤退: OFF";
 
   function makePerp(){
     const PERP_MODE = {
@@ -326,15 +324,14 @@ async function fetchJson(url, opt){
     const MMR = 0.005, MAX_SPREAD = 0.0015;
     const FEEF = () => src === "bingx" ? 0.0005 : 0.00055;
     const GATES = { off:null, std:{risk:65,label:"標準"}, strict:{risk:50,label:"厳しめ"} };
-    const ALLOW = {mode:["calm","normal","active"],dir:["both","long","short"],lev:[1,2,3,5,8,10,20],size:[0.04,0.05,0.1,0.2],sl:[0.8,1.25,1.5,3,5],tp:[1,1.25,2,4,8],trail:[true,false],gate:["off","std","strict"],scale:[true,false],ladder:[true,false],be:["off","tp1","tp2"],live:[true,false],strategy:["momentum","fade","surge","dual"],fadeThresh:[3,5,8],surgeThresh:[3,5,10],pyramid:[true,false],halfback:[true,false],maxPos:[3,5,8,10,15,20],orphan:[true,false],timeout:[0,30,60,180,360]};
+    const ALLOW = {mode:["calm","normal","active"],dir:["both","long","short"],lev:[1,2,3,5,8,10,20],size:[0.04,0.05,0.1,0.2],sl:[0.8,1.25,1.5,3,5],tp:[1,1.25,2,4,8],gate:["off","std","strict"],scale:[true,false],live:[true,false],strategy:["momentum","fade","surge","dual"],fadeThresh:[3,5,8],surgeThresh:[3,5,10],halfback:[true,false],scalp:[true,false],scalpTp:[1,2,3,4,5,6,7,8,9,10],scalpSl:[1,2,3,4,5,6,7,8,9,10],scalpHold:[30,45,60],maxPos:[3,5,8,10,15,20],orphan:[true,false],timeout:[0,30,60,180,360]};
     const PM = () => PERP_MODE[S.cfg.mode] || PERP_MODE.active;
     const pollMs = () => POLL_OVERRIDE || PM().poll;
 
     function fresh(){
       return { startedAt:Date.now(), running:true, cash:START_USD, positions:[], trades:[], log:[], errors:[], hist:[{t:Date.now(),v:START_USD}],
         skips:0, polls:0, events:0, logSeq:0, lastPollAt:0, cooldown:{}, retry:{}, epochs:[], pnlDaily:{},
-        slots:[{id:"main", label:"メイン"}], // 将来「サブ」を足すための下ごしらえ。今はmainだけを使う
-        cfg:{mode:"active",dir:"both",lev:8,size:0.04,sl:1.5,tp:3,trail:true,gate:"std",scale:true,ladder:true,be:"tp2",live:false,strategy:"surge",fadeThresh:5,surgeThresh:5,pyramid:false,halfback:true,maxPos:5,orphan:true,timeout:0} };
+        cfg:{mode:"active",dir:"both",lev:8,size:0.04,sl:1.5,tp:3,gate:"std",scale:true,live:false,strategy:"surge",fadeThresh:5,surgeThresh:5,halfback:true,scalp:false,scalpTp:1,scalpSl:1,scalpHold:45,maxPos:5,orphan:true,timeout:0} };
     }
     let S = fresh();
     const tokens = new Map();
@@ -415,9 +412,9 @@ async function fetchJson(url, opt){
     }
 
     // ---- 1時間・4時間ろうそく（トレンド判定用）----
-    // 取引記録などとは別に持つ：ここは「ろうそくが1本閉じたときだけ」変化する低頻度データなので、
-    // 他の状態（取引ごとに毎ループ書き直す部分）とは分けて、間引いて保存する（毎ループ数MBを書き続けないため）。
-    const CDLKEY = "trenchdesk_cdl_v1", H1_MS = 3600000, H4_MS = 14400000, CDL_CAP = 300, EMA1_PERIOD = 8, EMA4_PERIOD = 6, CDL_SAVE_GAP = 300000;
+    // 自分で1本ずつ組み立てるのではなく、BingXの過去ろうそくAPIから、定期的にまとめて取得する
+    const CDL_CAP = 300, EMA1_PERIOD = 8, EMA4_PERIOD = 6, CDL_REFRESH_MS = 300000, CDL_SAVE_GAP = 300000;
+    const CDLKEY = "trenchdesk_cdl_v1";
     let CDL = {}, cdlSavedAt = 0, cdlDirty = false;
     function cdlLoad(){
       try{ const j = JSON.parse(store.get(CDLKEY) || "null"); if (j && typeof j === "object") CDL = j; }catch(_){}
@@ -429,14 +426,6 @@ async function fetchJson(url, opt){
       if (!force && now - cdlSavedAt < CDL_SAVE_GAP) return;
       cdlSavedAt = now; cdlDirty = false;
       store.set(CDLKEY, JSON.stringify(CDL));
-    }
-    function updateCandles(sym, now, px){
-      let c = CDL[sym]; if (!c){ c = {h1:[], h4:[], cur1:null, cur4:null}; CDL[sym] = c; }
-      const b1 = Math.floor(now/H1_MS)*H1_MS, b4 = Math.floor(now/H4_MS)*H4_MS;
-      if (!c.cur1 || c.cur1.t !== b1){ if (c.cur1){ c.h1.push(c.cur1); if (c.h1.length>CDL_CAP) c.h1.shift(); cdlDirty = true; } c.cur1 = {t:b1,o:px,h:px,l:px,c:px}; }
-      else { c.cur1.h = Math.max(c.cur1.h,px); c.cur1.l = Math.min(c.cur1.l,px); c.cur1.c = px; }
-      if (!c.cur4 || c.cur4.t !== b4){ if (c.cur4){ c.h4.push(c.cur4); if (c.h4.length>CDL_CAP) c.h4.shift(); cdlDirty = true; } c.cur4 = {t:b4,o:px,h:px,l:px,c:px}; }
-      else { c.cur4.h = Math.max(c.cur4.h,px); c.cur4.l = Math.min(c.cur4.l,px); c.cur4.c = px; }
     }
     function emaOf(candles, period){
       if (!candles || candles.length < period) return null;
@@ -456,9 +445,6 @@ async function fetchJson(url, opt){
       const keep = new Set(tokens.keys());
       for (const k of Object.keys(CDL)) if (!keep.has(k)){ delete CDL[k]; cdlDirty = true; }
     }
-    // ---- 起動直後や再起動後、まだ十分な本数が無い銘柄には、BingXの過去ろうそくを取りにいく ----
-    // （毎回0から積み上げ直すのを避け、待ち時間をほぼなくすため。1サイクルあたり数銘柄ずつに絞って、通信を集中させない）
-    const cdlSeeded = new Set(), CDL_SEED_PER_CYCLE = 3;
     function parseKlineArr(j){
       const raw = (j && j.result && j.result.data) || (j && j.data) || [];
       const arr = Array.isArray(raw) ? raw : [];
@@ -475,29 +461,32 @@ async function fetchJson(url, opt){
           relay("/market/klines?symbol="+base+"USDT&interval=4h&limit="+CDL_CAP)
         ]);
         const h1arr = parseKlineArr(r1), h4arr = parseKlineArr(r4);
+        let c = CDL[sym]; if (!c){ c = {h1:[], h4:[], fetchedAt:0}; CDL[sym] = c; }
         if (h1arr.length || h4arr.length){
-          let c = CDL[sym]; if (!c){ c = {h1:[], h4:[], cur1:null, cur4:null}; CDL[sym] = c; }
-          if (h1arr.length > c.h1.length) c.h1 = h1arr.slice(-CDL_CAP);
-          if (h4arr.length > c.h4.length) c.h4 = h4arr.slice(-CDL_CAP);
+          if (h1arr.length) c.h1 = h1arr.slice(-CDL_CAP);
+          if (h4arr.length) c.h4 = h4arr.slice(-CDL_CAP);
+          c.fetchedAt = Date.now();
           cdlDirty = true;
           addLog("SYS", base+" 過去のろうそくを取得（1h "+c.h1.length+"本／4h "+c.h4.length+"本）", true);
         } else {
           const codeOf = j => j && j.result && j.result.code!=null ? j.result.code : (j && j.code!=null ? j.code : "?");
-          addLog("SYS", base+" 過去ろうそくの応答が空でした（1h code:"+codeOf(r1)+" ／4h code:"+codeOf(r4)+"）。ライブでの積み上げに切り替えます", true);
+          c.fetchedAt = Date.now();
+          addLog("SYS", base+" 過去ろうそくの応答が空でした（1h code:"+codeOf(r1)+" ／4h code:"+codeOf(r4)+"）", true);
         }
       }catch(err){ addLog("SYS", base+" 過去ろうそくの取得に失敗: "+err.message, true); }
     }
-    async function seedCandlesStep(){
+    const CDL_FETCH_PER_CYCLE = 3;
+    async function seedCandlesStep(now){
       let n = 0;
       for (const sym of tokens.keys()){
-        if (n >= CDL_SEED_PER_CYCLE) break;
-        if (cdlSeeded.has(sym)) continue;
+        if (n >= CDL_FETCH_PER_CYCLE) break;
         const c = CDL[sym];
-        if (c && c.h1.length >= EMA1_PERIOD && c.h4.length >= EMA4_PERIOD) { cdlSeeded.add(sym); continue; }
-        cdlSeeded.add(sym); n++;
+        if (c && c.fetchedAt && now - c.fetchedAt < CDL_REFRESH_MS) continue;
+        n++;
         await seedCandles(sym);
       }
     }
+
     async function pollTickers(){
       const rows = src === "bingx" ? await fetchBingx() : await fetchBybit();
       const now = Date.now(), P = PM(), heldSet = new Set(S.positions.map(p=>p.sym));
@@ -508,7 +497,6 @@ async function fetchJson(url, opt){
         t.px = o.px; t.mark = o.mark; t.bid = o.bid; t.ask = o.ask; t.bidSz = o.bidSz; t.askSz = o.askSz; t.turn = o.turn; t.oi = o.oi;
         t.fr = isFinite(o.fr) ? o.fr : 0; t.chg24 = o.chg24; t.chg1h = o.chg1h; t.hi = o.hi; t.lo = o.lo; t.updatedAt = now;
         t.samples.push({t:now,px:o.px,turn:o.turn,oi:o.oi}); if (t.samples.length>200) t.samples.shift();
-        updateCandles(o.sym, now, o.px);
       }
       for (const [k,t] of tokens) if (now - t.updatedAt > 90000 && !heldSet.has(k)) tokens.delete(k);
       pruneCandles();
@@ -635,7 +623,7 @@ async function fetchJson(url, opt){
         if (isOpen){
           p.peak = avg;
           if (p.initEntry) p.initEntry = avg;
-          if (p.slPriceFixed){ const k = (p.pyramid ? PYR_SL : HB_SL)/100/p.lev; p.slPriceFixed = p.side>0 ? avg*(1-k) : avg*(1+k); }
+          if (p.slPriceFixed){ const k = HB_SL/100/p.lev; p.slPriceFixed = p.side>0 ? avg*(1-k) : avg*(1+k); }
         }
         return avg;
       }catch(_){ return 0; }
@@ -724,10 +712,17 @@ async function fetchJson(url, opt){
         addLog("LIVE",base+" 実発注: "+(p.side>0?"ロング":"ショート")+" "+qty+"（BingXデモ）",true);
         // 利確・損切りを、実際の約定価格を基準にBingX側へも置く（画面を閉じても取引所側で発動する）
         // 価格にも数量と同じく「小数点以下は何桁まで」という決まりがあるため、それに合わせて丸める
-        const slPct = p.pyramid ? PYR_SL/100/p.lev : p.halfback ? HB_SL/100/p.lev : S.cfg.sl/100;
-        const tpPct = (p.pyramid || p.halfback) ? null : S.cfg.tp/100; // ピラミッド式・半戻し利確は決済ラインが動くので、単発のTP注文は置かない（SLのみ）
-        const slPrice = floorTo(fillPx*(1 - p.side*slPct), prec.price);
-        const tpPrice = tpPct!=null ? floorTo(fillPx*(1 + p.side*tpPct), prec.price) : null;
+        let slPrice, tpPrice;
+        if (p.scalp){
+          // 固定$の利確・損切りを、数量から価格の距離に変換して置く
+          slPrice = floorTo(fillPx - p.side*(p.scalpSl/qty), prec.price);
+          tpPrice = floorTo(fillPx + p.side*(p.scalpTp/qty), prec.price);
+        } else {
+          const slPct = p.halfback ? HB_SL/100/p.lev : S.cfg.sl/100;
+          const tpPct = p.halfback ? null : S.cfg.tp/100; // 半戻し利確は決済ラインが動くので、単発のTP注文は置かない（SLのみ）
+          slPrice = floorTo(fillPx*(1 - p.side*slPct), prec.price);
+          tpPrice = tpPct!=null ? floorTo(fillPx*(1 + p.side*tpPct), prec.price) : null;
+        }
         try{
           const br = await relay("/bracket-only","POST",{symbol:base+"USDT", positionSide:p.side>0?"LONG":"SHORT", quantity: floorTo((p.live && p.live.qty>0) ? p.live.qty : qty, prec.qty), slPrice: String(slPrice), tpPrice: tpPrice!=null?String(tpPrice):undefined});
           if (p.live){ if (br.ids && br.ids.sl) p.live.stopId = br.ids.sl; p.live.stopPx = slPrice; }
@@ -762,11 +757,10 @@ async function fetchJson(url, opt){
         addLog("LIVE",base+" 実決済に失敗（"+label+"）: "+err.message,true);
       }
     }
-    const PYR_SL = 35, PYR_ADD1 = 20, PYR_ADD2 = 28, PYR_TP1 = 40, PYR_TP2 = 70, PYR_TP3 = 100, PYR_STEP = 20, PYR_MAX_ADD2 = 3, PYR_MAX_RETRY = 8;
     const HB_ADD = 15, HB_SL = 32, HB_MIN_PEAK = 1.0; // 半戻し利確: -15%で1回だけ追加、-32%で固定損切り、ピークが+1%以上ついたら半戻し判定を有効化
     function openPos(t,e){
       let margin = Math.min(S.cash*0.98, equity()*S.cfg.size);
-      if (S.cfg.scale && !S.cfg.pyramid && !S.cfg.halfback) margin *= clamp(1 - e.m.risk/150, 0.4, 1);
+      if (S.cfg.scale && !S.cfg.halfback && !S.cfg.scalp) margin *= clamp(1 - e.m.risk/150, 0.4, 1);
       if (margin < 5) return false;
       const lev = S.cfg.lev, N = margin*lev, side = e.dir==="long" ? 1 : -1;
       const base = side>0 ? (t.ask||t.px) : (t.bid||t.px), fill = base*(1 + side*impactOf(t,side,N)), fee = N*FEEF();
@@ -774,14 +768,12 @@ async function fetchJson(url, opt){
       const liq = side>0 ? fill*(1-1/lev+MMR) : fill*(1+1/lev-MMR);
       const posObj = {sym:t.sym, side, lev, margin, margin0:margin, notional:N, qty:N/fill, origQty:N/fill, entry:fill, liq, ts:Date.now(), peak:fill, fundingPaid:0, feeOpen:fee, lastFund:Date.now(), kind:e.kind, slot:"main", realizedNet:0, tpHit:0, beOn:false, live:null, wsSign:null, wsCrosses:0, mfe:0, mae:0,
         ent:{ivrel:e.m.instVrel==null?null:+e.m.instVrel.toFixed(1), vrel:e.m.vrel==null?null:+e.m.vrel.toFixed(1), r30s:e.m.r30s==null?null:+e.m.r30s.toFixed(3), r5:e.m.r5==null?null:+e.m.r5.toFixed(2), spread:+(e.m.spread*100).toFixed(3), risk:e.m.risk, fr:+(t.fr*100).toFixed(4), chg24:+t.chg24.toFixed(1), buy:+e.m.buyShare.toFixed(2), hr:new Date(Date.now()+9*3600e3).getUTCHours()}};
-      if (S.cfg.pyramid){
-        posObj.pyramid = true; posObj.initEntry = fill; posObj.initMargin = margin;
-        posObj.slPriceFixed = side>0 ? fill*(1-PYR_SL/100/lev) : fill*(1+PYR_SL/100/lev);
-        posObj.phase1Adds = 0; posObj.phase2Adds = 0; posObj.tp1Done = false; posObj.tp2Done = false; posObj.beActive = false; posObj.bePrice = null; posObj.peak2 = null;
-      } else if (S.cfg.halfback){
+      if (S.cfg.halfback){
         posObj.halfback = true; posObj.initEntry = fill; posObj.initMargin = margin;
         posObj.slPriceFixed = side>0 ? fill*(1-HB_SL/100/lev) : fill*(1+HB_SL/100/lev);
         posObj.hbAdded = false;
+      } else if (S.cfg.scalp){
+        posObj.scalp = true; posObj.scalpTp = S.cfg.scalpTp; posObj.scalpSl = S.cfg.scalpSl; posObj.scalpHold = S.cfg.scalpHold;
       }
       S.positions.push(posObj);
       liveOpen(posObj);
@@ -803,7 +795,7 @@ async function fetchJson(url, opt){
         addLog("LIVE",base+" 追加の実発注: "+qty+"（BingXデモ）",true);
       }catch(err){ addLog("LIVE",base+" 追加発注に失敗: "+err.message,true); }
     }
-    function addPyramid(p,label){
+    function addOnce(p,label){
       const t = tokens.get(p.sym); if (!t || !isFresh(t)) return;
       const addMargin = p.initMargin;
       if (!(addMargin>0) || S.cash < addMargin+0.01){ addLog("RISK",baseOf(p.sym)+" 追加エントリー見送り（資金不足）",true); return; }
@@ -832,33 +824,6 @@ async function fetchJson(url, opt){
       }
       return (p.wsCrosses||0) >= 3;
     }
-    function pyramidCheck(p,t,now){
-      const levPct = p.side*(t.px/p.entry - 1)*100*p.lev;
-      if ((p.side>0 && t.px<=p.liq) || (p.side<0 && t.px>=p.liq)){ closePos(p,"強制ロスカット"); return; }
-      const slHit = p.side>0 ? t.px<=p.slPriceFixed : t.px>=p.slPriceFixed;
-      if (slHit){ closePos(p,"損切り（初期固定 -"+PYR_SL+"%）"); return; }
-      if (whipsawHit(p, levPct, 8, now)){ closePos(p,"方向不明（プラスマイナス3往復）"); return; }
-      if (!p.tp1Done){
-        if (p.phase1Adds===0 && levPct<=-PYR_ADD1){ addPyramid(p,"証拠金維持率-"+PYR_ADD1+"%"); p.phase1Adds=1; }
-        else if (p.phase1Adds===1 && levPct<=-PYR_ADD2){ addPyramid(p,"証拠金維持率-"+PYR_ADD2+"%"); p.phase1Adds=2; }
-        if (levPct>=PYR_TP1){ partial(p,0.3,"TP1(+"+PYR_TP1+"%)"); p.tp1Done=true; }
-        return;
-      }
-      if (!p.tp2Done){
-        if (levPct>=PYR_TP2){ partial(p,0.49,"TP2(+"+PYR_TP2+"%)"); p.tp2Done=true; p.beActive=true; p.bePrice=t.px; p.peak2=levPct; }
-        return;
-      }
-      p.peak2 = Math.max(p.peak2, levPct);
-      if (p.beActive){
-        const beHit = p.side>0 ? t.px<=p.bePrice : t.px>=p.bePrice;
-        if (beHit){ closePos(p,"最終決済（TP2水準）"); return; }
-      }
-      if (p.phase2Adds<PYR_MAX_ADD2 && (p.peak2-levPct) >= PYR_STEP*(p.phase2Adds+1)){
-        addPyramid(p,"TP2後-"+PYR_STEP+"%逆行×"+(p.phase2Adds+1));
-        p.phase2Adds++; // 最終決済ラインはTP2到達時の価格に固定。追加しても動かさない
-      }
-      if (levPct>=PYR_TP3){ closePos(p,"利確（TP3 +"+PYR_TP3+"%）"); return; }
-    }
     function halfbackCheck(p,t,now){
       if ((p.side>0 && t.px<=p.liq) || (p.side<0 && t.px>=p.liq)){ closePos(p,"強制ロスカット"); return; }
       const slHit = p.side>0 ? t.px<=p.slPriceFixed : t.px>=p.slPriceFixed;
@@ -866,12 +831,19 @@ async function fetchJson(url, opt){
       if (whipsawHit(p, p.side*(t.px/p.entry-1)*100*p.lev, 8, now)){ closePos(p,"方向不明（プラスマイナス3往復）"); return; }
       if (!p.hbAdded){
         const levPct = p.side*(t.px/p.entry - 1)*100*p.lev;
-        if (levPct<=-HB_ADD){ addPyramid(p,"証拠金維持率-"+HB_ADD+"%"); p.hbAdded=true; }
+        if (levPct<=-HB_ADD){ addOnce(p,"証拠金維持率-"+HB_ADD+"%"); p.hbAdded=true; }
       }
       p.peak = p.side>0 ? Math.max(p.peak,t.px) : Math.min(p.peak,t.px);
       const fav = p.side*(t.px/p.entry-1)*100, best = p.side*(p.peak/p.entry-1)*100;
       if (best >= HB_MIN_PEAK && !(fav <= best/2)) liveTrail(p, p.entry*(1+p.side*best/200));
       if (best >= HB_MIN_PEAK && fav <= best/2){ closePos(p,"利確（半戻し）"); return; }
+    }
+    function scalpCheck(p,t,now){
+      if ((p.side>0 && t.px<=p.liq) || (p.side<0 && t.px>=p.liq)){ closePos(p,"強制ロスカット"); return; }
+      const pnl = unreal(p,t) - p.fundingPaid;
+      if (pnl >= p.scalpTp){ closePos(p,"利確（+$"+p.scalpTp.toFixed(0)+"）"); return; }
+      if (pnl <= -p.scalpSl){ closePos(p,"損切り（-$"+p.scalpSl.toFixed(0)+"）"); return; }
+      if (now - p.ts > p.scalpHold*1000*WARP){ closePos(p,"保有時間切れ（"+p.scalpHold+"秒）"); return; }
     }
     function fillExit(p,t,q,last){
       const base = p.side>0 ? ((t&&t.bid)||last) : ((t&&t.ask)||last);
@@ -907,15 +879,10 @@ async function fetchJson(url, opt){
       S.cash += back; S.positions = S.positions.filter(x=>x!==p);
       const pnl = (p.realizedNet||0) + (back - p.margin) - p.feeOpen, m0 = p.margin0 || p.margin;
       notePnlDaily(pnl);
-      const why = (p.tpHit>0 && !reason.startsWith("利確")) ? reason+"（TP"+p.tpHit+"済）" : reason;
+      const why = reason;
       S.trades.unshift({symbol:baseOf(p.sym),mint:p.sym,side:p.side>0?"long":"short",lev:p.lev,entryTs:p.ts,exitTs:Date.now(),pnlUsd:pnl,pct:pnl/m0*100,reason:why,kind:p.kind,slot:p.slot||"main",mfe:+(p.mfe||0).toFixed(2),mae:+(p.mae||0).toFixed(2),ent:p.ent||null});
       if (S.trades.length>100) S.trades.pop();
       S.cooldown[p.sym] = Date.now(); S.events++;
-      if (p.pyramid && reason.indexOf("初期固定")>=0){
-        const n = (S.retry[p.sym]||0)+1;
-        if (n <= PYR_MAX_RETRY){ S.retry[p.sym] = n; delete S.cooldown[p.sym]; addLog("SYS",baseOf(p.sym)+" 固定損切りで再エントリー待機なし（"+n+"/"+PYR_MAX_RETRY+"回目）",true); }
-        else { addLog("SYS",baseOf(p.sym)+" 再エントリーの上限（"+PYR_MAX_RETRY+"回）に達したため、通常のクールダウンに戻します",true); }
-      } else if (p.pyramid && S.retry[p.sym]){ delete S.retry[p.sym]; }
       addLog("TRADE",baseOf(p.sym)+" "+(p.side>0?"ロング":"ショート")+" 決済（"+why+"） "+(pnl>=0?"+":"−")+"$"+Math.abs(pnl).toFixed(2),true);
     }
     function accrueFunding(){
@@ -1136,31 +1103,23 @@ async function fetchJson(url, opt){
     function agentStep(){
       const now = Date.now(), P = PM(), cf = S.cfg, MAXTP = cf.tp;
       accrueFunding();
-      seedCandlesStep().catch(()=>{});
+      seedCandlesStep(now).catch(()=>{});
       try{ sigStep(now); }catch(_){}
       for (const p of [...S.positions]){
         const t = tokens.get(p.sym); if (!t || !isFresh(t)) continue;
         { const f0 = p.side*(t.px/p.entry-1)*100; if (f0 > (p.mfe||0)) p.mfe = f0; if (f0 < (p.mae||0)) p.mae = f0;
           if (cf.timeout > 0 && now - p.ts > msMin(cf.timeout) && (p.mfe||0) < 0.3 && f0 < 0){ closePos(p,"時間切れ（"+cf.timeout+"分・含み益に届かず）"); continue; } }
-        if (p.pyramid){ pyramidCheck(p,t,now); continue; }
         if (p.halfback){ halfbackCheck(p,t,now); continue; }
+        if (p.scalp){ scalpCheck(p,t,now); continue; }
         p.peak = p.side>0 ? Math.max(p.peak,t.px) : Math.min(p.peak,t.px);
-        const fav = p.side*(t.px/p.entry-1)*100, best = p.side*(p.peak/p.entry-1)*100, m = metricsOf(t);
+        const fav = p.side*(t.px/p.entry-1)*100, m = metricsOf(t);
         const dead = (p.side>0 && t.px<=p.liq) || (p.side<0 && t.px>=p.liq);
         const wsThresh = Math.max(0.15, cf.sl*0.35);
         const wsDone = !dead && whipsawHit(p, fav, wsThresh, now);
-        if (!dead && !wsDone && cf.ladder){
-          if (p.tpHit<1 && fav >= MAXTP/3){ partial(p,1/3,"TP1"); p.tpHit = 1; }
-          if (p.tpHit<2 && fav >= MAXTP*2/3){ partial(p,1/3,"TP2"); p.tpHit = 2; }
-        }
-        if ((cf.be==="tp1" && p.tpHit>=1) || (cf.be==="tp2" && p.tpHit>=2)) p.beOn = true;
-        const trailOn = cf.trail && (!cf.ladder || p.tpHit>=1);
         if (dead) closePos(p,"強制ロスカット");
         else if (wsDone) closePos(p,"方向不明（プラスマイナス3往復）");
-        else if (fav >= MAXTP) closePos(p,"利確（"+(cf.ladder?"TP3/MAX":"MAX")+"）");
-        else if (p.beOn && fav <= 0) closePos(p,"建値撤退");
-        else if (!p.beOn && fav <= -cf.sl) closePos(p,"損切り");
-        else if (trailOn && best >= Math.max(0.8,MAXTP*0.4) && (best-fav) >= Math.max(0.5,MAXTP*0.25)) closePos(p,"トレーリング");
+        else if (fav >= MAXTP) closePos(p,"利確（MAX）");
+        else if (fav <= -cf.sl) closePos(p,"損切り");
         else if (m.r5!=null && m.r1!=null && p.side*m.r5 <= -P.r5 && p.side*m.r1 < 0 && fav < 0.3) closePos(p,"反転");
         else if (now - p.ts > msMin(P.hold)) closePos(p,"時間切れ");
       }
@@ -1213,22 +1172,12 @@ async function fetchJson(url, opt){
       const dirL = {both:"ロング＋ショート",long:"ロングのみ",short:"ショートのみ"}[S.cfg.dir];
       return { kind:"perp", title:"先物 ロング/ショート（ペーパー）", colTaker:"出来高×", now, running:S.running, startUsd:START_USD, equity:eq, pnlUsd:eq-START_USD, cash:S.cash, cfg:S.cfg, gates:GATES,
         labels:{vol:"危険度・ボラ（激しさ）",down:"逆行リスク（過熱度）"},
-        chips:[dirL+" ・ "+S.cfg.lev+"x", S.cfg.strategy==="fade" ? "逆張り（5分±"+S.cfg.fadeThresh+"%＋高値/安値から"+WICK_PCT+"%のヒゲ確認）" : S.cfg.strategy==="surge" ? "出来高急増（通常比×"+S.cfg.surgeThresh+"で瞬時に順張り）" : S.cfg.strategy==="dual" ? "併用：出来高急増（初動）＋逆張り（失速）" : "順張り", S.cfg.halfback ? "資金管理: 半戻し利確（-"+HB_ADD+"%で1回追加・-"+HB_SL+"%固定損切り）" : S.cfg.pyramid ? "資金管理: ピラミッド式" : (S.cfg.ladder ? "SL "+S.cfg.sl+"% ／ TP "+(S.cfg.tp/3).toFixed(2)+"/"+(S.cfg.tp*2/3).toFixed(2)+"/"+S.cfg.tp+"%" : "SL "+S.cfg.sl+"% ／ 利確 "+S.cfg.tp+"%"), beLabel(S.cfg.be),"モード: "+(MODE_OPTS.find(o=>o.v===S.cfg.mode)||{l:""}).l+(S.cfg.trail?" ・ トレーリング":""),"ゲート: "+(g?g.label:"OFF")].concat(S.cfg.live?["実発注 ON（BingXデモ）"]:[]).concat(S.cfg.timeout?["時間切れ決済 "+S.cfg.timeout+"分"]:[]).concat(warm>0?["ウォームアップ中（あと約"+warm+"秒）"]:[]),
+        chips:[dirL+" ・ "+S.cfg.lev+"x", S.cfg.strategy==="fade" ? "逆張り（5分±"+S.cfg.fadeThresh+"%＋高値/安値から"+WICK_PCT+"%のヒゲ確認）" : S.cfg.strategy==="surge" ? "出来高急増（通常比×"+S.cfg.surgeThresh+"で瞬時に順張り）" : S.cfg.strategy==="dual" ? "併用：出来高急増（初動）＋逆張り（失速）" : "順張り", S.cfg.halfback ? "資金管理: 半戻し利確（-"+HB_ADD+"%で1回追加・-"+HB_SL+"%固定損切り）" : S.cfg.scalp ? "資金管理: 超高速スキャルピング（+$"+S.cfg.scalpTp+"利確・-$"+S.cfg.scalpSl+"損切り・"+S.cfg.scalpHold+"秒）" : "SL "+S.cfg.sl+"% ／ 利確 "+S.cfg.tp+"%","モード: "+(MODE_OPTS.find(o=>o.v===S.cfg.mode)||{l:""}).l,"ゲート: "+(g?g.label:"OFF")].concat(S.cfg.live?["実発注 ON（BingXデモ）"]:[]).concat(S.cfg.timeout?["時間切れ決済 "+S.cfg.timeout+"分"]:[]).concat(warm>0?["ウォームアップ中（あと約"+warm+"秒）"]:[]),
         stats:{trades:S.trades.length,wins:S.trades.filter(x=>x.pnlUsd>0).length,skips:S.skips,polls:S.polls,watching:tokens.size,events:S.events},
-        health:{lastPollAt,lastError,pollMs:pollMs(),source:(src==="bingx"?BINGX:BYBIT).replace(/^https?:\/\//,"")+(src==="bingx"&&RELAY_URL&&RELAY_TOKEN?"（リレー経由）":PROXY?"（プロキシ経由）":"")},
-        positions:S.positions.map(p=>{ const t = tokens.get(p.sym), pxv = t?t.px:p.entry, un = unreal(p,t)-p.fundingPaid, m0 = p.margin0 || p.margin, cf = S.cfg, lad = cf.ladder;
+        health:{lastPollAt,lastError,pollMs:pollMs(),source:"open-api.bingx.com（リレー経由）"},
+        positions:S.positions.map(p=>{ const t = tokens.get(p.sym), pxv = t?t.px:p.entry, un = unreal(p,t)-p.fundingPaid, m0 = p.margin0 || p.margin, cf = S.cfg;
           let rows;
-          if (p.pyramid){
-            const atLev = k => p.entry*(1+p.side*k/100/p.lev);
-            rows = [];
-            rows.push({k:"tp"+(p.tp1Done?" hit":""), label:"TP1 +"+PYR_TP1+"%（3割）", px:atLev(PYR_TP1), val:p.tp1Done?"済":"約 +"+usd(p.notional*PYR_TP1/100*0.3)});
-            rows.push({k:"tp"+(p.tp2Done?" hit":""), label:"TP2 +"+PYR_TP2+"%（7割・建値化）", px:atLev(PYR_TP2), val:p.tp2Done?"済":"約 +"+usd(p.notional*PYR_TP2/100*0.49)});
-            rows.push({k:"tp", label:"TP3 +"+PYR_TP3+"%（残り全部）", px:atLev(PYR_TP3), val:"約 +"+usd(p.notional*PYR_TP3/100*0.21)});
-            rows.push({k:"tr", label:(p.side>0?"買い建値":"売り建値")+"（現在）", px:p.entry, val:usd(p.margin)});
-            if (p.beActive) rows.push({k:"sl", label:"最終決済ライン（TP2水準・固定）", px:p.bePrice, val:"+"+usd(p.notional*PYR_TP2/100*0.21)});
-            rows.push({k:"sl", label:"固定損切り -"+PYR_SL+"%（初回から不動）", px:p.slPriceFixed, val:"−"+usd(p.initMargin*PYR_SL/100)});
-            rows.push({k:"liq", label:"ロスカット", px:p.liq, val:"全損"});
-          } else if (p.halfback){
+          if (p.halfback){
             const bestPx = p.peak, best = p.side*(bestPx/p.entry-1)*100, halfPx = p.entry*(1+p.side*best/200);
             rows = [];
             rows.push({k:"tp", label:"ピーク（現在の最高値）", px:bestPx, val:pct(best,2)+" 到達"});
@@ -1237,17 +1186,23 @@ async function fetchJson(url, opt){
             if (!p.hbAdded) rows.push({k:"sl", label:"追加ライン -"+HB_ADD+"%（1回のみ）", px:p.entry*(1-p.side*HB_ADD/100/p.lev), val:"同額を追加"});
             rows.push({k:"sl", label:"固定損切り -"+HB_SL+"%（初回から不動）", px:p.slPriceFixed, val:"−"+usd(p.initMargin*HB_SL/100)});
             rows.push({k:"liq", label:"ロスカット", px:p.liq, val:"全損"});
+          } else if (p.scalp){
+            const pxTp = p.entry + p.side*(p.scalpTp/p.qty), pxSl = p.entry - p.side*(p.scalpSl/p.qty);
+            rows = [];
+            rows.push({k:"tp", label:"利確 +$"+p.scalpTp.toFixed(0), px:pxTp, val:"+$"+p.scalpTp.toFixed(0)});
+            rows.push({k:"tr", label:(p.side>0?"買い建値":"売り建値"), px:p.entry, val:usd(p.margin)});
+            rows.push({k:"sl", label:"損切り -$"+p.scalpSl.toFixed(0), px:pxSl, val:"−$"+p.scalpSl.toFixed(0)});
+            rows.push({k:"liq", label:"保有時間切れ（"+p.scalpHold+"秒）", px:p.entry, val:"—"});
+            rows.push({k:"liq", label:"ロスカット", px:p.liq, val:"全損"});
           } else {
             const at = k => p.entry*(1+p.side*cf.tp*k/100);
             rows = [];
-            if (lad){ [1,2].forEach(k=>rows.push({k:"tp"+(p.tpHit>=k?" hit":""),label:"TP"+k+" "+(cf.tp*k/3).toFixed(2)+"%",px:at(k/3),val:p.tpHit>=k?"済":"+"+usd(p.notional*cf.tp*k/300)})); }
-            rows.push({k:"tp",label:(lad?"TP3(MAX) ":"利確 ")+cf.tp+"%",px:at(1),val:"+"+usd(p.notional*cf.tp/100)});
+            rows.push({k:"tp",label:"利確 "+cf.tp+"%",px:at(1),val:"+"+usd(p.notional*cf.tp/100)});
             rows.push({k:"tr",label:(p.side>0?"買い建値":"売り建値"),px:p.entry,val:usd(p.margin)});
-            rows.push(p.beOn ? {k:"sl",label:"建値撤退",px:p.entry,val:"±0"} : {k:"sl",label:"損切り "+cf.sl+"%",px:p.entry*(1-p.side*cf.sl/100),val:"−"+usd(p.notional*cf.sl/100)});
+            rows.push({k:"sl",label:"損切り "+cf.sl+"%",px:p.entry*(1-p.side*cf.sl/100),val:"−"+usd(p.notional*cf.sl/100)});
             rows.push({k:"liq",label:"ロスカット",px:p.liq,val:"全損"});
           }
-          return { mint:p.sym, symbol:baseOf(p.sym), side:p.side>0?"long":"short", lev:p.lev, qty:p.qty, costUsd:p.margin, valueUsd:p.margin+un, retPct:((p.realizedNet||0)+un)/m0*100, entryPx:p.entry, px:pxv, ts:p.ts, rows, tpHit:p.tpHit, beOn:p.beOn,
-            pyrInfo: p.pyramid ? ("追加: フェーズ1 "+p.phase1Adds+"/2 ・ フェーズ2 "+p.phase2Adds+"/"+PYR_MAX_ADD2) : null }; }),
+          return { mint:p.sym, symbol:baseOf(p.sym), side:p.side>0?"long":"short", lev:p.lev, qty:p.qty, costUsd:p.margin, valueUsd:p.margin+un, retPct:((p.realizedNet||0)+un)/m0*100, entryPx:p.entry, px:pxv, ts:p.ts, rows }; }),
         watch, trades:S.trades.slice(0,100), log:S.log.slice(0,60), errors:(S.errors||[]).slice(0,30), calendar:calendarStats(), hist:S.hist.slice(-300).map(h=>h.v), startedAt:S.startedAt,
         ctl:[
           {key:"mode",label:"アクティブ度",opts:MODE_OPTS,val:S.cfg.mode},
@@ -1258,15 +1213,15 @@ async function fetchJson(url, opt){
           {key:"lev",label:"レバレッジ",opts:ALLOW.lev.map(v=>({l:v+"x",v})),val:S.cfg.lev},
           {key:"size",label:"1回の証拠金（評価額比）",opts:ALLOW.size.map(v=>({l:Math.round(v*100)+"%",v})),val:S.cfg.size},
           {key:"sl",label:"損切り（価格の逆行）",opts:ALLOW.sl.map(v=>({l:v+"%",v})),val:S.cfg.sl},
-          {key:"tp",label:"MAX利確（TP3・価格の順行）",opts:ALLOW.tp.map(v=>({l:v+"%",v})),val:S.cfg.tp},
-          {key:"ladder",label:"利確の分割（TP1/2/3）",opts:LADDER_OPTS,val:S.cfg.ladder},
-          {key:"be",label:"建値撤退（BE）",opts:BE_OPTS,val:S.cfg.be},
-          {key:"trail",label:"トレーリング",opts:YN,val:S.cfg.trail},
+          {key:"tp",label:"MAX利確（価格の順行）",opts:ALLOW.tp.map(v=>({l:v+"%",v})),val:S.cfg.tp},
           {key:"gate",label:"リスクゲート",opts:GATE_OPTS,val:S.cfg.gate},
           {key:"scale",label:"リスク連動サイズ",opts:YN,val:S.cfg.scale},
           {key:"live",label:"BingXデモへ実発注",opts:YN,val:S.cfg.live},
-          {key:"pyramid",label:"資金管理: ピラミッド式（固定ルール）",opts:YN,val:S.cfg.pyramid},
           {key:"halfback",label:"資金管理: 半戻し利確（-15%で1回追加・-32%固定損切り）",opts:YN,val:S.cfg.halfback},
+          {key:"scalp",label:"資金管理: 超高速スキャルピング（$固定利確・損切り）",opts:YN,val:S.cfg.scalp},
+          {key:"scalpTp",label:"スキャルピング利確（$）",opts:ALLOW.scalpTp.map(v=>({l:"$"+v,v})),val:S.cfg.scalpTp},
+          {key:"scalpSl",label:"スキャルピング損切り（$）",opts:ALLOW.scalpSl.map(v=>({l:"$"+v,v})),val:S.cfg.scalpSl},
+          {key:"scalpHold",label:"スキャルピング保有時間上限",opts:ALLOW.scalpHold.map(v=>({l:v+"秒",v})),val:S.cfg.scalpHold},
           {key:"maxPos",label:"最大同時保有数",opts:ALLOW.maxPos.map(v=>({l:v+"件",v})),val:S.cfg.maxPos},
           {key:"orphan",label:"BingXにだけあるポジションを自動決済",opts:YN,val:S.cfg.orphan},
           {key:"timeout",label:"時間切れ決済（含み益に届かず、マイナスのまま）",opts:[{l:"OFF",v:0},{l:"30分",v:30},{l:"1時間",v:60},{l:"3時間",v:180},{l:"6時間",v:360}],val:S.cfg.timeout}
@@ -1274,16 +1229,15 @@ async function fetchJson(url, opt){
         liveNote:"実発注は、アプリのペーパーと同じ数量（"+S.cfg.lev+"x）で、接続設定のリレー経由でBingXデモ口座に送信します。リレー未設定の場合はONにできません。",
         liveAccount: S.cfg.live ? { data: liveAccount, err: liveAccountErr, updatedAt: lastLiveAccountAt } : null,
         pdca: epochStats(), sig: sigSummaryCached(),
-        slots: S.slots || [{id:"main", label:"メイン"}],
-        foot:(S.cfg.pyramid ?
-          ("資金管理: ピラミッド式（固定ルール・"+S.cfg.lev+"x）。初期エントリー時点を基準に、証拠金維持率-"+PYR_SL+"%の位置に損切りラインを固定（この後どれだけ買い増ししても動きません）。証拠金維持率-"+PYR_ADD1+"%、-"+PYR_ADD2+"%でそれぞれ初期と同じサイズを追加（最大3回）。+"+PYR_TP1+"%で3割利確、+"+PYR_TP2+"%で残りの7割を利確し、その時点の価格に最終決済ラインを固定します。+"+PYR_TP2+"%後にTP3（+"+PYR_TP3+"%）へ向かう途中で"+PYR_STEP+"%逆行するたびに初期と同じサイズを追加（最大"+PYR_MAX_ADD2+"回）しますが、最終決済ラインはTP2到達時の価格のまま動かしません。+"+PYR_TP3+"%に届けば残り全部を利確します。手数料は片道"+(FEEF()*100).toFixed(3)+"%、強制ロスカットは維持証拠金率0.5%で概算。実際の取引所の約定・ロスカットとは異なります。")
-          : S.cfg.halfback
+        foot:(S.cfg.halfback
           ? ("資金管理: 半戻し利確（固定ルール・"+S.cfg.lev+"x）。出来高急増を検知した瞬間にその方向へ乗ります。証拠金維持率-"+HB_ADD+"%まで逆行したら、初期と同じサイズを1回だけ追加します。損切りラインは、初回エントリー時点を基準に証拠金維持率-"+HB_SL+"%の位置に固定し、追加しても動きません。利確は、その時点までの最高値（安値）を記録し、そこから伸びた分の半分まで戻ってきた時点で、残り全部を利確します。回転重視のため保有時間の上限はありません。手数料は片道"+(FEEF()*100).toFixed(3)+"%、強制ロスカットは維持証拠金率0.5%で概算。実際の取引所の約定・ロスカットとは異なります。")
+          : S.cfg.scalp
+          ? ("資金管理: 超高速スキャルピング（固定ルール・"+S.cfg.lev+"x）。含み益が+$"+S.cfg.scalpTp+"に届いたら利確、含み損が-$"+S.cfg.scalpSl+"に届いたら損切り、どちらも届かないまま"+S.cfg.scalpHold+"秒たったら、その時点の損益で強制決済します。1回あたりの証拠金・レバレッジに関係なく、常に固定の金額で判定します。手数料は片道"+(FEEF()*100).toFixed(3)+"%、強制ロスカットは維持証拠金率0.5%で概算。実際の取引所の約定・ロスカットとは異なります。")
           : S.cfg.strategy==="dual"
           ? ("戦略「併用」は、出来高急増（初動に飛び乗る）と逆張り（行き過ぎの失速を狩る）を、同時に別々の銘柄で走らせます。ある銘柄で急な出来高が出た瞬間はそちらへ、別の銘柄が伸びきって失速したときはそちらへ、と両方の候補を毎回まとめて評価し、同時保有数（"+(PERP_MODE[S.cfg.mode]||PERP_MODE.active).maxPos+"件）の範囲でスコアの高い方から採用します。手数料は片道"+(FEEF()*100).toFixed(3)+"%、資金調達は保有中に連続的に概算、強制ロスカットは維持証拠金率0.5%で概算。実際の取引所とは異なります。レバレッジ取引は元本以上の損失に至ることがあり、この戦略に優位性があるとは限りません。")
-          : (src==="bingx"?"BingX":"Bybit")+"公開データ（USDT無期限先物）で判定。戦略「出来高急増」は、直近のポーリング間隔（"+Math.round(pollMs()/1000)+"秒程度）だけを見た出来高の急増（通常ペースの何倍か）を検知し、価格がその方向にわずかでも動いていれば、その瞬間に順張りでエントリーします。1分・5分の平均を使う通常の順張りより反応が早いぶん、誤検知（すぐ反転する「フェイク」）も増えます。利確は MAX利確を3等分（TP1=1/3、TP2=2/3、TP3=MAX）し、TP1・TP2で約1/3ずつ決済、「建値撤退」をTP2後（またはTP1後）にすると損切りが建値に切り上がります。手数料は片道"+(FEEF()*100).toFixed(3)+"%、資金調達は保有中に連続的に概算、強制ロスカットは維持証拠金率0.5%で概算。実際の取引所の約定・ロスカット・資金調達とは異なります。レバレッジ取引は元本以上の損失に至ることがあり、この戦略に優位性があるとは限りません。") };
+          : "BingX公開データ（USDT無期限先物）で判定。戦略「出来高急増」は、直近のポーリング間隔（"+Math.round(pollMs()/1000)+"秒程度）だけを見た出来高の急増（通常ペースの何倍か）を検知し、価格がその方向にわずかでも動いていれば、その瞬間に順張りでエントリーします。手数料は片道"+(FEEF()*100).toFixed(3)+"%、資金調達は保有中に連続的に概算、強制ロスカットは維持証拠金率0.5%で概算。実際の取引所の約定・ロスカット・資金調達とは異なります。レバレッジ取引は元本以上の損失に至ることがあり、この戦略に優位性があるとは限りません。") };
     }
-    const EPOCH_KEYS = ["mode","dir","strategy","fadeThresh","surgeThresh","lev","size","sl","tp","trail","gate","scale","ladder","be","pyramid","halfback","maxPos","timeout"];
+    const EPOCH_KEYS = ["mode","dir","strategy","fadeThresh","surgeThresh","lev","size","sl","tp","gate","scale","halfback","scalp","scalpTp","scalpSl","scalpHold","maxPos","timeout"];
     function cfgSnapshot(){ const o={}; EPOCH_KEYS.forEach(k=>o[k]=S.cfg[k]); return o; }
     function currentEpoch(){ return (S.epochs && S.epochs[0]) || null; }
     function tradesSince(ts, until){ return S.trades.filter(t=>t.exitTs>=ts && t.exitTs<until); }
@@ -1329,8 +1283,8 @@ async function fetchJson(url, opt){
           if (k==="live" && b.cfg[k]===true && (!RELAY_URL || !RELAY_TOKEN)){ addLog("SYS","実発注をONにするには、接続設定でリレーURLとトークンを入力してください。",true); continue; }
           if (S.cfg[k] !== b.cfg[k]) changed = true;
           S.cfg[k] = b.cfg[k];
-          if (k==="pyramid" && b.cfg[k]===true) S.cfg.halfback = false; // 資金管理モードは1つだけ
-          if (k==="halfback" && b.cfg[k]===true) S.cfg.pyramid = false;
+          if (k==="scalp" && b.cfg[k]===true) S.cfg.halfback = false; // 資金管理モードは1つだけ
+          if (k==="halfback" && b.cfg[k]===true) S.cfg.scalp = false;
           if (k==="live") addLog("SYS","BingXデモへの実発注を "+(b.cfg[k]?"ON":"OFF")+" にしました",true);
         }
         if (changed) noteEpoch();
