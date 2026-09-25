@@ -695,9 +695,19 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     }
     function ceilTo(v, prec){ const f = Math.pow(10,Math.max(0,prec)); return Number((Math.ceil(v*f - 1e-6)/f).toFixed(Math.max(0,prec))); }
     const trailBusy = new Set();
+    async function liveActualAmt(p){
+      try{
+        const j = await relay("/positions?symbol="+baseOf(p.sym)+"USDT");
+        const raw = (j.result && j.result.data) || [];
+        const list = Array.isArray(raw) ? raw : [raw];
+        const side = p.side>0 ? "LONG" : "SHORT";
+        const pos = list.find(x => x && x.positionSide===side && Math.abs(parseFloat(x.positionAmt))>0);
+        return pos ? Math.abs(parseFloat(pos.positionAmt)) : 0;
+      }catch(_){ return 0; }
+    }
     async function liveRestop(p, target, silent){
       const base = baseOf(p.sym), side = p.side>0 ? "LONG" : "SHORT", prec = await getPrecision(base);
-      const q = floorTo(p.live.qty, prec.qty); if (!(q>0)) return false;
+      let q = floorTo(p.live.qty, prec.qty); if (!(q>0)) return false;
       const errText = errs => errs.map(e=>typeof e.detail==="string"?e.detail:JSON.stringify(e.detail)).join(", ");
       const isGoneErr = txt => /109420|position not exist/i.test(txt);
       const isDupErr = txt => /110424|available amount/i.test(txt);
@@ -712,6 +722,9 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
         if (isDupErr(txt)){
           if (p.live.stopId){ try{ await relay("/cancel-order","POST",{symbol:base+"USDT", orderId:p.live.stopId}); }catch(_){} p.live.stopId = null; }
           try{ await relay("/cancel-all","POST",{symbol:base+"USDT"}); }catch(_){}
+          // 数量そのものが実際のポジションを超えている場合があるため、BingX側の実数量に合わせ直す
+          const actual = await liveActualAmt(p);
+          if (actual > 0){ const q2 = floorTo(actual, prec.qty); if (q2 > 0 && q2 !== q){ q = q2; p.live.qty = q; } }
           br = await relay("/bracket-only","POST",{symbol:base+"USDT", positionSide:side, quantity:q, slPrice:String(target)});
         }
       }
