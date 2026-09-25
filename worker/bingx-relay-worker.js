@@ -322,7 +322,7 @@ async function fetchJson(url, opt){
 
     function fresh(){
       return { startedAt:Date.now(), running:true, cash:START_USD, positions:[], trades:[], log:[], errors:[], hist:[{t:Date.now(),v:START_USD}],
-        skips:0, polls:0, events:0, logSeq:0, lastPollAt:0, cooldown:{}, retry:{}, epochs:[], pnlDaily:{},
+        skips:0, polls:0, events:0, logSeq:0, lastPollAt:0, cooldown:{}, retry:{}, epochs:[], pnlDaily:{}, cdl:{},
         slots:[{id:"main", label:"メイン"}], // 将来「サブ」を足すための下ごしらえ。今はmainだけを使う
         cfg:{mode:"active",dir:"both",lev:8,size:0.04,sl:1.5,tp:3,trail:true,gate:"std",scale:true,ladder:true,be:"tp2",live:false,strategy:"surge",fadeThresh:5,surgeThresh:5,pyramid:false,halfback:true,maxPos:5,orphan:true,timeout:0} };
     }
@@ -352,7 +352,7 @@ async function fetchJson(url, opt){
     function load(){
       try{
         const j = JSON.parse(store.get(FKEY) || "null");
-        if (j && j.cfg && Array.isArray(j.positions)){ const def = fresh().cfg; S = Object.assign(fresh(), j); S.cfg = Object.assign(def, j.cfg); S.positions.forEach(p => { if (p.origQty==null) p.origQty = p.qty; if (p.margin0==null) p.margin0 = p.margin; if (p.realizedNet==null) p.realizedNet = 0; if (p.tpHit==null) p.tpHit = 0; if (p.beOn==null) p.beOn = false; if (!tokens.has(p.sym)) tokens.set(p.sym,{sym:p.sym,samples:[],firstSeen:Date.now(),px:p.entry,mark:p.entry,bid:0,ask:0,bidSz:0,askSz:0,turn:0,oi:0,fr:0,chg24:0,chg1h:0,hi:p.entry,lo:p.entry,updatedAt:0}); }); }
+        if (j && j.cfg && Array.isArray(j.positions)){ const def = fresh().cfg; S = Object.assign(fresh(), j); S.cfg = Object.assign(def, j.cfg); if (!S.cdl) S.cdl = {}; S.positions.forEach(p => { if (p.origQty==null) p.origQty = p.qty; if (p.margin0==null) p.margin0 = p.margin; if (p.realizedNet==null) p.realizedNet = 0; if (p.tpHit==null) p.tpHit = 0; if (p.beOn==null) p.beOn = false; if (!tokens.has(p.sym)) tokens.set(p.sym,{sym:p.sym,samples:[],firstSeen:Date.now(),px:p.entry,mark:p.entry,bid:0,ask:0,bidSz:0,askSz:0,turn:0,oi:0,fr:0,chg24:0,chg1h:0,hi:p.entry,lo:p.entry,updatedAt:0}); }); }
       }catch(_){}
     }
     function persist(){ S.lastPollAt = lastPollAt; store.set(FKEY, JSON.stringify(S)); }
@@ -403,6 +403,35 @@ async function fetchJson(url, opt){
       if (!out.length) throw new Error("BingX: 銘柄データが空です");
       return out;
     }
+
+    // ---- 1時間・4時間ろうそく（トレンド判定用）----
+    const H1_MS = 3600000, H4_MS = 14400000, CDL_CAP = 60, EMA1_PERIOD = 8, EMA4_PERIOD = 6;
+    function updateCandles(sym, now, px){
+      let c = S.cdl[sym]; if (!c){ c = {h1:[], h4:[], cur1:null, cur4:null}; S.cdl[sym] = c; }
+      const b1 = Math.floor(now/H1_MS)*H1_MS, b4 = Math.floor(now/H4_MS)*H4_MS;
+      if (!c.cur1 || c.cur1.t !== b1){ if (c.cur1){ c.h1.push(c.cur1); if (c.h1.length>CDL_CAP) c.h1.shift(); } c.cur1 = {t:b1,o:px,h:px,l:px,c:px}; }
+      else { c.cur1.h = Math.max(c.cur1.h,px); c.cur1.l = Math.min(c.cur1.l,px); c.cur1.c = px; }
+      if (!c.cur4 || c.cur4.t !== b4){ if (c.cur4){ c.h4.push(c.cur4); if (c.h4.length>CDL_CAP) c.h4.shift(); } c.cur4 = {t:b4,o:px,h:px,l:px,c:px}; }
+      else { c.cur4.h = Math.max(c.cur4.h,px); c.cur4.l = Math.min(c.cur4.l,px); c.cur4.c = px; }
+    }
+    function emaOf(candles, period){
+      if (!candles || candles.length < period) return null;
+      const k = 2/(period+1); let e = candles[0].c;
+      for (let i=1;i<candles.length;i++) e = candles[i].c*k + e*(1-k);
+      return e;
+    }
+    function trendOf(sym, px){
+      const c = S.cdl[sym]; if (!c) return {c1:0, c4:0, align:0, e1:null, e4:null};
+      const e1 = emaOf(c.h1, EMA1_PERIOD), e4 = emaOf(c.h4, EMA4_PERIOD);
+      const c1 = e1==null ? 0 : (px>e1 ? 1 : px<e1 ? -1 : 0);
+      const c4 = e4==null ? 0 : (px>e4 ? 1 : px<e4 ? -1 : 0);
+      const align = (c1!==0 && c1===c4) ? c1 : 0;
+      return {c1, c4, align, e1, e4};
+    }
+    function pruneCandles(){
+      const keep = new Set(tokens.keys());
+      for (const k of Object.keys(S.cdl)) if (!keep.has(k)) delete S.cdl[k];
+    }
     async function pollTickers(){
       const rows = src === "bingx" ? await fetchBingx() : await fetchBybit();
       const now = Date.now(), P = PM(), heldSet = new Set(S.positions.map(p=>p.sym));
@@ -413,8 +442,10 @@ async function fetchJson(url, opt){
         t.px = o.px; t.mark = o.mark; t.bid = o.bid; t.ask = o.ask; t.bidSz = o.bidSz; t.askSz = o.askSz; t.turn = o.turn; t.oi = o.oi;
         t.fr = isFinite(o.fr) ? o.fr : 0; t.chg24 = o.chg24; t.chg1h = o.chg1h; t.hi = o.hi; t.lo = o.lo; t.updatedAt = now;
         t.samples.push({t:now,px:o.px,turn:o.turn,oi:o.oi}); if (t.samples.length>200) t.samples.shift();
+        updateCandles(o.sym, now, o.px);
       }
       for (const [k,t] of tokens) if (now - t.updatedAt > 90000 && !heldSet.has(k)) tokens.delete(k);
+      pruneCandles();
     }
 
     function retOver(t,sec){
@@ -825,7 +856,7 @@ async function fetchJson(url, opt){
       for (const p of S.positions){ const t = tokens.get(p.sym), dt = (now-p.lastFund)/1000; p.lastFund = now; if (t && dt>0 && dt<3600) p.fundingPaid += p.side*t.fr*p.notional*dt/(8*3600); }
     }
         const SIGKEY = "trenchdesk_sig_v1", SIG_H = [30,60,180,300,900], SIG_COST = 0.10, SIG_GAP_MS = 120000, SIG_MAX_PENDING = 600, SIG_MAX_DONE = 8000;
-    const SIG_CHUNK = 1000, SIG_KINDS = ["s","f","b","t","k","r","c"];
+    const SIG_CHUNK = 1000, SIG_KINDS = ["s","f","b","t","k","r","p","c"];
     let SIG = {pending:[], done:[], startedAt:Date.now(), lastCtl:0, seq:0, n0:0, savedSeq:0}, sigSavedAt = 0, sigCache = null, sigCacheAt = 0;
     function sigLoad(){
       try{
@@ -862,9 +893,10 @@ async function fetchJson(url, opt){
       for (let i=n-10;i<n;i++) if (sm[i].px !== sm[n-1].px) return false;
       return true;
     }
-    function sigPush(now, t, m, kind, d, act, hr){
+    function sigPush(now, t, m, kind, d, act, hr, tr){
       SIG.pending.push({t:now, sym:t.sym, k:kind, d, p0:t.px, act, f:{}, mfe:0, mae:0,
-        m:{iv:m.instVrel==null?null:+m.instVrel.toFixed(1), v1:m.vrel==null?null:+m.vrel.toFixed(1), r30:m.r30s==null?null:+m.r30s.toFixed(3), r1:+m.r1.toFixed(3), r5:+m.r5.toFixed(2), sp:+(m.spread*100).toFixed(3), rk:m.risk, fr:+(t.fr*100).toFixed(4), c24:+t.chg24.toFixed(1), tn:Math.round(t.turn), hr}});
+        m:{iv:m.instVrel==null?null:+m.instVrel.toFixed(1), v1:m.vrel==null?null:+m.vrel.toFixed(1), r30:m.r30s==null?null:+m.r30s.toFixed(3), r1:+m.r1.toFixed(3), r5:+m.r5.toFixed(2), sp:+(m.spread*100).toFixed(3), rk:m.risk, fr:+(t.fr*100).toFixed(4), c24:+t.chg24.toFixed(1), tn:Math.round(t.turn), hr,
+          c1:(tr&&tr.c1)||0, c4:(tr&&tr.c4)||0, tg:(tr&&tr.align)||0}});
     }
     function sigStep(now){
       const P = PM(), MAXP = S.cfg.maxPos || P.maxPos;
@@ -895,40 +927,46 @@ async function fetchJson(url, opt){
         cand.push({t, m});
         if (SIG.pending.length >= SIG_MAX_PENDING) continue;
         const ak = t.sigAtK || (t.sigAtK = {}), ok = k => !ak[k] || now - ak[k] >= SIG_GAP_MS*WARP;
+        const tr = trendOf(t.sym, t.px);
         let kind = null, d = 0;
         if (ok("s") && m.instVrel != null && m.r30s != null && m.instVrel >= 2 && m.r30s !== 0){ kind = "s"; d = m.r30s > 0 ? 1 : -1; }
         else if (ok("f") && Math.abs(m.r5) >= 3){ kind = "f"; d = m.r5 > 0 ? -1 : 1; }
         if (kind){
           const e = evalEntry(t);
           const act = e.basic ? (e.gateWhy ? "gate" : (S.positions.length >= MAXP ? "cap" : "enter")) : "none";
-          ak[kind] = now; sigPush(now, t, m, kind, d, act, hr);
+          ak[kind] = now; sigPush(now, t, m, kind, d, act, hr, tr);
         }
         if (ok("b") && t.bid > 0 && t.ask > 0){
           const bq = t.bidSz*t.bid, aq = t.askSz*t.ask, tot = bq + aq;
-          if (tot > 0){ const im = (bq-aq)/tot; if (Math.abs(im) >= 0.6){ ak.b = now; sigPush(now, t, m, "b", im > 0 ? 1 : -1, "none", hr); } }
+          if (tot > 0){ const im = (bq-aq)/tot; if (Math.abs(im) >= 0.6){ ak.b = now; sigPush(now, t, m, "b", im > 0 ? 1 : -1, "none", hr, tr); } }
         }
-        if (ok("t") && m.r15 != null && m.vrel >= 1.5 && Math.abs(m.r5) >= 1 && Math.abs(m.r15) >= 2 && (m.r5 > 0) === (m.r15 > 0)){ ak.t = now; sigPush(now, t, m, "t", m.r5 > 0 ? 1 : -1, "none", hr); }
+        if (ok("t") && m.r15 != null && m.vrel >= 1.5 && Math.abs(m.r5) >= 1 && Math.abs(m.r15) >= 2 && (m.r5 > 0) === (m.r15 > 0)){ ak.t = now; sigPush(now, t, m, "t", m.r5 > 0 ? 1 : -1, "none", hr, tr); }
         if (ok("k") && m.vrel >= 1.5){
           const hl = hiLoOver(t, 900);
           if (hl && hl.lo > 0 && (hl.hi - hl.lo)/hl.lo >= 0.005){
-            if (t.px >= hl.hi){ ak.k = now; sigPush(now, t, m, "k", 1, "none", hr); }
-            else if (t.px <= hl.lo){ ak.k = now; sigPush(now, t, m, "k", -1, "none", hr); }
+            if (t.px >= hl.hi){ ak.k = now; sigPush(now, t, m, "k", 1, "none", hr, tr); }
+            else if (t.px <= hl.lo){ ak.k = now; sigPush(now, t, m, "k", -1, "none", hr, tr); }
           }
         }
         if (ok("r") && Math.abs(m.r5) >= 3){
           const hl = hiLoOver(t, 300);
           if (hl){
             const backUp = hl.hi > 0 ? (hl.hi - t.px)/hl.hi*100 : 0, backDn = hl.lo > 0 ? (t.px - hl.lo)/hl.lo*100 : 0;
-            if (m.r5 > 0 && backUp >= 1){ ak.r = now; sigPush(now, t, m, "r", -1, "none", hr); }
-            else if (m.r5 < 0 && backDn >= 1){ ak.r = now; sigPush(now, t, m, "r", 1, "none", hr); }
+            if (m.r5 > 0 && backUp >= 1){ ak.r = now; sigPush(now, t, m, "r", -1, "none", hr, tr); }
+            else if (m.r5 < 0 && backDn >= 1){ ak.r = now; sigPush(now, t, m, "r", 1, "none", hr, tr); }
           }
+        }
+        // トレンド逆行後の反発（1時間・4時間の両方が同じ方向のときだけ、その流れに乗る方向で、短期の逆行を待って入る）
+        if (ok("p") && tr.align !== 0 && m.r5 != null){
+          if (tr.align > 0 && m.r5 <= -1){ ak.p = now; sigPush(now, t, m, "p", 1, "none", hr, tr); }
+          else if (tr.align < 0 && m.r5 >= 1){ ak.p = now; sigPush(now, t, m, "p", -1, "none", hr, tr); }
         }
       }
       if (now - (SIG.lastCtl||0) >= 60000*WARP && cand.length && SIG.pending.length < SIG_MAX_PENDING){
         SIG.lastCtl = now;
         for (let i=0;i<2;i++){
           const c = cand[Math.floor(Math.random()*cand.length)];
-          sigPush(now, c.t, c.m, "c", Math.random() < 0.5 ? 1 : -1, "ctl", hr);
+          sigPush(now, c.t, c.m, "c", Math.random() < 0.5 ? 1 : -1, "ctl", hr, trendOf(c.t.sym, c.t.px));
         }
       }
       sigSave(false);
@@ -949,7 +987,7 @@ async function fetchJson(url, opt){
       return {n, k, mean:+(sum/n).toFixed(3), net:+mu.toFixed(3), ci:+ci.toFixed(3), hit:Math.round(win/n*1000)/10, h1:+m1.toFixed(3), h2:+m2.toFixed(3), sig};
     }
     function sigBuckets(by, h){
-      const KN = {s:"出来高急増", f:"逆張り"};
+      const KN = {s:"出来高急増", f:"逆張り", p:"トレンド逆行後の反発"};
       const defs = [
         ["出来高の急増倍率（瞬間）", r=>r.m.iv, [[0,3,"×2〜3"],[3,5,"×3〜5"],[5,10,"×5〜10"],[10,1e9,"×10以上"]], ["s"]],
         ["30秒の値動き（絶対値）", r=>r.m.r30==null?null:Math.abs(r.m.r30), [[0,0.05,"〜0.05%"],[0.05,0.15,"0.05〜0.15%"],[0.15,0.4,"0.15〜0.4%"],[0.4,1e9,"0.4%以上"]], ["s"]],
@@ -971,6 +1009,16 @@ async function fetchJson(url, opt){
         for (const a of ["enter","gate","cap","none"]){ const r = rowOf(AL[a], by[k].filter(x=>x.act===a)); if (r) rows.push(r); }
         for (const [l,dv] of [["ロング方向",1],["ショート方向",-1]]){ const r = rowOf(l, by[k].filter(x=>x.d===dv)); if (r) rows.push(r); }
         if (rows.length) out.push({title:"実際の扱い・方向："+KN[k], rows});
+      }
+      // 1時間・4時間EMAで見たトレンドと、シグナルの方向が一致していたか
+      for (const k of Object.keys(KN)){
+        const rows = [];
+        const withTrend = by[k].filter(x=>x.m.tg!==0);
+        const same = rowOf("トレンドと同方向（順行）", withTrend.filter(x=>x.m.tg===x.d));
+        const diff = rowOf("トレンドと逆方向（逆行）", withTrend.filter(x=>x.m.tg===-x.d));
+        const none = rowOf("トレンド不明・形成前", by[k].filter(x=>x.m.tg===0));
+        if (same) rows.push(same); if (diff) rows.push(diff); if (none) rows.push(none);
+        if (rows.length) out.push({title:"1h/4h EMAトレンドとの一致："+KN[k], rows});
       }
       return out;
     }
