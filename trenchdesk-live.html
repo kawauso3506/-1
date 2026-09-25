@@ -547,18 +547,32 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     // ---- 1時間・4時間ろうそく（トレンド判定用）----
     // 自分で1本ずつ組み立てるのではなく、BingXの過去ろうそくAPIから、定期的にまとめて取得する
     const CDL_CAP = 300, EMA1_PERIOD = 8, EMA4_PERIOD = 6, CDL_REFRESH_MS = 300000, CDL_SAVE_GAP = 300000;
-    const CDLKEY = "trenchdesk_cdl_v1";
-    let CDL = {}, cdlSavedAt = 0, cdlDirty = false;
+    // 1個の保存キーに全銘柄分をまとめると、銘柄数が増えたときに保存容量の上限（SQLITE_TOOBIG）を超える恐れがあるため、
+    // 銘柄名で32個の保存キーに分けて持つ（1件が大きくなりすぎないようにする）
+    const CDL_SHARDS = 32;
+    function cdlShardKey(i){ return "trenchdesk_cdl_v2_"+i; }
+    function cdlShardOf(sym){ let h=0; for (let i=0;i<sym.length;i++) h=(h*31+sym.charCodeAt(i))|0; return Math.abs(h)%CDL_SHARDS; }
+    let CDL = {}, cdlDirtyShards = new Set(), cdlSavedAt = 0;
     function cdlLoad(){
-      try{ const j = JSON.parse(store.get(CDLKEY) || "null"); if (j && typeof j === "object") CDL = j; }catch(_){}
+      for (let i=0;i<CDL_SHARDS;i++){
+        try{ const j = JSON.parse(store.get(cdlShardKey(i)) || "null"); if (j && typeof j === "object") Object.assign(CDL, j); }catch(_){}
+      }
+      // 旧形式（単一キー）からの引き継ぎ。あれば読み込んで、次回保存時に新形式へ移す
+      try{ const old = JSON.parse(store.get("trenchdesk_cdl_v1") || "null"); if (old && typeof old === "object"){ for (const k of Object.keys(old)) if (!CDL[k]) CDL[k] = old[k]; for (const k of Object.keys(old)) cdlDirtyShards.add(cdlShardOf(k)); } }catch(_){}
     }
     cdlLoad();
+    function cdlMarkDirty(sym){ cdlDirtyShards.add(cdlShardOf(sym)); }
     function cdlSave(force){
       const now = Date.now();
-      if (!cdlDirty) return;
+      if (!cdlDirtyShards.size) return;
       if (!force && now - cdlSavedAt < CDL_SAVE_GAP) return;
-      cdlSavedAt = now; cdlDirty = false;
-      store.set(CDLKEY, JSON.stringify(CDL));
+      cdlSavedAt = now;
+      const shards = [...cdlDirtyShards]; cdlDirtyShards.clear();
+      for (const i of shards){
+        const part = {};
+        for (const sym of Object.keys(CDL)) if (cdlShardOf(sym) === i) part[sym] = CDL[sym];
+        store.set(cdlShardKey(i), JSON.stringify(part));
+      }
     }
     function emaOf(candles, period){
       if (!candles || candles.length < period) return null;
@@ -576,7 +590,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     }
     function pruneCandles(){
       const keep = new Set(tokens.keys());
-      for (const k of Object.keys(CDL)) if (!keep.has(k)){ delete CDL[k]; cdlDirty = true; }
+      for (const k of Object.keys(CDL)) if (!keep.has(k)){ delete CDL[k]; cdlMarkDirty(k); }
     }
     function parseKlineArr(j){
       const raw = (j && j.result && j.result.data) || (j && j.data) || [];
@@ -599,7 +613,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
           if (h1arr.length) c.h1 = h1arr.slice(-CDL_CAP);
           if (h4arr.length) c.h4 = h4arr.slice(-CDL_CAP);
           c.fetchedAt = Date.now();
-          cdlDirty = true;
+          cdlMarkDirty(sym);
           addLog("SYS", base+" 過去のろうそくを取得（1h "+c.h1.length+"本／4h "+c.h4.length+"本）", true);
         } else {
           const codeOf = j => j && j.result && j.result.code!=null ? j.result.code : (j && j.code!=null ? j.code : "?");
@@ -847,8 +861,13 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
         let slPrice, tpPrice;
         if (p.scalp){
           // 固定$の利確・損切りを、数量から価格の距離に変換して置く
+          const tick = Math.pow(10, -prec.price);
           slPrice = floorTo(fillPx - p.side*(p.scalpSl/qty), prec.price);
           tpPrice = floorTo(fillPx + p.side*(p.scalpTp/qty), prec.price);
+          // 価格が極端に小さい銘柄では、$の距離が丸めで消えて現在価格と同じ（またはおかしい側）になることがあるため、
+          // 損切り・利確が必ず正しい側に、最低でも1ティック離れるよう補正する
+          if (p.side>0 ? slPrice>=fillPx : slPrice<=fillPx) slPrice = floorTo(fillPx - p.side*tick, prec.price);
+          if (p.side>0 ? tpPrice<=fillPx : tpPrice>=fillPx) tpPrice = floorTo(fillPx + p.side*tick, prec.price);
         } else {
           const slPct = p.halfback ? HB_SL/100/p.lev : S.cfg.sl/100;
           const tpPct = p.halfback ? null : S.cfg.tp/100; // 半戻し利確は決済ラインが動くので、単発のTP注文は置かない（SLのみ）
