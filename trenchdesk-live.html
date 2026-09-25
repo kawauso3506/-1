@@ -473,7 +473,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
 
     function fresh(){
       return { startedAt:Date.now(), running:true, cash:START_USD, positions:[], trades:[], log:[], errors:[], hist:[{t:Date.now(),v:START_USD}],
-        skips:0, polls:0, events:0, logSeq:0, lastPollAt:0, cooldown:{}, retry:{}, epochs:[], pnlDaily:{}, cdl:{},
+        skips:0, polls:0, events:0, logSeq:0, lastPollAt:0, cooldown:{}, retry:{}, epochs:[], pnlDaily:{},
         slots:[{id:"main", label:"メイン"}], // 将来「サブ」を足すための下ごしらえ。今はmainだけを使う
         cfg:{mode:"active",dir:"both",lev:8,size:0.04,sl:1.5,tp:3,trail:true,gate:"std",scale:true,ladder:true,be:"tp2",live:false,strategy:"surge",fadeThresh:5,surgeThresh:5,pyramid:false,halfback:true,maxPos:5,orphan:true,timeout:0} };
     }
@@ -503,7 +503,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     function load(){
       try{
         const j = JSON.parse(store.get(FKEY) || "null");
-        if (j && j.cfg && Array.isArray(j.positions)){ const def = fresh().cfg; S = Object.assign(fresh(), j); S.cfg = Object.assign(def, j.cfg); if (!S.cdl) S.cdl = {}; S.positions.forEach(p => { if (p.origQty==null) p.origQty = p.qty; if (p.margin0==null) p.margin0 = p.margin; if (p.realizedNet==null) p.realizedNet = 0; if (p.tpHit==null) p.tpHit = 0; if (p.beOn==null) p.beOn = false; if (!tokens.has(p.sym)) tokens.set(p.sym,{sym:p.sym,samples:[],firstSeen:Date.now(),px:p.entry,mark:p.entry,bid:0,ask:0,bidSz:0,askSz:0,turn:0,oi:0,fr:0,chg24:0,chg1h:0,hi:p.entry,lo:p.entry,updatedAt:0}); }); }
+        if (j && j.cfg && Array.isArray(j.positions)){ const def = fresh().cfg; S = Object.assign(fresh(), j); S.cfg = Object.assign(def, j.cfg); S.positions.forEach(p => { if (p.origQty==null) p.origQty = p.qty; if (p.margin0==null) p.margin0 = p.margin; if (p.realizedNet==null) p.realizedNet = 0; if (p.tpHit==null) p.tpHit = 0; if (p.beOn==null) p.beOn = false; if (!tokens.has(p.sym)) tokens.set(p.sym,{sym:p.sym,samples:[],firstSeen:Date.now(),px:p.entry,mark:p.entry,bid:0,ask:0,bidSz:0,askSz:0,turn:0,oi:0,fr:0,chg24:0,chg1h:0,hi:p.entry,lo:p.entry,updatedAt:0}); }); }
       }catch(_){}
     }
     function persist(){ S.lastPollAt = lastPollAt; store.set(FKEY, JSON.stringify(S)); }
@@ -556,13 +556,27 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     }
 
     // ---- 1時間・4時間ろうそく（トレンド判定用）----
-    const H1_MS = 3600000, H4_MS = 14400000, CDL_CAP = 60, EMA1_PERIOD = 8, EMA4_PERIOD = 6;
+    // 取引記録などとは別に持つ：ここは「ろうそくが1本閉じたときだけ」変化する低頻度データなので、
+    // 他の状態（取引ごとに毎ループ書き直す部分）とは分けて、間引いて保存する（毎ループ数MBを書き続けないため）。
+    const CDLKEY = "trenchdesk_cdl_v1", H1_MS = 3600000, H4_MS = 14400000, CDL_CAP = 300, EMA1_PERIOD = 8, EMA4_PERIOD = 6, CDL_SAVE_GAP = 300000;
+    let CDL = {}, cdlSavedAt = 0, cdlDirty = false;
+    function cdlLoad(){
+      try{ const j = JSON.parse(store.get(CDLKEY) || "null"); if (j && typeof j === "object") CDL = j; }catch(_){}
+    }
+    cdlLoad();
+    function cdlSave(force){
+      const now = Date.now();
+      if (!cdlDirty) return;
+      if (!force && now - cdlSavedAt < CDL_SAVE_GAP) return;
+      cdlSavedAt = now; cdlDirty = false;
+      store.set(CDLKEY, JSON.stringify(CDL));
+    }
     function updateCandles(sym, now, px){
-      let c = S.cdl[sym]; if (!c){ c = {h1:[], h4:[], cur1:null, cur4:null}; S.cdl[sym] = c; }
+      let c = CDL[sym]; if (!c){ c = {h1:[], h4:[], cur1:null, cur4:null}; CDL[sym] = c; }
       const b1 = Math.floor(now/H1_MS)*H1_MS, b4 = Math.floor(now/H4_MS)*H4_MS;
-      if (!c.cur1 || c.cur1.t !== b1){ if (c.cur1){ c.h1.push(c.cur1); if (c.h1.length>CDL_CAP) c.h1.shift(); } c.cur1 = {t:b1,o:px,h:px,l:px,c:px}; }
+      if (!c.cur1 || c.cur1.t !== b1){ if (c.cur1){ c.h1.push(c.cur1); if (c.h1.length>CDL_CAP) c.h1.shift(); cdlDirty = true; } c.cur1 = {t:b1,o:px,h:px,l:px,c:px}; }
       else { c.cur1.h = Math.max(c.cur1.h,px); c.cur1.l = Math.min(c.cur1.l,px); c.cur1.c = px; }
-      if (!c.cur4 || c.cur4.t !== b4){ if (c.cur4){ c.h4.push(c.cur4); if (c.h4.length>CDL_CAP) c.h4.shift(); } c.cur4 = {t:b4,o:px,h:px,l:px,c:px}; }
+      if (!c.cur4 || c.cur4.t !== b4){ if (c.cur4){ c.h4.push(c.cur4); if (c.h4.length>CDL_CAP) c.h4.shift(); cdlDirty = true; } c.cur4 = {t:b4,o:px,h:px,l:px,c:px}; }
       else { c.cur4.h = Math.max(c.cur4.h,px); c.cur4.l = Math.min(c.cur4.l,px); c.cur4.c = px; }
     }
     function emaOf(candles, period){
@@ -572,7 +586,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
       return e;
     }
     function trendOf(sym, px){
-      const c = S.cdl[sym]; if (!c) return {c1:0, c4:0, align:0, e1:null, e4:null};
+      const c = CDL[sym]; if (!c) return {c1:0, c4:0, align:0, e1:null, e4:null};
       const e1 = emaOf(c.h1, EMA1_PERIOD), e4 = emaOf(c.h4, EMA4_PERIOD);
       const c1 = e1==null ? 0 : (px>e1 ? 1 : px<e1 ? -1 : 0);
       const c4 = e4==null ? 0 : (px>e4 ? 1 : px<e4 ? -1 : 0);
@@ -581,7 +595,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     }
     function pruneCandles(){
       const keep = new Set(tokens.keys());
-      for (const k of Object.keys(S.cdl)) if (!keep.has(k)) delete S.cdl[k];
+      for (const k of Object.keys(CDL)) if (!keep.has(k)){ delete CDL[k]; cdlDirty = true; }
     }
     async function pollTickers(){
       const rows = src === "bingx" ? await fetchBingx() : await fetchBybit();
@@ -597,6 +611,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
       }
       for (const [k,t] of tokens) if (now - t.updatedAt > 90000 && !heldSet.has(k)) tokens.delete(k);
       pruneCandles();
+      cdlSave(false);
     }
 
     function retOver(t,sec){
