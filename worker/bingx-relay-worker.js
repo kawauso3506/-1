@@ -567,7 +567,7 @@ async function fetchJson(url, opt){
       if (t && t.px > 0) tsigPush(now, t, dir, hit.pat);
     }
     // ---- トレンド戦略のシグナル検証（1時間・4時間・24時間後の値動きを測る）----
-    const TSIGKEY = "trenchdesk_tsig_v1", TSIG_H = [3600,14400,86400], TSIG_MAX_DONE = 1500, TSIG_MAX_PENDING = 500;
+    const TSIGKEY = "trenchdesk_tsig_v1", TSIG_H = [3600,14400,86400], TSIG_MAX_DONE = 3000, TSIG_MAX_PENDING = 3000;
     let TSIG = {pending:[], done:[]}, tsigDirty = false, tsigSavedAt = 0;
     try{ const j = JSON.parse(store.get(TSIGKEY) || "null"); if (j && Array.isArray(j.pending)) TSIG = {pending:j.pending, done:j.done||[]}; }catch(_){}
     function tsigPush(now, t, dir, pat){
@@ -1539,7 +1539,7 @@ async function fetchJson(url, opt){
       else if (c==="close"){ for (const p of [...S.positions]) closePos(p,"手動クローズ"); }
       else if (c==="closeOne" && b.mint){ const p = S.positions.find(x=>x.sym===b.mint); if (p) closePos(p,"手動クローズ"); }
       else if (c==="reset"){ const cfg = S.cfg; S = fresh(); S.cfg = cfg; noteEpoch(); addLog("SYS","セッションをリセット（ペーパー）"); }
-      else if (c==="sigReset"){ sigResetAll(); addLog("SYS","シグナル検証の記録をリセット"); }
+      else if (c==="sigReset"){ sigResetAll(); TSIG = {pending:[], done:[]}; tsigSavedAt = 0; store.set(TSIGKEY, JSON.stringify(TSIG)); addLog("SYS","シグナル検証の記録をリセット（トレンド戦略の記録も含む）"); }
       else if (c==="cfg" && b.cfg){
         let changed = false;
         for (const k of Object.keys(b.cfg)) if (ALLOW[k] && ALLOW[k].includes(b.cfg[k])){
