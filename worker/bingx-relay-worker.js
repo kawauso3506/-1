@@ -86,12 +86,15 @@ async function route(req, env) {
     const u = new URL(req.url);
     const isDemo = (env.BASE_URL || "https://open-api-vst.bingx.com").includes("vst");
     const BASE = env.BASE_URL || "https://open-api-vst.bingx.com";
+    // 価格データ（ティッカー・資金調達率・マーク価格）は、常に本番市場の公開データを使う。
+    // デモ環境は取引が少なく、最終約定価格が止まったままになる銘柄があるため（注文はデモ口座へ出す）
+    const MARKET_BASE = "https://open-api.bingx.com";
 
     try {
       if (req.method === "GET" && u.pathname === "/market/ticker") {
         const symbol = u.searchParams.get("symbol");
         const qs = symbol ? "?symbol=" + encodeURIComponent(toBingxSymbol(symbol)) : "";
-        const r = await fetch(BASE + "/openApi/swap/v2/quote/ticker" + qs);
+        const r = await fetch(MARKET_BASE + "/openApi/swap/v2/quote/ticker" + qs);
         const text = await r.text();
         let data; try { data = JSON.parse(text); } catch (_) { data = { raw: text }; }
         return json({ demo: isDemo, result: data }, r.ok ? 200 : r.status);
@@ -99,7 +102,7 @@ async function route(req, env) {
       if (req.method === "GET" && u.pathname === "/market/premiumIndex") {
         const symbol = u.searchParams.get("symbol");
         const qs = symbol ? "?symbol=" + encodeURIComponent(toBingxSymbol(symbol)) : "";
-        const r = await fetch(BASE + "/openApi/swap/v2/quote/premiumIndex" + qs);
+        const r = await fetch(MARKET_BASE + "/openApi/swap/v2/quote/premiumIndex" + qs);
         const text = await r.text();
         let data; try { data = JSON.parse(text); } catch (_) { data = { raw: text }; }
         return json({ demo: isDemo, result: data }, r.ok ? 200 : r.status);
