@@ -352,7 +352,6 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
           <button class="btn ghost" id="bClose">全ポジションを閉じる</button>
           <button class="btn ghost" id="bReset">リセット</button>
         </div>
-        <button class="btn ghost" id="bScalp" style="width:100%">スキャルプ設定（$20×20x・TP/SL $5）</button>
         <div class="ctlList" id="ctlDyn"></div>
       </div>
     </details>
@@ -1720,11 +1719,6 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
   $("bPause").addEventListener("click", () => cmd({cmd: STs[cur].running ? "pause" : "resume"}));
   $("bClose").addEventListener("click", () => cmd({cmd:"close"}));
   $("bReset").addEventListener("click", () => { if (confirm("この口座（"+STs[cur].title+"）の損益と取引履歴をリセットします。よろしいですか？")) cmd({cmd:"reset"}); });
-  $("bScalp").addEventListener("click", () => {
-    if (cur !== "perp"){ alert("このプリセットは「先物 L/S」タブでのみ使えます。タブを切り替えてから押してください。"); return; }
-    if (!confirm("先物の設定を、証拠金$20・20倍・利確/損切りとも約$5（1.25%）・単発決済（分割OFF）・トレーリングOFFに変更します。よろしいですか？")) return;
-    cmd({cmd:"cfg", cfg:{lev:20, size:0.04, sl:1.25, tp:1.25, ladder:false, trail:false, scale:false}});
-  });
   const sigFmt = x => "平均 "+pct(x.mean,3)+" ／ 純 "+pct(x.net,3)+(x.ci==null?"":"（±"+x.ci.toFixed(3)+"）")+" ／ 勝率 "+x.hit+"%（"+x.n+"件"+(x.k==null?"":"・"+x.k+"銘柄")+"）"+(x.h1==null?"":" ／ 前半 "+pct(x.h1,2)+" 後半 "+pct(x.h2,2)+" ／ 判定: "+x.sig);
   $("bSigReset").addEventListener("click", () => { if (confirm("シグナル検証の記録をリセットします。よろしいですか？")) cmd({cmd:"sigReset"}); });
   $("bSigCopy").addEventListener("click", async () => {
