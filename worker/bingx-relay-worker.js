@@ -966,7 +966,8 @@ async function fetchJson(url, opt){
       addLog("TRADE",baseOf(p.sym)+" "+label+" を利確 "+((back-marginPart)>=0?"+":"−")+"$"+Math.abs(back-marginPart).toFixed(2),true);
     }
     const trendBusy = new Set();
-    const TR_FRACS = [0.4, 0.3, 0.3], TR_BE_BUF = 0.001; // 建値撤退は手数料ぶん（約0.1%）だけ有利側に置く
+    const TR_FRACS = [0.4, 0.3, 0.3];
+    const TR_LOCKS = [[30,10],[50,30]]; // +30%到達で損切りを+10%へ、利確1（+50%）で+30%へ引き上げる
     async function liveTrendTps(p){
       if (!p.live || p.live.status!=="open") return;
       const base = baseOf(p.sym), prec = await getPrecision(base), side = p.side>0 ? "LONG" : "SHORT";
@@ -1006,13 +1007,13 @@ async function fetchJson(url, opt){
         }
         p.live.qty = actual; p.live.expQty = null; p.live.syncAt = 0;
         const raw = p.beOn ? p.bePx : p.slPriceFixed, target = p.side>0 ? floorTo(raw, prec.price) : ceilTo(raw, prec.price);
-        if (await liveRestop(p, target, true)) addLog("LIVE", base+" BingX側の損切りを"+(p.beOn?"建値":"初期固定ライン")+" $"+px(target)+" に設定（残り "+actual+"）", true);
+        if (await liveRestop(p, target, true)) addLog("LIVE", base+" BingX側の損切りを"+(p.beOn?"+"+p.lockLv+"%":"初期固定ライン")+" $"+px(target)+" に設定（残り "+actual+"）", true);
       }catch(err){ p.live.syncAt = Date.now() + 15000; addLog("LIVE", baseOf(p.sym)+" 利確後の損切り移動に失敗: "+err.message+"（15秒後に再試行）", true); }
       finally{ trendBusy.delete(p.sym); }
     }
     function trendCheck(p,t,now){
       if ((p.side>0 && t.px<=p.liq) || (p.side<0 && t.px>=p.liq)){ closePos(p,"強制ロスカット"); return; }
-      if (p.beOn && (p.side>0 ? t.px<=p.bePx : t.px>=p.bePx)){ closePos(p,"建値撤退（利確1の後）"); return; }
+      if (p.beOn && (p.side>0 ? t.px<=p.bePx : t.px>=p.bePx)){ closePos(p,"利益確保の損切り（+"+p.lockLv+"%）"); return; }
       if (p.side>0 ? t.px<=p.slPriceFixed : t.px>=p.slPriceFixed){ closePos(p,"損切り（初回基準 -"+TR_SL+"%・固定）"); return; }
       if (p.live && p.live.syncAt && now >= p.live.syncAt) liveTrendSync(p, false);
       if (!p.trAdded){
@@ -1020,8 +1021,16 @@ async function fetchJson(url, opt){
         if (levInit <= -TR_ADD){ p.trAdded = true; addOnce(p,"-"+TR_ADD+"%で1回だけ再エントリー"); }
       }
       const levAvg = p.side*(t.px/p.entry - 1)*100*p.lev;
+      // 損切りの段階的な引き上げ：+30%に届いたら+10%へ、+50%（利確1）に届いたら+30%へ
+      for (const [reach, lock] of TR_LOCKS){
+        if (levAvg >= reach && (p.lockLv||-Infinity) < lock){
+          p.lockLv = lock; p.beOn = true; p.bePx = p.entry*(1+p.side*lock/100/p.lev);
+          addLog("TRADE", baseOf(p.sym)+" +"+reach+"%に到達：損切りを+"+lock+"%（$"+px(p.bePx)+"）へ引き上げ", true);
+          if (p.live && p.live.status==="open" && !p.live.syncAt){ p.live.syncAt = now; p.live.syncUntil = now; }
+        }
+      }
       // 利確は元の数量に対して 4割 → 3割 → 残り全部。残っている数量に対する割合に直して決済する
-      if (p.tpDone < 1 && levAvg >= TR_TPS[0][0]){ p.tpDone = 1; p.beOn = true; p.bePx = p.entry*(1+p.side*TR_BE_BUF); trendPartial(p, 0.4, "利確1（+"+TR_TPS[0][0]+"%・元の数量の4割）"); }
+      if (p.tpDone < 1 && levAvg >= TR_TPS[0][0]){ p.tpDone = 1; trendPartial(p, 0.4, "利確1（+"+TR_TPS[0][0]+"%・元の数量の4割）"); }
       if (p.tpDone < 2 && levAvg >= TR_TPS[1][0]){ p.tpDone = 2; trendPartial(p, 0.5, "利確2（+"+TR_TPS[1][0]+"%・元の数量の3割）"); }
       if (levAvg >= TR_TPS[2][0]){ closePos(p,"利確3（+"+TR_TPS[2][0]+"%・全決済）"); return; }
     }
@@ -1402,7 +1411,10 @@ async function fetchJson(url, opt){
             rows.push({k:"tp", label:"利確3 +"+TR_TPS[2][0]+"%（残り全部）", px:atA(TR_TPS[2][0]), val:"全決済"});
             rows.push({k:"tr", label:(p.side>0?"買い建値":"売り建値")+"（平均）", px:p.entry, val:usd(p.margin)});
             if (!p.trAdded) rows.push({k:"sl", label:"再エントリー -"+TR_ADD+"%（1回のみ）", px:p.initEntry*(1-p.side*TR_ADD/100/p.lev), val:"同額を追加"});
-            if (p.beOn) rows.push({k:"sl", label:"建値撤退（利確1の後）", px:p.bePx, val:"±0"});
+            if (p.beOn) rows.push({k:"sl", label:"損切り +"+p.lockLv+"%（利益確保・引き上げ済み）", px:p.bePx, val:"+"+p.lockLv+"%"});
+            else rows.push({k:"sl", label:"+30%到達で損切りを+10%へ", px:p.entry*(1+p.side*30/100/p.lev), val:"引き上げ"});
+            if (!p.beOn || p.lockLv < 30) rows.push({k:"sl", label:"利確1で損切りを+30%へ", px:p.entry*(1+p.side*50/100/p.lev), val:"引き上げ"});
+            if (p.beOn) {}
             else rows.push({k:"sl", label:"損切り -"+TR_SL+"%（初回基準・固定）", px:p.slPriceFixed, val:"固定"});
             rows.push({k:"liq", label:"ロスカット", px:p.liq, val:"全損"});
           } else if (p.halfback){
@@ -1458,7 +1470,7 @@ async function fetchJson(url, opt){
         liveAccount: S.cfg.live ? { data: liveAccount, err: liveAccountErr, updatedAt: lastLiveAccountAt } : null,
         pdca: epochStats(), sig: sigSummaryCached(),
         foot:(S.cfg.strategy==="trend"
-          ? ("戦略: トレンド（"+S.cfg.lev+"x）。4時間足と1時間足の両方で、EMA21＞EMA75＞EMA200かつ終値がEMA75より上ならロング方向（逆ならショート方向）と判定します。その向きで、15分足が確定した瞬間に、ダブルトップ/ボトム・三尊/逆三尊・EMA21への押し目/戻り・ブレイク＆リテスト・包み足・ピンバーのどれかが出ていれば入ります。対象は24時間売買代金$5M以上の銘柄です。損益の%は証拠金に対する割合で、-"+TR_ADD+"%で同額を1回だけ追加、損切りは初回エントリー基準の-"+TR_SL+"%に固定（追加しても動きません）。平均建値から+50%で4割、+70%で3割、+100%で残り全部を利確します。この3つの利確注文はBingX側にも置き、+50%の利確後は損切りを建値（手数料ぶん有利側）へ移します。時間切れ決済の対象外です。手数料は片道"+(FEEF()*100).toFixed(3)+"%で概算。実際の取引所とは異なり、この戦略に優位性があるとは限りません。")
+          ? ("戦略: トレンド（"+S.cfg.lev+"x）。4時間足と1時間足の両方で、EMA21＞EMA75＞EMA200かつ終値がEMA75より上ならロング方向（逆ならショート方向）と判定します。その向きで、15分足が確定した瞬間に、ダブルトップ/ボトム・三尊/逆三尊・EMA21への押し目/戻り・ブレイク＆リテスト・包み足・ピンバーのどれかが出ていれば入ります。対象は24時間売買代金$5M以上の銘柄です。損益の%は証拠金に対する割合で、-"+TR_ADD+"%で同額を1回だけ追加、損切りは初回エントリー基準の-"+TR_SL+"%に固定（追加しても動きません）。平均建値から+50%で4割、+70%で3割、+100%で残り全部を利確します。この3つの利確注文はBingX側にも置きます。損切りは、+30%に届いたら+10%へ、利確1（+50%）で+30%へ引き上げます（BingX側の損切りも移動）。時間切れ決済の対象外です。手数料は片道"+(FEEF()*100).toFixed(3)+"%で概算。実際の取引所とは異なり、この戦略に優位性があるとは限りません。")
           : S.cfg.halfback
           ? ("資金管理: 半戻し利確（固定ルール・"+S.cfg.lev+"x）。出来高急増を検知した瞬間にその方向へ乗ります。証拠金維持率-"+HB_ADD+"%まで逆行したら、初期と同じサイズを1回だけ追加します。損切りラインは、初回エントリー時点を基準に証拠金維持率-"+HB_SL+"%の位置に固定し、追加しても動きません。利確は、その時点までの最高値（安値）を記録し、そこから伸びた分の半分まで戻ってきた時点で、残り全部を利確します。回転重視のため保有時間の上限はありません。手数料は片道"+(FEEF()*100).toFixed(3)+"%、強制ロスカットは維持証拠金率0.5%で概算。実際の取引所の約定・ロスカットとは異なります。")
           : S.cfg.scalp
