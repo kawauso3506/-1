@@ -752,7 +752,7 @@ async function fetchJson(url, opt){
         const side = p.side>0 ? "LONG" : "SHORT";
         const pos = list.find(x => x && x.positionSide===side && Math.abs(parseFloat(x.positionAmt))>0);
         return pos ? Math.abs(parseFloat(pos.positionAmt)) : 0;
-      }catch(_){ return 0; }
+      }catch(_){ return null; }
     }
     async function liveRestop(p, target, silent){
       const base = baseOf(p.sym), side = p.side>0 ? "LONG" : "SHORT", prec = await getPrecision(base);
@@ -970,7 +970,8 @@ async function fetchJson(url, opt){
     }
     const trendBusy = new Set();
     const TR_FRACS = [0.4, 0.3, 0.3];
-    const TR_LOCKS = [[30,10],[50,30]]; // +30%到達で損切りを+10%へ、利確1（+50%）で+30%へ引き上げる
+    const TR_LOCKS = [[30,10],[50,30]];
+    const TR_HOLD_MIN = 60, TR_PLUS = 1, TR_DROP = 5; // 1時間たっても一度も+1%に届かなければ決済／1時間ごとに計測し、2回連続マイナスで前回より-5%以上悪化したら決済 // +30%到達で損切りを+10%へ、利確1（+50%）で+30%へ引き上げる
     async function liveTrendTps(p){
       if (!p.live || p.live.status!=="open") return;
       const base = baseOf(p.sym), prec = await getPrecision(base), side = p.side>0 ? "LONG" : "SHORT";
@@ -999,19 +1000,27 @@ async function fetchJson(url, opt){
       try{
         const base = baseOf(p.sym), prec = await getPrecision(base);
         let actual = await liveActualAmt(p);
+        if (actual == null){ p.live.syncAt = Date.now() + 15000; return; } // 通信エラーは決済済み扱いにしない
         if (!(actual>0)){ p.live.status = "closed"; p.live.syncAt = 0; return; }
         if (!direct && p.live.expQty!=null && actual > p.live.expQty*1.02 + Math.pow(10,-prec.qty)){
           if (Date.now() < p.live.syncUntil){ p.live.syncAt = Date.now() + 5000; return; } // BingX側の利確がまだ約定していない→少し待つ
           // 1分待っても約定しない（価格の判定基準の違いなど）→ こちらから決済し、利確注文を置き直す
           p.live.qty = actual;
           await liveClose(p, (actual - p.live.expQty)/actual, "利確（BingX側で未約定のためサーバーから決済）");
-          actual = await liveActualAmt(p); if (!(actual>0)){ p.live.status = "closed"; p.live.syncAt = 0; return; }
+          actual = await liveActualAmt(p); if (actual == null){ p.live.syncAt = Date.now() + 15000; return; } if (!(actual>0)){ p.live.status = "closed"; p.live.syncAt = 0; return; }
           p.live.qty = actual; await liveTrendTps(p);
         }
         p.live.qty = actual; p.live.expQty = null; p.live.syncAt = 0;
         const raw = p.beOn ? p.bePx : p.slPriceFixed, target = p.side>0 ? floorTo(raw, prec.price) : ceilTo(raw, prec.price);
         if (await liveRestop(p, target, true)) addLog("LIVE", base+" BingX側の損切りを"+(p.beOn?"+"+p.lockLv+"%":"初期固定ライン")+" $"+px(target)+" に設定（残り "+actual+"）", true);
-      }catch(err){ p.live.syncAt = Date.now() + 15000; addLog("LIVE", baseOf(p.sym)+" 利確後の損切り移動に失敗: "+err.message+"（15秒後に再試行）", true); }
+      }catch(err){
+        if (/110411|110412|than the current price/i.test(String(err.message))){
+          // デモ環境の「現在価格」が実際の相場とずれていて、損切りを置けない。サーバーが実際の相場で見張り、届いたら成行で決済する
+          p.live.syncAt = Date.now() + 300000; // 5分後に、置けるようになったか再確認
+          if (!p.live.srvStopLogged){ p.live.srvStopLogged = true;
+            addLog("SYS", baseOf(p.sym)+" BingX側の価格が実際の相場とずれているため、+"+p.lockLv+"%の損切りはBingXに置けません。サーバーが実際の相場で見張り、届いたら成行で決済します（-"+TR_SL+"%の損切りは保険としてBingXに残しています）", true); }
+        } else { p.live.syncAt = Date.now() + 15000; addLog("LIVE", baseOf(p.sym)+" 利確後の損切り移動に失敗: "+err.message+"（15秒後に再試行）", true); }
+      }
       finally{ trendBusy.delete(p.sym); }
     }
     function trendCheck(p,t,now){
@@ -1024,6 +1033,15 @@ async function fetchJson(url, opt){
         if (levInit <= -TR_ADD){ p.trAdded = true; addOnce(p,"-"+TR_ADD+"%で1回だけ再エントリー"); }
       }
       const levAvg = p.side*(t.px/p.entry - 1)*100*p.lev;
+      // 時間のルール（エントリーから1時間後以降）
+      { const k = Math.floor((now - p.ts)/msMin(TR_HOLD_MIN));
+        if (k >= 1){
+          if (!((p.mfe||0)*p.lev >= TR_PLUS)){ closePos(p,"1時間プラス域に届かず（時間切れ）"); return; }
+          if ((p.trMeasK||0) < k){ // 1時間ごとの計測
+            const prev = p.trLastMeas; p.trMeasK = k; p.trLastMeas = +levAvg.toFixed(2);
+            if (prev != null && prev < 0 && levAvg < 0 && levAvg <= prev - TR_DROP){ closePos(p,"2回連続マイナスで悪化（"+k+"時間目: "+prev.toFixed(1)+"% → "+levAvg.toFixed(1)+"%）"); return; }
+          }
+        } }
       // 損切りの段階的な引き上げ：+30%に届いたら+10%へ、+50%（利確1）に届いたら+30%へ
       for (const [reach, lock] of TR_LOCKS){
         if (levAvg >= reach && (p.lockLv||-Infinity) < lock){
@@ -1473,7 +1491,7 @@ async function fetchJson(url, opt){
         liveAccount: S.cfg.live ? { data: liveAccount, err: liveAccountErr, updatedAt: lastLiveAccountAt } : null,
         pdca: epochStats(), sig: sigSummaryCached(),
         foot:(S.cfg.strategy==="trend"
-          ? ("戦略: トレンド（"+S.cfg.lev+"x）。4時間足と1時間足の両方で、EMA21＞EMA75＞EMA200かつ終値がEMA75より上ならロング方向（逆ならショート方向）と判定します。その向きで、15分足が確定した瞬間に、ダブルトップ/ボトム・三尊/逆三尊・EMA21への押し目/戻り・ブレイク＆リテスト・包み足・ピンバーのどれかが出ていれば入ります。対象は24時間売買代金$5M以上の銘柄です。損益の%は証拠金に対する割合で、-"+TR_ADD+"%で同額を1回だけ追加、損切りは初回エントリー基準の-"+TR_SL+"%に固定（追加しても動きません）。平均建値から+50%で4割、+70%で3割、+100%で残り全部を利確します。この3つの利確注文はBingX側にも置きます。損切りは、+30%に届いたら+10%へ、利確1（+50%）で+30%へ引き上げます（BingX側の損切りも移動）。時間切れ決済の対象外です。手数料は片道"+(FEEF()*100).toFixed(3)+"%で概算。実際の取引所とは異なり、この戦略に優位性があるとは限りません。")
+          ? ("戦略: トレンド（"+S.cfg.lev+"x）。4時間足と1時間足の両方で、EMA21＞EMA75＞EMA200かつ終値がEMA75より上ならロング方向（逆ならショート方向）と判定します。その向きで、15分足が確定した瞬間に、ダブルトップ/ボトム・三尊/逆三尊・EMA21への押し目/戻り・ブレイク＆リテスト・包み足・ピンバーのどれかが出ていれば入ります。対象は24時間売買代金$5M以上の銘柄です。損益の%は証拠金に対する割合で、-"+TR_ADD+"%で同額を1回だけ追加、損切りは初回エントリー基準の-"+TR_SL+"%に固定（追加しても動きません）。平均建値から+50%で4割、+70%で3割、+100%で残り全部を利確します。この3つの利確注文はBingX側にも置きます。損切りは、+30%に届いたら+10%へ、利確1（+50%）で+30%へ引き上げます（BingX側の損切りも移動）。画面の「時間切れ決済」設定の対象外ですが、専用の時間ルールがあります：1時間たっても一度も+1%に届かなければ決済、その後は1時間ごとに損益を計測し、前回も今回もマイナスで、今回が前回より5%以上悪化していたら決済します。手数料は片道"+(FEEF()*100).toFixed(3)+"%で概算。実際の取引所とは異なり、この戦略に優位性があるとは限りません。")
           : S.cfg.halfback
           ? ("資金管理: 半戻し利確（固定ルール・"+S.cfg.lev+"x）。出来高急増を検知した瞬間にその方向へ乗ります。証拠金維持率-"+HB_ADD+"%まで逆行したら、初期と同じサイズを1回だけ追加します。損切りラインは、初回エントリー時点を基準に証拠金維持率-"+HB_SL+"%の位置に固定し、追加しても動きません。利確は、その時点までの最高値（安値）を記録し、そこから伸びた分の半分まで戻ってきた時点で、残り全部を利確します。回転重視のため保有時間の上限はありません。手数料は片道"+(FEEF()*100).toFixed(3)+"%、強制ロスカットは維持証拠金率0.5%で概算。実際の取引所の約定・ロスカットとは異なります。")
           : S.cfg.scalp
