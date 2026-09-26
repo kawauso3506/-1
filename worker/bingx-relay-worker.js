@@ -1327,9 +1327,14 @@ async function fetchJson(url, opt){
         }catch(err){ addLog("LIVE", b0+" アプリに無いポジションの決済に失敗: "+err.message, true); orphanSeen[key] = now; }
       }
       for (const k of Object.keys(orphanSeen)) if (!seen.has(k)) delete orphanSeen[k];
-      for (const p of S.positions){
-        if (!p.live || p.live.status !== "open" || p.missWarned || now - p.ts < 60000) continue;
-        if (!seen.has(baseOf(p.sym)+"|"+(p.side>0?"LONG":"SHORT"))){ p.missWarned = true; addLog("LIVE", baseOf(p.sym)+" アプリにあるのにBingXに見当たりません（実注文が通っていない可能性）", true); }
+      // アプリにあってBingXに無いポジション（発注失敗、またはBingX側で先に決済された）は、2回続けて確認できたらアプリ側も決済して揃える
+      for (const p of [...S.positions]){
+        if (now - p.ts < 90000) continue; // エントリー直後は、BingX側への反映待ちの可能性があるので待つ
+        if (seen.has(baseOf(p.sym)+"|"+(p.side>0?"LONG":"SHORT"))){ p.missN = 0; continue; }
+        p.missN = (p.missN||0) + 1;
+        if (p.missN === 1){ addLog("LIVE", baseOf(p.sym)+" アプリにあるのにBingXに見当たりません。次の確認でも無ければ、アプリ側も決済します", true); continue; }
+        if (p.live) p.live.status = "closed"; // BingXには決済注文を出さない（もう無いため）
+        closePos(p, "BingXにポジションが無いため同期決済（"+(p.live ? "BingX側で決済済み" : "BingXへの発注が通っていなかった")+"）");
       }
     }
     function agentStep(){
