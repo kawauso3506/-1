@@ -327,14 +327,14 @@ async function fetchJson(url, opt){
     const MMR = 0.005, MAX_SPREAD = 0.0015;
     const FEEF = () => src === "bingx" ? 0.0005 : 0.00055;
     const GATES = { off:null, std:{risk:65,label:"標準"}, strict:{risk:50,label:"厳しめ"} };
-    const ALLOW = {mode:["calm","normal","active"],dir:["both","long","short"],lev:[1,2,3,5,8,10,20],size:[0.04,0.05,0.1,0.2],sl:[0.8,1.25,1.5,3,5],tp:[1,1.25,2,4,8],gate:["off","std","strict"],scale:[true,false],live:[true,false],strategy:["momentum","fade","surge","dual","trend"],fadeThresh:[3,5,8],surgeThresh:[3,5,10],halfback:[true,false],scalp:[true,false],scalpTp:[1,2,3,4,5,6,7,8,9,10],scalpSl:[1,2,3,4,5,6,7,8,9,10],scalpHold:[30,45,60],maxPos:[3,5,8,10,15,20],orphan:[true,false],timeout:[0,30,60,180,360]};
+    const ALLOW = {mode:["calm","normal","active"],dir:["both","long","short"],lev:[1,2,3,5,8,10,20],size:[0.04,0.05,0.1,0.2],sl:[0.8,1.25,1.5,3,5],tp:[1,1.25,2,4,8],gate:["off","std","strict"],scale:[true,false],live:[true,false],strategy:["momentum","fade","surge","dual","trend"],fadeThresh:[3,5,8],surgeThresh:[3,5,10],halfback:[true,false],scalp:[true,false],scalpTp:[1,2,3,4,5,6,7,8,9,10],scalpSl:[1,2,3,4,5,6,7,8,9,10],scalpHold:[30,45,60],trTp1:[1,1.5,2,2.5,3,4,5],trTp2:[2,3,4,5,6,8,10],trSl:[1.5,2,3,4,5,7],maxPos:[3,5,8,10,15,20],orphan:[true,false],timeout:[0,30,60,180,360]};
     const PM = () => PERP_MODE[S.cfg.mode] || PERP_MODE.active;
     const pollMs = () => POLL_OVERRIDE || PM().poll;
 
     function fresh(){
       return { startedAt:Date.now(), running:true, cash:START_USD, positions:[], trades:[], log:[], errors:[], hist:[{t:Date.now(),v:START_USD}],
         skips:0, polls:0, events:0, logSeq:0, lastPollAt:0, cooldown:{}, retry:{}, epochs:[], pnlDaily:{},
-        cfg:{mode:"active",dir:"both",lev:8,size:0.04,sl:1.5,tp:3,gate:"std",scale:true,live:false,strategy:"surge",fadeThresh:5,surgeThresh:5,halfback:true,scalp:false,scalpTp:1,scalpSl:1,scalpHold:45,maxPos:5,orphan:true,timeout:0} };
+        cfg:{mode:"active",dir:"both",lev:8,size:0.04,sl:1.5,tp:3,gate:"std",scale:true,live:false,strategy:"surge",fadeThresh:5,surgeThresh:5,halfback:true,scalp:false,scalpTp:1,scalpSl:1,scalpHold:45,trTp1:1.5,trTp2:3,trSl:3,maxPos:5,orphan:true,timeout:0} };
     }
     let S = fresh();
     const tokens = new Map();
@@ -573,7 +573,25 @@ async function fetchJson(url, opt){
     function tsigPush(now, t, dir, pat){
       if (TSIG.pending.length >= TSIG_MAX_PENDING) return;
       const sp = t.bid>0 && t.ask>0 ? (t.ask-t.bid)/t.px*100 : 0;
-      TSIG.pending.push({t:now, sym:t.sym, d:dir, p0:t.px, pat, f:{}, mfe:0, mae:0, m:{sp:+sp.toFixed(3)}}); tsigDirty = true;
+      const nt = START_USD*S.cfg.size*S.cfg.lev; // 基準のポジション金額（例: $500×4%×8倍 = $160）
+      TSIG.pending.push({t:now, sym:t.sym, d:dir, p0:t.px, pat, f:{}, mfe:0, mae:0, m:{sp:+sp.toFixed(3)}, nt, g:{}, cs:{tp1:S.cfg.trTp1, tp2:Math.max(S.cfg.trTp2,S.cfg.trTp1+0.5), sl:S.cfg.trSl, st:0, bk:0}}); tsigDirty = true;
+    }
+    // 利確・損切りの組み合わせを、実際の値動きでまとめてシミュレーションする（どちらに先に届いたか）
+    const TG_TP = [1,1.5,2,3], TG_SL = [2,3,5];
+    function tsigSim(r, rr){
+      if (!r.nt) return;
+      const usdAt = rr*r.nt/100;
+      for (const tp of TG_TP) for (const sl of TG_SL){ const k = tp+"|"+sl; if (r.g[k] != null) continue;
+        if (usdAt >= tp) r.g[k] = tp; else if (usdAt <= -sl) r.g[k] = -sl; }
+      const c = r.cs; if (!c || c.st === 2) return;
+      if (c.st === 0){
+        if (usdAt >= c.tp1){ c.st = 1; c.bk = c.tp1/2; }
+        else if (usdAt <= -c.sl){ c.st = 2; c.res = -c.sl; }
+      }
+      if (c.st === 1){
+        if (usdAt >= c.tp2){ c.st = 2; c.res = c.bk + c.tp2/2; }
+        else if (usdAt <= r.nt*0.001){ c.st = 2; c.res = c.bk + r.nt*0.001/2; } // 建値撤退（手数料ぶん有利側）
+      }
     }
     function tsigStep(now){
       const keep = [];
@@ -581,6 +599,8 @@ async function fetchJson(url, opt){
         const t = tokens.get(r.sym), el = (now - r.t)/1000/WARP;
         if (t && t.px > 0){
           const rr = r.d*(t.px/r.p0-1)*100; if (rr > r.mfe) r.mfe = +rr.toFixed(3); if (rr < r.mae) r.mae = +rr.toFixed(3);
+          const before = JSON.stringify(r.g)+(r.cs?r.cs.st:""); tsigSim(r, rr); if (JSON.stringify(r.g)+(r.cs?r.cs.st:"") !== before) tsigDirty = true;
+          r.lastRr = +rr.toFixed(3);
           for (const h of TSIG_H) if (r.f[h] == null && el >= h){ r.f[h] = +rr.toFixed(3); tsigDirty = true; }
         }
         if (r.f[86400] != null || el > 90000){ if (r.f[3600] != null){ TSIG.done.push(r); tsigDirty = true; } else tsigDirty = true; }
@@ -598,7 +618,20 @@ async function fetchJson(url, opt){
       rows.push(mk("ロング方向", all.filter(r => r.d > 0)), mk("ショート方向", all.filter(r => r.d < 0)));
       let m15 = 0, h1 = 0, h4 = 0, up = 0, dn = 0;
       for (const [s,c] of Object.entries(CDL)){ m15 = Math.max(m15, c.m15.length); h1 = Math.max(h1, c.h1.length); h4 = Math.max(h4, c.h4.length); const d = bigTrend(s); if (d>0) up++; else if (d<0) dn++; }
-      return {H:TSIG_H, rows, pending:TSIG.pending.length, done:TSIG.done.length, trendUp:up, trendDn:dn, candles:{m15, h1, h4, tokens:Object.keys(CDL).length}};
+      // 組み合わせごとの成績（手数料・スプレッド込み、1回あたりの平均$）
+      const grid = [], feeOf = r => r.nt*(0.001 + (r.m.sp||0)/100);
+      const withNt = all.filter(r => r.nt);
+      for (const tp of TG_TP) for (const sl of TG_SL){
+        const k = tp+"|"+sl, done = withNt.filter(r => r.g && r.g[k] != null), open = withNt.length - done.length;
+        const wins = done.filter(r => r.g[k] > 0).length, avg = done.length ? done.reduce((a,r)=>a + r.g[k] - feeOf(r), 0)/done.length : null;
+        grid.push({tp, sl, n:done.length, open, win: done.length ? Math.round(wins/done.length*100) : null, avg});
+      }
+      let cur = null;
+      { const d = withNt.filter(r => r.cs && r.cs.st === 2), stg1 = withNt.filter(r => r.cs && r.cs.st === 1).length;
+        const c0 = withNt.length ? withNt[withNt.length-1].cs : null;
+        cur = {n:d.length, open:withNt.length - d.length, reachedTp1: d.filter(r=>r.cs.res > -r.cs.sl).length + stg1,
+          avg: d.length ? d.reduce((a,r)=>a + r.cs.res - feeOf(r), 0)/d.length : null, cfg:c0 ? {tp1:c0.tp1, tp2:c0.tp2, sl:c0.sl} : null}; }
+      return {H:TSIG_H, rows, grid, cur, pending:TSIG.pending.length, done:TSIG.done.length, trendUp:up, trendDn:dn, candles:{m15, h1, h4, tokens:Object.keys(CDL).length}};
     }
 
     async function pollTickers(){
@@ -737,7 +770,8 @@ async function fetchJson(url, opt){
         if (isOpen){
           p.peak = avg;
           if (p.initEntry) p.initEntry = avg;
-          if (p.slPriceFixed){ const k = (p.slLev || HB_SL)/100/p.lev; p.slPriceFixed = p.side>0 ? avg*(1-k) : avg*(1+k); }
+          if (p.trUsd) p.slPriceFixed = avg - p.side*p.trUsd.sl/p.trUsd.q0;
+          else if (p.slPriceFixed){ const k = (p.slLev || HB_SL)/100/p.lev; p.slPriceFixed = p.side>0 ? avg*(1-k) : avg*(1+k); }
         }
         return avg;
       }catch(_){ return 0; }
@@ -837,7 +871,7 @@ async function fetchJson(url, opt){
           if (p.side>0 ? slPrice>=fillPx : slPrice<=fillPx) slPrice = floorTo(fillPx - p.side*tick, prec.price);
           if (p.side>0 ? tpPrice<=fillPx : tpPrice>=fillPx) tpPrice = floorTo(fillPx + p.side*tick, prec.price);
         } else {
-          const slPct = p.trend ? TR_SL/100/p.lev : p.halfback ? HB_SL/100/p.lev : S.cfg.sl/100;
+          const slPct = p.trUsd ? (p.trUsd.sl/p.trUsd.q0)/fillPx : p.trend ? TR_SL/100/p.lev : p.halfback ? HB_SL/100/p.lev : S.cfg.sl/100;
           const tpPct = (p.halfback || p.trend) ? null : S.cfg.tp/100; // 半戻し利確は決済ラインが動くので、単発のTP注文は置かない（SLのみ）
           slPrice = floorTo(fillPx*(1 - p.side*slPct), prec.price);
           tpPrice = tpPct!=null ? floorTo(fillPx*(1 + p.side*tpPct), prec.price) : null;
@@ -893,6 +927,9 @@ async function fetchJson(url, opt){
         posObj.trend = true; posObj.initEntry = fill; posObj.initMargin = margin; posObj.slLev = TR_SL;
         posObj.slPriceFixed = side>0 ? fill*(1-TR_SL/100/lev) : fill*(1+TR_SL/100/lev);
         posObj.trAdded = false; posObj.tpDone = 0; posObj.pat = e.pat || null;
+        { const c = S.cfg, tp1 = c.trTp1, tp2 = Math.max(c.trTp2, tp1 + 0.5);
+          posObj.trUsd = {tp1, tp2, sl:c.trSl, frac:0.5, q0:posObj.qty};
+          posObj.slPriceFixed = fill - side*c.trSl/posObj.qty; posObj.slLev = null; }
       } else if (S.cfg.halfback){
         posObj.halfback = true; posObj.initEntry = fill; posObj.initMargin = margin;
         posObj.slPriceFixed = side>0 ? fill*(1-HB_SL/100/lev) : fill*(1+HB_SL/100/lev);
@@ -977,15 +1014,17 @@ async function fetchJson(url, opt){
       const base = baseOf(p.sym), prec = await getPrecision(base), side = p.side>0 ? "LONG" : "SHORT";
       for (const id of Object.values(p.live.tpIds||{})) if (id){ try{ await relay("/cancel-order","POST",{symbol:base+"USDT", orderId:id}); }catch(_){} }
       p.live.tpIds = {};
-      const lv = [0,1,2].filter(i => i >= (p.tpDone||0)); if (!lv.length) return;
-      const total = floorTo(p.live.qty, prec.qty), fsum = lv.reduce((a,i)=>a+TR_FRACS[i],0);
+      const U = p.trUsd, FR = U ? [U.frac, 1-U.frac] : TR_FRACS;
+      const lvPx = i => U ? p.entry + p.side*(i===0 ? U.tp1 : U.tp2)/U.q0 : p.entry*(1+p.side*TR_TPS[i][0]/100/p.lev);
+      const lv = (U ? [0,1] : [0,1,2]).filter(i => i >= (p.tpDone||0)); if (!lv.length) return;
+      const total = floorTo(p.live.qty, prec.qty), fsum = lv.reduce((a,i)=>a+FR[i],0);
       let left = total, carry = 0; const placed = [];
       for (let k=0;k<lv.length;k++){
         const i = lv[k], last = k === lv.length-1;
-        let q = last ? left : floorTo(total*TR_FRACS[i]/fsum + carry, prec.qty);
-        if (!(q>0)){ carry += total*TR_FRACS[i]/fsum; continue; } carry = 0;
+        let q = last ? left : floorTo(total*FR[i]/fsum + carry, prec.qty);
+        if (!(q>0)){ carry += total*FR[i]/fsum; continue; } carry = 0;
         q = Math.min(q, left); left = floorTo(left - q, prec.qty);
-        const raw = p.entry*(1+p.side*TR_TPS[i][0]/100/p.lev), price = p.side>0 ? floorTo(raw, prec.price) : ceilTo(raw, prec.price);
+        const raw = lvPx(i), price = p.side>0 ? floorTo(raw, prec.price) : ceilTo(raw, prec.price);
         try{
           const br = await relay("/bracket-only","POST",{symbol:base+"USDT", positionSide:side, quantity:q, tpPrice:String(price)});
           if (br.errors && br.errors.length) throw new Error(br.errors.map(e=>typeof e.detail==="string"?e.detail:JSON.stringify(e.detail)).join(", "));
@@ -1012,18 +1051,43 @@ async function fetchJson(url, opt){
         }
         p.live.qty = actual; p.live.expQty = null; p.live.syncAt = 0;
         const raw = p.beOn ? p.bePx : p.slPriceFixed, target = p.side>0 ? floorTo(raw, prec.price) : ceilTo(raw, prec.price);
-        if (await liveRestop(p, target, true)) addLog("LIVE", base+" BingX側の損切りを"+(p.beOn?"+"+p.lockLv+"%":"初期固定ライン")+" $"+px(target)+" に設定（残り "+actual+"）", true);
+        if (await liveRestop(p, target, true)) addLog("LIVE", base+" BingX側の損切りを"+(p.beOn?(p.lockLbl||"+"+p.lockLv+"%"):"初期固定ライン")+" $"+px(target)+" に設定（残り "+actual+"）", true);
       }catch(err){
         if (/110411|110412|than the current price/i.test(String(err.message))){
           // デモ環境の「現在価格」が実際の相場とずれていて、損切りを置けない。サーバーが実際の相場で見張り、届いたら成行で決済する
           p.live.syncAt = Date.now() + 300000; // 5分後に、置けるようになったか再確認
           if (!p.live.srvStopLogged){ p.live.srvStopLogged = true;
-            addLog("SYS", baseOf(p.sym)+" BingX側の価格が実際の相場とずれているため、+"+p.lockLv+"%の損切りはBingXに置けません。サーバーが実際の相場で見張り、届いたら成行で決済します（-"+TR_SL+"%の損切りは保険としてBingXに残しています）", true); }
+            addLog("SYS", baseOf(p.sym)+" BingX側の価格が実際の相場とずれているため、"+(p.lockLbl||"+"+p.lockLv+"%")+"の損切りはBingXに置けません。サーバーが実際の相場で見張り、届いたら成行で決済します（-"+TR_SL+"%の損切りは保険としてBingXに残しています）", true); }
         } else { p.live.syncAt = Date.now() + 15000; addLog("LIVE", baseOf(p.sym)+" 利確後の損切り移動に失敗: "+err.message+"（15秒後に再試行）", true); }
       }
       finally{ trendBusy.delete(p.sym); }
     }
+    function trTimeRules(p, now, levAvg){ // 1時間ルール：閉じたら true
+      const k = Math.floor((now - p.ts)/msMin(TR_HOLD_MIN));
+      if (k < 1) return false;
+      if (!((p.mfe||0)*p.lev >= TR_PLUS)){ closePos(p,"1時間プラス域に届かず（時間切れ）"); return true; }
+      if ((p.trMeasK||0) < k){
+        const prev = p.trLastMeas; p.trMeasK = k; p.trLastMeas = +levAvg.toFixed(2);
+        if (prev != null && prev < 0 && levAvg < 0 && levAvg <= prev - TR_DROP){ closePos(p,"2回連続マイナスで悪化（"+k+"時間目: "+prev.toFixed(1)+"% → "+levAvg.toFixed(1)+"%）"); return true; }
+      }
+      return false;
+    }
+    function trendCheckUsd(p,t,now){
+      const U = p.trUsd, at = u => p.entry + p.side*u/U.q0, reached = x => p.side>0 ? t.px>=x : t.px<=x, fell = x => p.side>0 ? t.px<=x : t.px>=x;
+      if (fell(p.liq)){ closePos(p,"強制ロスカット"); return; }
+      if (p.beOn && fell(p.bePx)){ closePos(p,"建値撤退（部分利確の後）"); return; }
+      if (!p.beOn && fell(p.slPriceFixed)){ closePos(p,"損切り（-$"+U.sl+"）"); return; }
+      if (p.live && p.live.syncAt && now >= p.live.syncAt) liveTrendSync(p, false);
+      if (trTimeRules(p, now, p.side*(t.px/p.entry - 1)*100*p.lev)) return;
+      if (p.tpDone < 1 && reached(at(U.tp1))){
+        p.tpDone = 1; p.beOn = true; p.bePx = p.entry*(1+p.side*0.001); p.lockLbl = "建値"; // 手数料ぶん（約0.1%）だけ有利側
+        trendPartial(p, U.frac, "部分利確（+$"+U.tp1+"到達・"+Math.round(U.frac*100)+"%）");
+        if (p.live && p.live.status==="open" && !p.live.syncAt){ p.live.syncAt = now + 5000; p.live.syncUntil = now + 60000; }
+      }
+      if (reached(at(U.tp2))){ closePos(p,"利確（+$"+U.tp2+"到達・全決済）"); return; }
+    }
     function trendCheck(p,t,now){
+      if (p.trUsd){ trendCheckUsd(p,t,now); return; }
       if ((p.side>0 && t.px<=p.liq) || (p.side<0 && t.px>=p.liq)){ closePos(p,"強制ロスカット"); return; }
       if (p.beOn && (p.side>0 ? t.px<=p.bePx : t.px>=p.bePx)){ closePos(p,"利益確保の損切り（+"+p.lockLv+"%）"); return; }
       if (p.side>0 ? t.px<=p.slPriceFixed : t.px>=p.slPriceFixed){ closePos(p,"損切り（初回基準 -"+TR_SL+"%・固定）"); return; }
@@ -1424,12 +1488,21 @@ async function fetchJson(url, opt){
       const dirL = {both:"ロング＋ショート",long:"ロングのみ",short:"ショートのみ"}[S.cfg.dir];
       return { kind:"perp", title:"先物 ロング/ショート（ペーパー）", colTaker:"出来高×", now, running:S.running, startUsd:START_USD, equity:eq, pnlUsd:eq-START_USD, cash:S.cash, cfg:S.cfg, gates:GATES,
         labels:{vol:"危険度・ボラ（激しさ）",down:"逆行リスク（過熱度）"},
-        chips:[dirL+" ・ "+S.cfg.lev+"x", S.cfg.strategy==="fade" ? "逆張り（5分±"+S.cfg.fadeThresh+"%＋高値/安値から"+WICK_PCT+"%のヒゲ確認）" : S.cfg.strategy==="surge" ? "出来高急増（通常比×"+S.cfg.surgeThresh+"で瞬時に順張り）" : S.cfg.strategy==="dual" ? "併用：出来高急増（初動）＋逆張り（失速）" : S.cfg.strategy==="trend" ? "トレンド（4h/1hのEMA12・21・75・200で方向確認→15分足パターンで入る）" : "順張り", S.cfg.strategy==="trend" ? "資金管理: -"+TR_ADD+"%で1回追加・-"+TR_SL+"%固定損切り・+50%で4割／+70%で3割／+100%で全利確" : S.cfg.halfback ? "資金管理: 半戻し利確（-"+HB_ADD+"%で1回追加・-"+HB_SL+"%固定損切り）" : S.cfg.scalp ? "資金管理: 超高速スキャルピング（+$"+S.cfg.scalpTp+"利確・-$"+S.cfg.scalpSl+"損切り・"+S.cfg.scalpHold+"秒）" : "SL "+S.cfg.sl+"% ／ 利確 "+S.cfg.tp+"%","モード: "+(MODE_OPTS.find(o=>o.v===S.cfg.mode)||{l:""}).l,"ゲート: "+(g?g.label:"OFF")].concat(S.cfg.live?["実発注 ON（BingXデモ）"]:[]).concat(S.cfg.timeout?["時間切れ決済 "+S.cfg.timeout+"分"]:[]).concat(warm>0?["ウォームアップ中（あと約"+warm+"秒）"]:[]),
+        chips:[dirL+" ・ "+S.cfg.lev+"x", S.cfg.strategy==="fade" ? "逆張り（5分±"+S.cfg.fadeThresh+"%＋高値/安値から"+WICK_PCT+"%のヒゲ確認）" : S.cfg.strategy==="surge" ? "出来高急増（通常比×"+S.cfg.surgeThresh+"で瞬時に順張り）" : S.cfg.strategy==="dual" ? "併用：出来高急増（初動）＋逆張り（失速）" : S.cfg.strategy==="trend" ? "トレンド（4h/1hのEMA12・21・75・200で方向確認→15分足パターンで入る）" : "順張り", S.cfg.strategy==="trend" ? "資金管理: +$"+S.cfg.trTp1+"で半分利確→損切りを建値へ・+$"+Math.max(S.cfg.trTp2,S.cfg.trTp1+0.5)+"で全利確・損切り-$"+S.cfg.trSl : S.cfg.halfback ? "資金管理: 半戻し利確（-"+HB_ADD+"%で1回追加・-"+HB_SL+"%固定損切り）" : S.cfg.scalp ? "資金管理: 超高速スキャルピング（+$"+S.cfg.scalpTp+"利確・-$"+S.cfg.scalpSl+"損切り・"+S.cfg.scalpHold+"秒）" : "SL "+S.cfg.sl+"% ／ 利確 "+S.cfg.tp+"%","モード: "+(MODE_OPTS.find(o=>o.v===S.cfg.mode)||{l:""}).l,"ゲート: "+(g?g.label:"OFF")].concat(S.cfg.live?["実発注 ON（BingXデモ）"]:[]).concat(S.cfg.timeout?["時間切れ決済 "+S.cfg.timeout+"分"]:[]).concat(warm>0?["ウォームアップ中（あと約"+warm+"秒）"]:[]),
         stats:{trades:S.trades.length,wins:S.trades.filter(x=>x.pnlUsd>0).length,skips:S.skips,polls:S.polls,watching:tokens.size,events:S.events},
         health:{lastPollAt,lastError,pollMs:pollMs(),source:"open-api.bingx.com（リレー経由）"},
         positions:S.positions.map(p=>{ const t = tokens.get(p.sym), pxv = t?t.px:p.entry, un = unreal(p,t)-p.fundingPaid, m0 = p.margin0 || p.margin, cf = S.cfg;
           let rows;
-          if (p.trend){
+          if (p.trend && p.trUsd){
+            const U = p.trUsd, atU = u => p.entry + p.side*u/U.q0;
+            rows = [];
+            rows.push({k:"tp", label:"利確 +$"+U.tp2+"（残り全部）", px:atU(U.tp2), val:"+$"+U.tp2});
+            rows.push({k:"tp"+(p.tpDone>=1?" hit":""), label:"部分利確 +$"+U.tp1+"（半分・損切りを建値へ）", px:atU(U.tp1), val:p.tpDone>=1?"済":"半分"});
+            rows.push({k:"tr", label:(p.side>0?"買い建値":"売り建値"), px:p.entry, val:usd(p.margin)});
+            if (p.beOn) rows.push({k:"sl", label:"建値撤退（部分利確の後）", px:p.bePx, val:"±0"});
+            else rows.push({k:"sl", label:"損切り -$"+U.sl, px:p.slPriceFixed, val:"-$"+U.sl});
+            rows.push({k:"liq", label:"ロスカット", px:p.liq, val:"全損"});
+          } else if (p.trend){
             const atA = k => p.entry*(1+p.side*k/100/p.lev);
             rows = [];
             rows.push({k:"tp"+(p.tpDone>=1?" hit":""), label:"利確1 +"+TR_TPS[0][0]+"%（4割）", px:atA(TR_TPS[0][0]), val:p.tpDone>=1?"済":"4割"});
@@ -1488,6 +1561,9 @@ async function fetchJson(url, opt){
           {key:"scalpTp",label:"スキャルピング利確（$）",opts:ALLOW.scalpTp.map(v=>({l:"$"+v,v})),val:S.cfg.scalpTp},
           {key:"scalpSl",label:"スキャルピング損切り（$）",opts:ALLOW.scalpSl.map(v=>({l:"$"+v,v})),val:S.cfg.scalpSl},
           {key:"scalpHold",label:"スキャルピング保有時間上限",opts:ALLOW.scalpHold.map(v=>({l:v+"秒",v})),val:S.cfg.scalpHold},
+          {key:"trTp1",label:"トレンド: 部分利確（ポジション全体の含み益・半分を決済して損切りを建値へ）",opts:ALLOW.trTp1.map(v=>({l:"+$"+v,v})),val:S.cfg.trTp1},
+          {key:"trTp2",label:"トレンド: 残りの利確（ポジション全体の含み益）",opts:ALLOW.trTp2.map(v=>({l:"+$"+v,v})),val:S.cfg.trTp2},
+          {key:"trSl",label:"トレンド: 損切り（ポジション全体の含み損）",opts:ALLOW.trSl.map(v=>({l:"-$"+v,v})),val:S.cfg.trSl},
           {key:"maxPos",label:"最大同時保有数",opts:ALLOW.maxPos.map(v=>({l:v+"件",v})),val:S.cfg.maxPos},
           {key:"orphan",label:"BingXにだけあるポジションを自動決済",opts:YN,val:S.cfg.orphan},
           {key:"timeout",label:"時間切れ決済（含み益に届かず、マイナスのまま）",opts:[{l:"OFF",v:0},{l:"30分",v:30},{l:"1時間",v:60},{l:"3時間",v:180},{l:"6時間",v:360}],val:S.cfg.timeout}
@@ -1496,7 +1572,7 @@ async function fetchJson(url, opt){
         liveAccount: S.cfg.live ? { data: liveAccount, err: liveAccountErr, updatedAt: lastLiveAccountAt } : null,
         pdca: epochStats(), sig: sigSummaryCached(),
         foot:(S.cfg.strategy==="trend"
-          ? ("戦略: トレンド（"+S.cfg.lev+"x）。4時間足と1時間足の両方で、EMA21＞EMA75＞EMA200かつ終値がEMA75より上ならロング方向（逆ならショート方向）と判定します。その向きで、15分足が確定した瞬間に、ダブルトップ/ボトム・三尊/逆三尊・EMA21への押し目/戻り・ブレイク＆リテスト・包み足・ピンバーのどれかが出ていれば入ります。対象は24時間売買代金$5M以上の銘柄です。損益の%は証拠金に対する割合で、-"+TR_ADD+"%で同額を1回だけ追加、損切りは初回エントリー基準の-"+TR_SL+"%に固定（追加しても動きません）。平均建値から+50%で4割、+70%で3割、+100%で残り全部を利確します。この3つの利確注文はBingX側にも置きます。損切りは、+30%に届いたら+10%へ、利確1（+50%）で+30%へ引き上げます（BingX側の損切りも移動）。画面の「時間切れ決済」設定の対象外ですが、専用の時間ルールがあります：1時間たっても一度も+1%に届かなければ決済、その後は1時間ごとに損益を計測し、前回も今回もマイナスで、今回が前回より5%以上悪化していたら決済します。手数料は片道"+(FEEF()*100).toFixed(3)+"%で概算。実際の取引所とは異なり、この戦略に優位性があるとは限りません。")
+          ? ("戦略: トレンド（"+S.cfg.lev+"x）。4時間足と1時間足の両方で、EMA21＞EMA75＞EMA200かつ終値がEMA75より上ならロング方向（逆ならショート方向）と判定します。その向きで、15分足が確定した瞬間に、ダブルトップ/ボトム・三尊/逆三尊・EMA21への押し目/戻り・ブレイク＆リテスト・包み足・ピンバーのどれかが出ていれば入ります。対象は24時間売買代金$5M以上の銘柄です。資金管理（金額はポジション全体の含み損益）: +$"+S.cfg.trTp1+"に届いたら半分を利確し、損切りを建値（手数料ぶん有利側）へ移動。残りは+$"+Math.max(S.cfg.trTp2,S.cfg.trTp1+0.5)+"で利確。損切りは-$"+S.cfg.trSl+"。利確・損切りの注文はBingX側にも置きます。時間のルール：1時間たっても一度も+1%に届かなければ決済、その後は1時間ごとに損益を計測し、前回も今回もマイナスで今回が前回より5%以上悪化していたら決済します。手数料は片道"+(FEEF()*100).toFixed(3)+"%で概算。実際の取引所とは異なり、この戦略に優位性があるとは限りません。")
           : S.cfg.halfback
           ? ("資金管理: 半戻し利確（固定ルール・"+S.cfg.lev+"x）。出来高急増を検知した瞬間にその方向へ乗ります。証拠金維持率-"+HB_ADD+"%まで逆行したら、初期と同じサイズを1回だけ追加します。損切りラインは、初回エントリー時点を基準に証拠金維持率-"+HB_SL+"%の位置に固定し、追加しても動きません。利確は、その時点までの最高値（安値）を記録し、そこから伸びた分の半分まで戻ってきた時点で、残り全部を利確します。回転重視のため保有時間の上限はありません。手数料は片道"+(FEEF()*100).toFixed(3)+"%、強制ロスカットは維持証拠金率0.5%で概算。実際の取引所の約定・ロスカットとは異なります。")
           : S.cfg.scalp
@@ -1505,7 +1581,7 @@ async function fetchJson(url, opt){
           ? ("戦略「併用」は、出来高急増（初動に飛び乗る）と逆張り（行き過ぎの失速を狩る）を、同時に別々の銘柄で走らせます。ある銘柄で急な出来高が出た瞬間はそちらへ、別の銘柄が伸びきって失速したときはそちらへ、と両方の候補を毎回まとめて評価し、同時保有数（"+(PERP_MODE[S.cfg.mode]||PERP_MODE.active).maxPos+"件）の範囲でスコアの高い方から採用します。手数料は片道"+(FEEF()*100).toFixed(3)+"%、資金調達は保有中に連続的に概算、強制ロスカットは維持証拠金率0.5%で概算。実際の取引所とは異なります。レバレッジ取引は元本以上の損失に至ることがあり、この戦略に優位性があるとは限りません。")
           : "BingX公開データ（USDT無期限先物）で判定。戦略「出来高急増」は、直近のポーリング間隔（"+Math.round(pollMs()/1000)+"秒程度）だけを見た出来高の急増（通常ペースの何倍か）を検知し、価格がその方向にわずかでも動いていれば、その瞬間に順張りでエントリーします。手数料は片道"+(FEEF()*100).toFixed(3)+"%、資金調達は保有中に連続的に概算、強制ロスカットは維持証拠金率0.5%で概算。実際の取引所の約定・ロスカット・資金調達とは異なります。レバレッジ取引は元本以上の損失に至ることがあり、この戦略に優位性があるとは限りません。") };
     }
-    const EPOCH_KEYS = ["mode","dir","strategy","fadeThresh","surgeThresh","lev","size","sl","tp","gate","scale","halfback","scalp","scalpTp","scalpSl","scalpHold","maxPos","timeout"];
+    const EPOCH_KEYS = ["trTp1","trTp2","trSl","mode","dir","strategy","fadeThresh","surgeThresh","lev","size","sl","tp","gate","scale","halfback","scalp","scalpTp","scalpSl","scalpHold","maxPos","timeout"];
     function cfgSnapshot(){ const o={}; EPOCH_KEYS.forEach(k=>o[k]=S.cfg[k]); return o; }
     function currentEpoch(){ return (S.epochs && S.epochs[0]) || null; }
     function tradesSince(ts, until){ return S.trades.filter(t=>t.exitTs>=ts && t.exitTs<until); }
