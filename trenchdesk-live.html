@@ -1669,7 +1669,11 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
         let body;
         if (sigTab === "__trend"){
           const tr = sg.trend, th = h => (h/3600)+"時間後";
-          body = "<div class='note'>15分足が確定した瞬間に、4時間・1時間の流れと同じ向きのパターンが出たら記録し、1時間・4時間・24時間後の値動きを測っています（計測中 "+tr.pending+"件）。</div>" +
+          const usd2 = v => (v>=0?"+$":"-$")+Math.abs(v).toFixed(2);
+          const gridHtml = tr.grid ? ("<div class='epoch'><div class='hd'><span>利確・損切りの組み合わせ（1回あたりの平均・手数料込み）</span></div>" +
+            (tr.cur && tr.cur.cfg ? "<div class='cfgline'><b>今の設定</b>（+$"+tr.cur.cfg.tp1+"で半分→建値／+$"+tr.cur.cfg.tp2+"／-$"+tr.cur.cfg.sl+"）："+(tr.cur.n ? usd2(tr.cur.avg)+"（"+tr.cur.n+"件決着・未決着"+tr.cur.open+"件）" : "データ待ち")+"</div>" : "") +
+            tr.grid.map(g => "<div class='cfgline'>利確+$"+g.tp+" ／ 損切り-$"+g.sl+"："+(g.n ? usd2(g.avg)+"・勝率"+g.win+"%（"+g.n+"件決着・未決着"+g.open+"件）" : "データ待ち")+"</div>").join("") + "</div>") : "";
+          body = gridHtml + "<div class='note'>15分足が確定した瞬間に、4時間・1時間の流れと同じ向きのパターンが出たら記録し、1時間・4時間・24時間後の値動きを測っています（計測中 "+tr.pending+"件）。</div>" +
             tr.rows.map(rw => "<div class='epoch'><div class='hd'><span>"+esc(rw.label)+"</span><span>"+rw.n+"件</span></div>" + tr.H.map(h => { const x = rw.st[h];
               return "<div class='cfgline'>"+th(h)+"："+(x && x.n ? sigFmt(x) : "データ待ち")+"</div>"; }).join("") + "</div>").join("");
         } else if (sigTab === "__buckets"){
@@ -1730,6 +1734,10 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     if (sg.trend){ const tr = sg.trend;
       if (tr.candles) L.push("ろうそく: 15分"+tr.candles.m15+"本 / 1時間"+tr.candles.h1+"本 / 4時間"+tr.candles.h4+"本 ／ 大きな流れ 上昇"+tr.trendUp+"・下降"+tr.trendDn+"銘柄");
       L.push("--- トレンド戦略（15分足パターン・計測中 "+tr.pending+"件） ---");
+      if (tr.grid){ const u2 = v => (v>=0?"+$":"-$")+Math.abs(v).toFixed(2);
+        L.push("[利確・損切りの組み合わせ（1回あたり平均・手数料込み）]");
+        if (tr.cur && tr.cur.cfg) L.push("  今の設定 +$"+tr.cur.cfg.tp1+"半分→建値 / +$"+tr.cur.cfg.tp2+" / -$"+tr.cur.cfg.sl+": "+(tr.cur.n ? u2(tr.cur.avg)+"（"+tr.cur.n+"件決着・未決着"+tr.cur.open+"件）" : "データ待ち"));
+        tr.grid.forEach(g => L.push("  利確+$"+g.tp+" / 損切り-$"+g.sl+": "+(g.n ? u2(g.avg)+" 勝率"+g.win+"%（"+g.n+"件決着・未決着"+g.open+"件）" : "データ待ち"))); }
       tr.rows.forEach(rw => { L.push("["+rw.label+"] "+rw.n+"件"); tr.H.forEach(h => { const x = rw.st[h]; L.push("  "+(h/3600)+"時間後: "+(x && x.n ? sigFmt(x) : "データ待ち")); }); });
       L.push("", "--- 短期シグナル ---"); }
     Object.keys(NM).forEach(k => { L.push("[" + NM[k] + "]"); HH.forEach(hh => { const x = sg.tables[k][hh]; L.push("  "+hl(hh)+": "+(x && x.n ? sigFmt(x) : "データ待ち")); }); });
