@@ -539,11 +539,31 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     const live = (o.live||[]).slice().sort((a,b) => (b.st?1:0) - (a.st?1:0));
     out.push(["いまの状態（売買代金上位"+live.length+"銘柄・約2〜3分で一巡）", live.length ? live.map(r => r.sym+"："+r.name+" ／ 先物 買い"+P(r.fb)+"・出来高"+X(r.fvr)+"・5分"+Q(r.fr5)+" ／ 現物 買い"+P(r.sb)+"・出来高"+X(r.svr)+" ／ 建玉"+Q(r.oi)+" ／ 資金調達"+Q(r.fr,4)+" ／ 先物-現物"+Q(r.prem,3)+(r.fresh?"":"（約定データ待ち）")) : ["データ待ち"]]);
     out.push(["判定のしかた", [o.rule]]);
-    if (o.check && (o.check.hiN || o.check.loN)) out.push(["成行の買い・売りの判定チェック", ["先物の成行買いが多い時の直前1分："+Q(o.check.hi,3)+"（"+o.check.hiN+"件）／ 少ない時："+Q(o.check.lo,3)+"（"+o.check.loN+"件）。多い時の方が上がっていれば、判定の向きは正しい"]]);
+    if (o.check && (o.check.hiN || o.check.loN)) out.push(["成行の買い・売りの判定チェック", ["先物の成行買いが多い時（55%以上）の、同じ直近5分の値動き："+Q(o.check.hi,3)+"（"+o.check.hiN+"件）／ 少ない時（45%以下）："+Q(o.check.lo,3)+"（"+o.check.loN+"件）。多い時の方が高ければ、買い・売りの判定の向きは正しい"]]);
     out.push(["状態ごとの、その後の値動き（手数料込み）", (o.states||[]).map(x => x.l+"："+H(x))]);
     (o.heat||[]).forEach(b => out.push(["過熱の度合い別："+b.title, b.rows.map(x => x.l+"："+H(x))]));
     (o.dips||[]).forEach(d => out.push([d.g+"・"+d.m+"（"+d.n+"件）", d.top.map(c => c.l+"："+allFmt(c.all)+" ／ "+abFmt(c))]));
     if (!(o.dips||[]).length) out.push(["押し目・戻りでのエントリー", ["データ待ち（各10件以上で表示）"]]);
+    return out;
+  }
+
+  // 履歴検証タブ（画面表示とコピーで共用）
+  function histLines(o){
+    if (!o) return [["履歴検証", ["データ待ち"]]];
+    if (o.err) return [["履歴検証", ["計算エラー: "+o.err]]];
+    const Pc = (v,d=2) => v == null ? "–" : (v>=0?"+":"−")+Math.abs(v).toFixed(d)+"%", D = v => v == null ? "–" : usd2(v), P = o.progress;
+    const out = [["概要", ["取得済み "+P.done+"/"+P.total+"銘柄"+(P.complete ? "（完了・24時間ごとに更新）" : P.ready ? "（前回の結果を表示中・更新中）" : "（取得中・1銘柄あたり約25秒）")+(P.doneAt ? " ／ 完了 "+new Date(P.doneAt).toLocaleString("ja-JP",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"}) : ""), o.note]]];
+    const m = o.market || {};
+    out.push(["相場の状況（ランダムに入った場合の平均・手数料込み）", [
+      "ロング："+(m.long ? "1時間後 "+Pc(m.long.f1)+" ／ 4時間後 "+Pc(m.long.f4)+" ／ 24時間後 "+Pc(m.long.f24)+"（"+m.long.n+"件）" : "データ待ち"),
+      "ショート："+(m.short ? "1時間後 "+Pc(m.short.f1)+" ／ 4時間後 "+Pc(m.short.f4)+" ／ 24時間後 "+Pc(m.short.f24)+"（"+m.short.n+"件）" : "データ待ち")]]);
+    const line = r => { const a = r.all, x = r.a, y = r.b;
+      return r.gl+"："+a.n+"件 ／ 4時間後 "+Pc(a.p4)+"（ランダム入り "+Pc(a.b4)+" → 差 "+Pc(a.x4)+(a.ci4==null ? "" : "±"+a.ci4.toFixed(2))+"） ／ 24時間後 差 "+Pc(a.x24)+
+        " ／ 段階式$2の期待値 "+D(a.pl)+"（ランダム入り "+D(a.bl)+" → 差 "+D(a.xl)+(a.cil==null ? "" : "±"+a.cil.toFixed(2))+"）"+(x && y ? " ／ 前半の差 "+D(x.xl)+" → 後半の差 "+D(y.xl) : "")+(r.ok ? " ✅" : ""); };
+    const oks = (o.rows||[]).filter(r => r.ok).sort((p,q) => q.all.xl - p.all.xl);
+    out.push(["✅ ランダム入りより良かった組み合わせ（"+o.okN+"/"+o.tested+"通り）", oks.length ? oks.map(r => r.label+"×"+line(r)) : ["なし（"+o.tested+"通り試して、偶然を超えて良かったものはありません）"]]);
+    const pats = []; (o.rows||[]).forEach(r => { if (!pats.includes(r.pat)) pats.push(r.pat); });
+    pats.forEach(pk => { const rs = o.rows.filter(r => r.pat === pk); out.push([rs[0].label+"（トレンド条件別）", rs.map(line)]); });
     return out;
   }
 
@@ -679,13 +699,15 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
           $("cdlProgress").textContent = tc ? ("ろうそく: 15分足 最大"+tc.m15+"本 ／ 1時間足 最大"+tc.h1+"本 ／ 4時間足 最大"+tc.h4+"本 ／ 日足 最大"+(tc.d1||0)+"本（EMA200には200本必要）／ 取得銘柄 "+tc.tokens+"件 ／ 大きな流れ: 上昇 "+sg.trend.trendUp+"銘柄・下降 "+sg.trend.trendDn+"銘柄")
             : ("1時間ろうそく: 最大"+c.h1+"本 ／ 4時間ろうそく: 最大"+c.h4+"本 ／ 追跡銘柄 "+c.tokens+"件");
         }
-        const tabDefs = (sg.trend ? [{k:"__trend", l:"トレンド戦略（"+(sg.trend.rows[0].n)+"）"}] : []).concat(sg.opt ? [{k:"__opt", l:"最適化（"+(sg.opt.n||0)+"）"}] : []).concat(sg.fs ? [{k:"__fs", l:"先物×現物（"+(sg.fs.n||0)+"）"}] : []).concat(Object.keys(NM).map(k=>({k, l:NM[k]+"（"+(sg.n[k]||0)+"）"}))).concat([{k:"__buckets", l:"条件別の内訳"}]);
+        const tabDefs = (sg.trend ? [{k:"__trend", l:"トレンド戦略（"+(sg.trend.rows[0].n)+"）"}] : []).concat(sg.opt ? [{k:"__opt", l:"最適化（"+(sg.opt.n||0)+"）"}] : []).concat(sg.fs ? [{k:"__fs", l:"先物×現物（"+(sg.fs.n||0)+"）"}] : []).concat(sg.hist ? [{k:"__hist", l:"履歴検証（"+(sg.hist.progress ? sg.hist.progress.done+"/"+sg.hist.progress.total : "–")+"）"}] : []).concat(Object.keys(NM).map(k=>({k, l:NM[k]+"（"+(sg.n[k]||0)+"）"}))).concat([{k:"__buckets", l:"条件別の内訳"}]);
         if (!sigTab || !tabDefs.find(t=>t.k===sigTab)) sigTab = tabDefs[0].k;
         const tabsHtml = tabDefs.map(t => "<button class='sigTab"+(sigTab===t.k?" sel":"")+"' data-sigtab='"+t.k+"'>"+esc(t.l)+"</button>").join("");
         $("sigTabs").innerHTML = tabsHtml;
         let body;
         if (sigTab === "__trend"){
           body = trendHtml(sg.trend);
+        } else if (sigTab === "__hist"){
+          body = histLines(sg.hist).map(([t, ls]) => "<div class='epoch'><div class='hd'><span>"+esc(t)+"</span></div>"+ls.map(l => "<div class='cfgline'>"+esc(l)+"</div>").join("")+"</div>").join("");
         } else if (sigTab === "__fs"){
           body = fsLines(sg.fs).map(([t, ls]) => "<div class='epoch'><div class='hd'><span>"+esc(t)+"</span></div>"+ls.map(l => "<div class='cfgline'>"+esc(l)+"</div>").join("")+"</div>").join("");
         } else if (sigTab === "__opt"){
@@ -774,6 +796,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
       tr.rows.forEach(rw => { L.push("["+rw.label+"] "+rw.n+"件"); tr.H.forEach(h => { const x = rw.st[h]; L.push("  "+(h/3600)+"時間後: "+(x && x.n ? sigFmt(x) : "データ待ち")); });
         if (rw.rc1 && rw.rc1.n) L.push("  直近24h・1時間後: "+sigFmt(rw.rc1)); if (rw.rc4 && rw.rc4.n) L.push("  直近24h・4時間後: "+sigFmt(rw.rc4)); });
       L.push("", "--- 短期シグナル ---"); }
+    if (sg.hist){ L.push("--- 履歴検証（過去約14日・ランダム入りとの比較） ---"); histLines(sg.hist).forEach(([t, ls]) => { L.push("["+t+"]"); ls.forEach(l => L.push("  "+l)); }); L.push(""); }
     if (sg.fs){ L.push("--- 先物×現物 ---"); fsLines(sg.fs).forEach(([t, ls]) => { L.push("["+t+"]"); ls.forEach(l => L.push("  "+l)); }); L.push(""); }
     if (sg.opt){ L.push("--- 最適化 ---"); optLines(sg.opt).forEach(([t, ls]) => { L.push("["+t+"]"); ls.forEach(l => L.push("  "+l)); }); L.push(""); }
     Object.keys(NM).forEach(k => { L.push("[" + NM[k] + "]"); HH.forEach(hh => { const x = sg.tables[k][hh]; L.push("  "+hl(hh)+": "+(x && x.n ? sigFmt(x) : "データ待ち")); }); });
