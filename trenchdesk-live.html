@@ -401,7 +401,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
   const usd2 = v => (v>=0?"+$":"-$")+Math.abs(v).toFixed(2);
   // 決済方式の成績（1回平均・勝率・平均利益・平均損失）
   const mFmt = x => x ? ((x.goal?"🎯目標達成 ":"")+"期待値 "+usd2(x.avg)+(x.ci==null?"":"（±"+x.ci.toFixed(2)+"）")+" ／ 勝率"+x.win+"% ／ 平均利益"+(x.aw==null?"–":usd2(x.aw))+" ／ 平均損失"+(x.al==null?"–":usd2(x.al))+
-    (x.h1==null?"":" ／ 前半"+usd2(x.h1)+"・後半"+usd2(x.h2))+(x.top2==null?"":" ／ 上位2件除く"+usd2(x.top2))+" ／ 最大連敗"+x.streak+
+    (x.h1==null?"":" ／ 前半"+usd2(x.h1)+"・後半"+usd2(x.h2))+(x.top2==null?"":" ／ 上位2件除く"+usd2(x.top2))+" ／ 最大連敗"+x.streak+(x.adds ? " ／ 追加"+x.adds+"件・証拠金あたり "+usd2(x.apm) : "")+
     (x.rcN?" ／ 直近24h "+usd2(x.rcAvg)+"（"+x.rcN+"件）":"")+"（"+x.n+"件・うち決着"+x.done+"）") : "データ待ち";
 
   /* ============================ UI ============================ */
@@ -511,6 +511,22 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
         (rw.rc1 && rw.rc1.n ? "<div class='cfgline'>直近24h・1時間後："+sigFmt(rw.rc1)+"</div>" : "") +
         (rw.rc4 && rw.rc4.n ? "<div class='cfgline'>直近24h・4時間後："+sigFmt(rw.rc4)+"</div>" : "") + "</div>").join("");
     return h;
+  }
+
+  // 最適化タブ（前半で選び、後半で確かめる）
+  const abFmt = x => (x.a && x.b) ? ("前半 "+usd2(x.a.avg)+"（"+x.a.n+"件）→ 後半 "+usd2(x.b.avg)+"（"+x.b.n+"件）"+(x.a.avg>0 && x.b.avg>0 ? " ✅" : "")) : "データ待ち";
+  const allFmt = x => x ? ("期待値 "+usd2(x.avg)+" ／ 勝率"+x.win+"% ／ 平均利益"+(x.aw==null?"–":usd2(x.aw))+" ／ 平均損失"+(x.al==null?"–":usd2(x.al))+"（"+x.n+"件）") : "データ待ち";
+  function optLines(o){ // [見出し, [行...]] の配列（画面表示とコピーで共用）
+    if (!o) return [["最適化", ["データ待ち"]]];
+    if (o.err) return [["最適化", ["計算エラー: "+o.err]]];
+    const out = [["概要", ["探索用の記録 "+o.n+"件（8時間の計測が終わったもの "+o.done+"件・計測中 "+o.pending+"件）／ 計算 "+new Date(o.at).toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"}), o.note]]];
+    (o.cut||[]).forEach(g => out.push(["下落係数（早切り）の最適化："+g.label+"（"+g.n+"件）",
+      [g.base.l+"："+allFmt(g.base.all)+" ／ "+abFmt(g.base)].concat(g.top.map(r => r.l+"："+allFmt(r.all)+" ／ "+abFmt(r)))]));
+    (o.trend||[]).forEach(g => out.push(["トレンドの判定方法の比較："+g.label,
+      g.rows.map(r => r.l+"："+allFmt(r.all)+" ／ "+abFmt(r)+(r.f4 && r.f4.n ? " ／ 4時間後の値動き 純"+pct(r.f4.net,3) : ""))]));
+    if (o.entry && o.entry.length) out.push(["エントリー条件の最適化（今のトレンド条件・条件2つまで・前半の期待値順・40件以上）",
+      o.entry.map(r => r.pat+"×"+r.l+"："+allFmt(r.all)+" ／ "+abFmt(r))]);
+    return out;
   }
 
   function render(){
@@ -645,13 +661,15 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
           $("cdlProgress").textContent = tc ? ("ろうそく: 15分足 最大"+tc.m15+"本 ／ 1時間足 最大"+tc.h1+"本 ／ 4時間足 最大"+tc.h4+"本 ／ 日足 最大"+(tc.d1||0)+"本（EMA200には200本必要）／ 取得銘柄 "+tc.tokens+"件 ／ 大きな流れ: 上昇 "+sg.trend.trendUp+"銘柄・下降 "+sg.trend.trendDn+"銘柄")
             : ("1時間ろうそく: 最大"+c.h1+"本 ／ 4時間ろうそく: 最大"+c.h4+"本 ／ 追跡銘柄 "+c.tokens+"件");
         }
-        const tabDefs = (sg.trend ? [{k:"__trend", l:"トレンド戦略（"+(sg.trend.rows[0].n)+"）"}] : []).concat(Object.keys(NM).map(k=>({k, l:NM[k]+"（"+(sg.n[k]||0)+"）"}))).concat([{k:"__buckets", l:"条件別の内訳"}]);
+        const tabDefs = (sg.trend ? [{k:"__trend", l:"トレンド戦略（"+(sg.trend.rows[0].n)+"）"}] : []).concat(sg.opt ? [{k:"__opt", l:"最適化（"+(sg.opt.n||0)+"）"}] : []).concat(Object.keys(NM).map(k=>({k, l:NM[k]+"（"+(sg.n[k]||0)+"）"}))).concat([{k:"__buckets", l:"条件別の内訳"}]);
         if (!sigTab || !tabDefs.find(t=>t.k===sigTab)) sigTab = tabDefs[0].k;
         const tabsHtml = tabDefs.map(t => "<button class='sigTab"+(sigTab===t.k?" sel":"")+"' data-sigtab='"+t.k+"'>"+esc(t.l)+"</button>").join("");
         $("sigTabs").innerHTML = tabsHtml;
         let body;
         if (sigTab === "__trend"){
           body = trendHtml(sg.trend);
+        } else if (sigTab === "__opt"){
+          body = optLines(sg.opt).map(([t, ls]) => "<div class='epoch'><div class='hd'><span>"+esc(t)+"</span></div>"+ls.map(l => "<div class='cfgline'>"+esc(l)+"</div>").join("")+"</div>").join("");
         } else if (sigTab === "__buckets"){
           body = sg.buckets.length ? sg.buckets.map(b =>
             "<div class='epoch'><div class='hd'><span>"+esc(b.title)+"</span></div>"+b.rows.map(r => "<div class='cfgline'>"+esc(r.l)+"："+sigFmt(r)+"</div>").join("")+"</div>").join("") : "<div class='empty'>データ待ち</div>";
@@ -736,6 +754,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
       tr.rows.forEach(rw => { L.push("["+rw.label+"] "+rw.n+"件"); tr.H.forEach(h => { const x = rw.st[h]; L.push("  "+(h/3600)+"時間後: "+(x && x.n ? sigFmt(x) : "データ待ち")); });
         if (rw.rc1 && rw.rc1.n) L.push("  直近24h・1時間後: "+sigFmt(rw.rc1)); if (rw.rc4 && rw.rc4.n) L.push("  直近24h・4時間後: "+sigFmt(rw.rc4)); });
       L.push("", "--- 短期シグナル ---"); }
+    if (sg.opt){ L.push("--- 最適化 ---"); optLines(sg.opt).forEach(([t, ls]) => { L.push("["+t+"]"); ls.forEach(l => L.push("  "+l)); }); L.push(""); }
     Object.keys(NM).forEach(k => { L.push("[" + NM[k] + "]"); HH.forEach(hh => { const x = sg.tables[k][hh]; L.push("  "+hl(hh)+": "+(x && x.n ? sigFmt(x) : "データ待ち")); }); });
     L.push("", "--- 条件別（5分後） ---");
     sg.buckets.forEach(b => { L.push("[" + b.title + "]"); b.rows.forEach(r => L.push("  "+r.l+": "+sigFmt(r))); });
