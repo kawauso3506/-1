@@ -327,7 +327,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     </section>
 
     <details class="panel a-ctl" style="grid-area:conn">
-      <summary>詳細設定（接続・戦略・サイズ）</summary>
+      <summary>接続・サーバー設定</summary>
       <div class="ctl">
         <div class="grp" style="flex:1;min-width:220px"><span>BingXデモ発注リレーURL</span><input id="inRelayUrl" class="inp" type="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="https://xxxx.workers.dev"></div>
         <div class="grp" style="flex:1;min-width:220px"><span>リレーのACCESS_TOKEN</span><input id="inRelayToken" class="inp" type="password" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="Bearerの後ろに付ける文字列"></div>
@@ -345,7 +345,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     </details>
 
     <details class="panel a-ctl">
-      <summary>詳細設定（戦略・資金管理）</summary>
+      <summary>操作（新規停止・全決済・リセット）</summary>
       <div class="ctl">
         <div class="btns">
           <button class="btn" id="bPause">新規エントリー停止</button>
@@ -400,7 +400,9 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
   const pct = (x,d=1) => (x>=0?"+":"−") + Math.abs(x).toFixed(d) + "%";
   const usd2 = v => (v>=0?"+$":"-$")+Math.abs(v).toFixed(2);
   // 決済方式の成績（1回平均・勝率・平均利益・平均損失）
-  const mFmt = x => x ? (usd2(x.avg)+" ／ 勝率"+x.win+"% ／ 平均利益"+(x.aw==null?"–":usd2(x.aw))+" ／ 平均損失"+(x.al==null?"–":usd2(x.al))+"（"+x.n+"件・うち決着"+x.done+"）") : "データ待ち";
+  const mFmt = x => x ? ((x.goal?"🎯目標達成 ":"")+"期待値 "+usd2(x.avg)+(x.ci==null?"":"（±"+x.ci.toFixed(2)+"）")+" ／ 勝率"+x.win+"% ／ 平均利益"+(x.aw==null?"–":usd2(x.aw))+" ／ 平均損失"+(x.al==null?"–":usd2(x.al))+
+    (x.h1==null?"":" ／ 前半"+usd2(x.h1)+"・後半"+usd2(x.h2))+(x.top2==null?"":" ／ 上位2件除く"+usd2(x.top2))+" ／ 最大連敗"+x.streak+
+    (x.rcN?" ／ 直近24h "+usd2(x.rcAvg)+"（"+x.rcN+"件）":"")+"（"+x.n+"件・うち決着"+x.done+"）") : "データ待ち";
 
   /* ============================ UI ============================ */
   const SRVKEY = "trenchdesk_server_mode", DSKEY = "trenchdesk_daily_stop";
@@ -474,26 +476,40 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
   function trendHtml(tr){
     const th = h => (h/3600)+"時間後";
     let h = "";
-    if (tr.entryPats) h += "<div class='note'>実際にエントリーするパターン: <b>"+esc(tr.entryPats.join("・"))+"</b>（他のパターンは記録のみ）</div>";
+    if (tr.auto){ const A = tr.auto;
+      h += "<div class='epoch'><div class='hd'><span>自動選択（今の採用）</span></div>" +
+        "<div class='cfgline'><b>"+esc(A.pats.map(x => x.pat+"＝"+x.meth).join(" ／ ") || "なし")+"</b></div>" +
+        "<div class='cfgline'>"+esc(A.note)+(A.checkedAt ? "（最終判定 "+new Date(A.checkedAt).toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"})+"）" : "")+"</div>" +
+        (A.warn ? "<div class='cfgline' style='color:var(--amber)'>⚠ "+esc(A.warn)+"</div>" : "") +
+        "<div class='cfgline'>基準: "+esc(A.rule)+"</div><div class='cfgline'>"+esc(A.goal)+"</div>" +
+        (tr.cands ? tr.cands.map(c => "<div class='cfgline'>　"+esc(c.label)+"："+(c.best ? "<b>基準クリア</b>（"+esc(c.best.label)+" "+usd2(c.best.st.avg)+"）" : c.bestAny ? "最良 "+esc(c.bestAny.label)+" "+usd2(c.bestAny.st.avg)+" ／ 未達: "+esc(c.unmet.join("・")) : "データなし")+"</div>").join("") : "") + "</div>";
+    }
     if (tr.methods && tr.methods.length){
       h += "<div class='epoch'><div class='hd'><span>決済方式の比較（1回あたり・手数料込み・未決着は現在値で評価）</span></div>" +
         tr.methods.map(m => "<div class='cfgline'><b>"+esc(m.label)+"</b>："+mFmt(m.all)+"</div>" +
-          m.pats.map(p => "<div class='cfgline'>　└ "+esc(p.label)+"："+mFmt(p)+"</div>").join("")).join("") +
-        "<div class='cfgline'>※段階式は、この更新以降に記録されたシグナルだけが対象です。</div></div>";
+          m.pats.map(p => "<div class='cfgline'>　└ "+esc(p.label)+"："+mFmt(p)+"</div>").join("")).join("") + "</div>";
+    }
+    if (tr.combos && tr.combos.length){
+      h += "<div class='epoch'><div class='hd'><span>エントリー条件×決済方式 上位（期待値の高い順・20件以上）</span></div>" +
+        tr.combos.map(c => "<div class='cfgline'><b>"+esc(c.pat)+"×"+esc(c.cond)+"</b> → "+esc(c.best.label)+"："+mFmt(c.best.st)+"</div>").join("") + "</div>";
+    }
+    if (tr.mfeDist && tr.mfeDist.some(x => x.n)){
+      h += "<div class='epoch'><div class='hd'><span>最大含み益の分布（4時間以上たった記録で、一度でも届いた割合）</span></div>" +
+        tr.mfeDist.filter(x => x.n).map(x => "<div class='cfgline'>"+esc(x.label)+"：+$1 "+x.p1+"% ／ +$2 "+x.p2+"% ／ +$4 "+x.p4+"% ／ +$7 "+x.p7+"%（"+x.n+"件）</div>").join("") + "</div>";
     }
     if (tr.grid){
       h += "<div class='epoch'><div class='hd'><span>利確・損切りの組み合わせ（1回あたりの平均・手数料込み・時間ルールなし）</span></div>" +
-        (tr.cur && tr.cur.cfg ? "<div class='cfgline'><b>今の設定</b>（+$"+tr.cur.cfg.tp1+"で半分→建値／+$"+tr.cur.cfg.tp2+"／-$"+tr.cur.cfg.sl+"）："+(tr.cur.n ? usd2(tr.cur.avg)+"（"+tr.cur.n+"件決着・未決着"+tr.cur.open+"件）" : "データ待ち")+"</div>" : "") +
         tr.grid.map(g => "<div class='cfgline'>利確+$"+g.tp+" ／ 損切り-$"+g.sl+"："+(g.n ? "決着分 "+usd2(g.avg)+"・勝率"+g.win+"%（"+g.n+"件・未決着"+g.open+"件）" : "データ待ち")+(g.nAll ? " ／ <b>未決着込み "+usd2(g.avgAll)+"</b>" : "")+"</div>").join("") + "</div>";
     }
     if (tr.ent && tr.ent.some(b => b.rows.length)){
-      h += "<div class='epoch'><div class='hd'><span>エントリー条件別（ピンバー・包み足）</span></div>" +
-        tr.ent.filter(b => b.rows.length).map(b => "<div class='cfgline'><b>"+esc(b.title)+"</b></div>" +
-          b.rows.map(r => "<div class='cfgline'>　"+esc(r.l)+"：1時間後 "+(r.st1.n ? sigFmt(r.st1) : "データ待ち")+" ／ 4時間後 "+(r.st4.n ? sigFmt(r.st4) : "データ待ち")+"</div>").join("")).join("") + "</div>";
+      h += tr.ent.filter(b => b.rows.length).map(b => "<div class='epoch'><div class='hd'><span>"+esc(b.title)+"</span></div>" +
+          b.rows.map(r => "<div class='cfgline'>"+esc(r.l)+"：1時間後 "+(r.st1.n ? sigFmt(r.st1) : "データ待ち")+" ／ 4時間後 "+(r.st4.n ? sigFmt(r.st4) : "データ待ち")+"</div>").join("") + "</div>").join("");
     }
     h += "<div class='note'>15分足が確定した瞬間に、4時間・1時間の流れと同じ向きのパターンが出たら記録し、1時間・4時間・24時間後の値動きを測っています（計測中 "+tr.pending+"件）。</div>" +
       tr.rows.map(rw => "<div class='epoch'><div class='hd'><span>"+esc(rw.label)+"</span><span>"+rw.n+"件</span></div>" + tr.H.map(hh => { const x = rw.st[hh];
-        return "<div class='cfgline'>"+th(hh)+"："+(x && x.n ? sigFmt(x) : "データ待ち")+"</div>"; }).join("") + "</div>").join("");
+        return "<div class='cfgline'>"+th(hh)+"："+(x && x.n ? sigFmt(x) : "データ待ち")+"</div>"; }).join("") +
+        (rw.rc1 && rw.rc1.n ? "<div class='cfgline'>直近24h・1時間後："+sigFmt(rw.rc1)+"</div>" : "") +
+        (rw.rc4 && rw.rc4.n ? "<div class='cfgline'>直近24h・4時間後："+sigFmt(rw.rc4)+"</div>" : "") + "</div>").join("");
     return h;
   }
 
@@ -694,20 +710,31 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     if (sg.trend){ const tr = sg.trend;
       if (tr.candles) L.push("ろうそく: 15分"+tr.candles.m15+"本 / 1時間"+tr.candles.h1+"本 / 4時間"+tr.candles.h4+"本 / 日足"+(tr.candles.d1||0)+"本 ／ 大きな流れ 上昇"+tr.trendUp+"・下降"+tr.trendDn+"銘柄");
       L.push("--- トレンド戦略（15分足パターン・計測中 "+tr.pending+"件） ---");
-      if (tr.entryPats) L.push("実際にエントリーするパターン: "+tr.entryPats.join("・"));
+      if (tr.auto){ const A = tr.auto;
+        L.push("[自動選択] 採用中: "+(A.pats.map(x => x.pat+"＝"+x.meth).join(" ／ ") || "なし"));
+        L.push("  "+A.note+(A.warn ? " ／ ⚠ "+A.warn : "")); L.push("  基準: "+A.rule); L.push("  "+A.goal);
+        (tr.cands||[]).forEach(c => L.push("  "+c.label+": "+(c.best ? "基準クリア（"+c.best.label+" "+usd2(c.best.st.avg)+"）" : c.bestAny ? "最良 "+c.bestAny.label+" "+usd2(c.bestAny.st.avg)+" ／ 未達: "+c.unmet.join("・") : "データなし")));
+      }
       if (tr.methods && tr.methods.length){
         L.push("[決済方式の比較（1回あたり・手数料込み・未決着は現在値で評価）]");
         tr.methods.forEach(m => { L.push("  "+m.label+": "+mFmt(m.all)); m.pats.forEach(p => L.push("    └ "+p.label+": "+mFmt(p))); });
       }
+      if (tr.combos && tr.combos.length){
+        L.push("[エントリー条件×決済方式 上位]");
+        tr.combos.forEach(c => L.push("  "+c.pat+"×"+c.cond+" → "+c.best.label+": "+mFmt(c.best.st)));
+      }
+      if (tr.mfeDist && tr.mfeDist.some(x => x.n)){
+        L.push("[最大含み益の分布（4時間以上たった記録で一度でも届いた割合）]");
+        tr.mfeDist.filter(x => x.n).forEach(x => L.push("  "+x.label+": +$1 "+x.p1+"% / +$2 "+x.p2+"% / +$4 "+x.p4+"% / +$7 "+x.p7+"%（"+x.n+"件）"));
+      }
       if (tr.grid){
         L.push("[利確・損切りの組み合わせ（1回あたり平均・手数料込み・時間ルールなし）]");
-        if (tr.cur && tr.cur.cfg) L.push("  今の設定 +$"+tr.cur.cfg.tp1+"半分→建値 / +$"+tr.cur.cfg.tp2+" / -$"+tr.cur.cfg.sl+": "+(tr.cur.n ? usd2(tr.cur.avg)+"（"+tr.cur.n+"件決着・未決着"+tr.cur.open+"件）" : "データ待ち"));
         tr.grid.forEach(g => L.push("  利確+$"+g.tp+" / 損切り-$"+g.sl+": "+(g.n ? "決着分 "+usd2(g.avg)+" 勝率"+g.win+"%（"+g.n+"件・未決着"+g.open+"件）" : "データ待ち")+(g.nAll ? " ／ 未決着込み "+usd2(g.avgAll) : ""))); }
       if (tr.ent && tr.ent.some(b => b.rows.length)){
-        L.push("[エントリー条件別（ピンバー・包み足）]");
-        tr.ent.filter(b => b.rows.length).forEach(b => { L.push("  "+b.title); b.rows.forEach(r => { L.push("    "+r.l+" 1時間後: "+(r.st1.n ? sigFmt(r.st1) : "データ待ち")); L.push("    "+r.l+" 4時間後: "+(r.st4.n ? sigFmt(r.st4) : "データ待ち")); }); });
+        tr.ent.filter(b => b.rows.length).forEach(b => { L.push("["+b.title+"]"); b.rows.forEach(r => { L.push("  "+r.l+" 1時間後: "+(r.st1.n ? sigFmt(r.st1) : "データ待ち")); L.push("  "+r.l+" 4時間後: "+(r.st4.n ? sigFmt(r.st4) : "データ待ち")); }); });
       }
-      tr.rows.forEach(rw => { L.push("["+rw.label+"] "+rw.n+"件"); tr.H.forEach(h => { const x = rw.st[h]; L.push("  "+(h/3600)+"時間後: "+(x && x.n ? sigFmt(x) : "データ待ち")); }); });
+      tr.rows.forEach(rw => { L.push("["+rw.label+"] "+rw.n+"件"); tr.H.forEach(h => { const x = rw.st[h]; L.push("  "+(h/3600)+"時間後: "+(x && x.n ? sigFmt(x) : "データ待ち")); });
+        if (rw.rc1 && rw.rc1.n) L.push("  直近24h・1時間後: "+sigFmt(rw.rc1)); if (rw.rc4 && rw.rc4.n) L.push("  直近24h・4時間後: "+sigFmt(rw.rc4)); });
       L.push("", "--- 短期シグナル ---"); }
     Object.keys(NM).forEach(k => { L.push("[" + NM[k] + "]"); HH.forEach(hh => { const x = sg.tables[k][hh]; L.push("  "+hl(hh)+": "+(x && x.n ? sigFmt(x) : "データ待ち")); }); });
     L.push("", "--- 条件別（5分後） ---");
