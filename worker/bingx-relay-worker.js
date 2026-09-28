@@ -596,6 +596,12 @@ async function fetchJson(url, opt){
     METH.D = {label:"遅め追いかけ（+$3までは-$3固定→以降ピーク-$2）", kind:"late", sl0:3};
     METH.HT = {label:"+$2で半分利確→残りはピーク-$3で追いかけ", kind:"half", sl0:3};
     for (const hrs of [4,8,24]) METH["T"+hrs] = {label:"固定時間"+hrs+"時間で決済（損切り-$3）", kind:"time", hrs, sl0:3};
+    // 係数つき（段階式・幅$2・時間ルールなしがベース）
+    // 下降係数＝直近15分の逆行幅÷15分足ATR、伸び率係数＝直近15分の順行幅÷15分足ATR
+    { const LB = {kind:"lad", w:2, h:0, sl0:LAD_SL};
+      for (const c of [1.0,1.5,2.0]) METH["C"+Math.round(c*10)] = Object.assign({}, LB, {label:"段階式$2＋早切り（下降係数"+c.toFixed(1)+"）", cut:c});
+      for (const a of [1.0,1.5]) METH["A"+Math.round(a*10)] = Object.assign({}, LB, {label:"段階式$2＋追加（伸び率係数"+a.toFixed(1)+"・含み益時に1回）", add:a});
+      METH.CA = Object.assign({}, LB, {label:"段階式$2＋早切り1.5＋追加1.0", cut:1.5, add:1.0}); }
     const SIM_KEYS = Object.keys(METH).filter(k => k !== "cur"); // "cur"は従来の記録（r.cs）を使う
     const fl05 = v => Math.floor(v*2 + 1e-9)/2;
     function ladStop(pk, w){
@@ -607,12 +613,18 @@ async function fetchJson(url, opt){
     }
     function mInit(key){ const d = METH[key]; return {s:-(d ? d.sl0 : LAD_SL), pk:0, x:null}; }
     // 1回分の判定。戻り値: null / "stop"（損切りラインが上がった）/ "half"（半分利確）/ "exit:sl" "exit:tp" "exit:time"（全決済）
-    function mStep(key, L, u, el, lvPct, mfeLv, be){
+    // 追加ありの場合の合計損益（1本目の$で表した価格 u から計算。追加分の手数料 fe を引く）
+    const mVal = (L, u, fe) => L.a ? 2*u - L.ua - fe : (L.h ? L.bk + u/2 : u);
+    function mStep(key, L, u, el, lvPct, mfeLv, be, k){
       const d = METH[key]; if (!d || !L || L.x != null) return null;
       let ev = null;
       if (u > L.pk) L.pk = +u.toFixed(2);
       let ns = L.s;
-      if (d.kind === "lad") ns = Math.max(ns, ladStop(L.pk, d.w));
+      if (d.kind === "lad"){
+        ns = Math.max(ns, ladStop(L.pk, d.w));
+        if (d.add && !L.a && u > 0 && k != null && k >= d.add){ L.a = 1; L.ua = +u.toFixed(2); ev = "add"; } // 含み益のときだけ1回追加
+        if (L.a) ns = Math.max(ns, L.ua/2 + 0.2); // 追加後は平均建値＋手数料より下で負けない
+      }
       else if (d.kind === "late"){ if (L.pk >= 3) ns = Math.max(ns, fl05(L.pk) - 2); }
       else if (d.kind === "half"){
         if (!L.h && u >= 2){ L.h = 1; L.bk = 1; ev = "half"; }
@@ -623,14 +635,15 @@ async function fetchJson(url, opt){
         if (u >= d.tp2){ L.x = +(L.bk + d.tp2/2).toFixed(2); return "exit:tp"; }
       }
       if (ns > L.s){ L.s = +ns.toFixed(2); ev = ev || "stop"; }
-      if (u <= L.s){ L.x = +(L.h ? L.bk + L.s/2 : L.s).toFixed(2); return "exit:sl"; }
-      if (d.kind === "time" && el >= d.hrs*3600){ L.x = +(L.h ? L.bk + u/2 : u).toFixed(2); return "exit:time"; }
+      if (u <= L.s){ L.x = +mVal(L, L.s, be).toFixed(2); return "exit:sl"; }
+      if (d.cut && k != null && k <= -d.cut){ L.x = +mVal(L, u, be).toFixed(2); return "exit:cut"; } // 普段より速い逆行＝流れが壊れた
+      if (d.kind === "time" && el >= d.hrs*3600){ L.x = +mVal(L, u, be).toFixed(2); return "exit:time"; }
       if (d.kind === "lad" && d.h > 0){ // 時間ルール（実際の売買と同じ判定。h分ごと）
         const k = Math.floor(el/(d.h*60));
         if (k >= 1){
-          if (!(mfeLv >= TR_PLUS)){ L.x = +u.toFixed(2); return "exit:time"; }
+          if (!(mfeLv >= TR_PLUS)){ L.x = +mVal(L, u, be).toFixed(2); return "exit:time"; }
           if ((L.mk||0) < k){ const prev = L.lm; L.mk = k; L.lm = +lvPct.toFixed(2);
-            if (prev != null && prev < 0 && lvPct < 0 && lvPct <= prev - TR_DROP){ L.x = +u.toFixed(2); return "exit:time"; } }
+            if (prev != null && prev < 0 && lvPct < 0 && lvPct <= prev - TR_DROP){ L.x = +mVal(L, u, be).toFixed(2); return "exit:time"; } }
         }
       }
       return ev;
@@ -640,7 +653,7 @@ async function fetchJson(url, opt){
       const u = +(r.lastRr*r.nt/100).toFixed(2);
       if (r.g) for (const tp of TG_TP) for (const sl of TG_SL){ const k = tp+"|"+sl; if (r.g[k] == null) r.g[k] = u; }
       if (r.cs && r.cs.st !== 2){ r.cs.res = r.cs.st === 1 ? r.cs.bk + u/2 : u; r.cs.st = 2; }
-      if (r.lad) for (const k in r.lad){ const L = r.lad[k]; if (typeof L === "object" && L) r.lad[k] = L.x != null ? L.x : +(L.h ? L.bk + u/2 : u).toFixed(2); }
+      if (r.lad) for (const k in r.lad){ const L = r.lad[k]; if (typeof L === "object" && L) r.lad[k] = L.x != null ? (L.a ? {x:L.x, a:1} : L.x) : (L.a ? {x:+mVal(L, u, r.nt*0.001).toFixed(2), a:1} : +mVal(L, u, 0).toFixed(2)); }
     }
     function tsigLoad(){
       try{
@@ -693,12 +706,18 @@ async function fetchJson(url, opt){
       TSIG.pending.push(r); tsigDirty = true;
     }
     // 利確・損切りの組み合わせと、各決済方式を、実際の値動きでまとめてシミュレーションする
-    function tsigSim(r, rr, el){
+    function coefOf(t, dir){ // 直近15分の値動き÷15分足ATR（dir方向がプラス）
+      const c = CDL[t.sym]; if (!c || !c.m15 || c.m15.length < 20) return null;
+      const atr = atrOf(c.m15, 14), cl = c.m15[c.m15.length-1].c; if (!(atr > 0 && cl > 0)) return null;
+      const a = retOver(t, 900); if (!a) return null;
+      return +(dir*a.r*100/(atr/cl*100)).toFixed(2);
+    }
+    function tsigSim(r, rr, el, k){
       if (!r.nt) return;
       const usdAt = rr*r.nt/100, lv = r.lv||8;
       for (const tp of TG_TP) for (const sl of TG_SL){ const k = tp+"|"+sl; if (r.g[k] != null) continue;
         if (usdAt >= tp) r.g[k] = tp; else if (usdAt <= -sl) r.g[k] = -sl; }
-      if (r.lad) for (const k in r.lad){ const L = r.lad[k]; if (L && typeof L === "object") mStep(k, L, usdAt, el, rr*lv, (r.mfe||0)*lv, r.nt*0.001); }
+      if (r.lad) for (const key in r.lad){ const L = r.lad[key]; if (L && typeof L === "object" && L.x == null) mStep(key, L, usdAt, el, rr*lv, (r.mfe||0)*lv, r.nt*0.001, k); }
       const c = r.cs; if (!c || c.st === 2) return;
       if (c.st === 0){
         if (usdAt >= c.tp1){ c.st = 1; c.bk = c.tp1/2; }
@@ -710,12 +729,13 @@ async function fetchJson(url, opt){
       }
     }
     function tsigStep(now){
-      const keep = [];
+      const keep = [], coefCache = new Map();
       for (const r of TSIG.pending){
         const t = tokens.get(r.sym), el = (now - r.t)/1000/WARP;
         if (t && t.px > 0){
           const rr = r.d*(t.px/r.p0-1)*100; if (rr > r.mfe) r.mfe = +rr.toFixed(3); if (rr < r.mae) r.mae = +rr.toFixed(3);
-          tsigSim(r, rr, el);
+          const ck = t.sym+"|"+r.d; let k = coefCache.get(ck); if (k === undefined){ k = coefOf(t, r.d); coefCache.set(ck, k); }
+          tsigSim(r, rr, el, k);
           r.lastRr = +rr.toFixed(3);
           for (const h of TSIG_H) if (r.f[h] == null && el >= h) r.f[h] = +rr.toFixed(3);
         }
@@ -744,8 +764,9 @@ async function fetchJson(url, opt){
       const half = Math.floor(n/2), h1 = half ? vs.slice(0,half).reduce((a,x)=>a+x.v,0)/half : null, h2 = vs.slice(half).reduce((a,x)=>a+x.v,0)/(n-half);
       const srt = vs.map(x=>x.v).sort((a,b)=>b-a), top2 = n > 2 ? (s - srt[0] - srt[1])/(n-2) : null;
       const rc = vs.filter(x => x.t >= now - 86400e3), rcAvg = rc.length ? rc.reduce((a,x)=>a+x.v,0)/rc.length : null;
-      const win = Math.round(nw/n*100);
-      return {n, done:nd, win, aw: nw ? sw/nw : null, al: nl ? sl/nl : null, avg, ci, h1, h2, top2, streak:mx, rcN:rc.length, rcAvg,
+      const win = Math.round(nw/n*100), adds = vs.filter(x => x.u > 1).length;
+      const apm = adds ? vs.reduce((a,x)=>a + x.v/(x.u||1), 0)/n : null; // 証拠金あたり（1本分の証拠金に換算）
+      return {n, done:nd, win, adds, apm, aw: nw ? sw/nw : null, al: nl ? sl/nl : null, avg, ci, h1, h2, top2, streak:mx, rcN:rc.length, rcAvg,
         goal: nd >= AUTO_MIN && win >= GOAL_WIN && avg >= GOAL_AVG && h1 > 0 && h2 > 0};
     }
     function qualifies(st){ return !!st && st.done >= AUTO_MIN && st.avg > 0 && st.h1 > 0 && st.h2 > 0 && st.ci != null && st.avg - st.ci > 0 && st.top2 != null && st.top2 > 0; }
@@ -782,10 +803,10 @@ async function fetchJson(url, opt){
         if (key === "cur"){ const c = r.cs; if (!c) return null; if (c.st === 2) return {v:c.res, d:1};
           const u = uNow(r); return u == null ? null : {v: c.st === 1 ? c.bk + u/2 : u, d:0}; }
         const L = r.lad && r.lad[key]; if (L == null) return null;
-        if (typeof L === "number") return {v:L, d:1}; if (L.x != null) return {v:L.x, d:1};
-        const u = uNow(r); return u == null ? null : {v: L.h ? L.bk + u/2 : u, d:0};
+        if (typeof L === "number") return {v:L, d:1, u:1}; if (L.x != null) return {v:L.x, d:1, u:L.a ? 2 : 1};
+        const u = uNow(r); return u == null ? null : {v: mVal(L, u, r.nt*0.001), d:0, u:L.a ? 2 : 1};
       };
-      const pick = (recs, key) => { const vs = []; for (const r of recs){ const x = valOf(r, key); if (x) vs.push({v:x.v - feeOf(r), d:x.d, t:r.t}); } return statOf(vs, now); };
+      const pick = (recs, key) => { const vs = []; for (const r of recs){ const x = valOf(r, key); if (x) vs.push({v:x.v - feeOf(r), d:x.d, t:r.t, u:x.u||1}); } return statOf(vs, now); };
       const methods = Object.keys(METH).map(key => {
         const o = {key, label:METH[key].label, all:pick(withNt, key), pats:[], byPat:{}};
         for (const k of Object.keys(TR_PATS)){ const st = pick(withNt.filter(r => r.pat === k), key); if (st){ o.byPat[k] = st; o.pats.push(Object.assign({label:TR_PATS[k], pat:k}, st)); } }
@@ -853,6 +874,8 @@ async function fetchJson(url, opt){
         if (curKey && curKey !== c.best.key){
           const m = sum._methods.find(x => x.key === curKey), curSt = m && m.byPat[c.pat];
           if (curSt && c.best.st.avg < curSt.avg + AUTO_GAP){ next[c.pat] = curKey; continue; }
+          // 追加ありの方式は、ポジションが大きくなる分$で有利に見えるので、証拠金あたりでも上回るときだけ採用
+          if (curSt && METH[c.best.key].add && !((c.best.st.apm != null ? c.best.st.apm : c.best.st.avg) > (curSt.apm != null ? curSt.apm : curSt.avg))){ next[c.pat] = curKey; continue; }
         }
         next[c.pat] = c.best.key;
       }
@@ -1001,6 +1024,7 @@ async function fetchJson(url, opt){
         if (isOpen){
           p.peak = avg;
           if (p.initEntry) p.initEntry = avg;
+          if (p.meth) p.e0 = avg;
           if (p.trUsd) p.slPriceFixed = avg - p.side*p.trUsd.sl/p.trUsd.q0;
           else if (p.slPriceFixed){ const k = (p.slLev || HB_SL)/100/p.lev; p.slPriceFixed = p.side>0 ? avg*(1-k) : avg*(1+k); }
         }
@@ -1157,7 +1181,7 @@ async function fetchJson(url, opt){
       if (trendMode){
         // 決済方式は、パターンごとに自動選択されたもの（検証と同じ判定で動かす）
         const mk = (e.meth && METH[e.meth]) ? e.meth : "cur";
-        posObj.meth = mk; posObj.q0 = posObj.qty; posObj.mst = mInit(mk); posObj.pat = e.pat || null; posObj.initMargin = margin;
+        posObj.meth = mk; posObj.q0 = posObj.qty; posObj.e0 = fill; posObj.mst = mInit(mk); posObj.pat = e.pat || null; posObj.initMargin = margin;
       } else if (S.cfg.halfback){
         posObj.halfback = true; posObj.initEntry = fill; posObj.initMargin = margin;
         posObj.slPriceFixed = side>0 ? fill*(1-HB_SL/100/lev) : fill*(1+HB_SL/100/lev);
@@ -1354,7 +1378,7 @@ async function fetchJson(url, opt){
       stopBusy.add(p.sym);
       try{
         const base = baseOf(p.sym), prec = await getPrecision(base), t = tokens.get(p.sym);
-        const raw = p.entry + p.side*p.mst.s/p.q0;
+        const raw = (p.e0 || p.entry) + p.side*p.mst.s/p.q0;
         let target = p.side>0 ? floorTo(raw, prec.price) : ceilTo(raw, prec.price);
         const cur = t ? (t.mark || t.px) : null;
         if (cur > 0){ const mg = Math.max(cur*0.0008, Math.pow(10,-prec.price));
@@ -1379,13 +1403,14 @@ async function fetchJson(url, opt){
     }
     function methCheck(p,t,now){
       if ((p.side>0 && t.px<=p.liq) || (p.side<0 && t.px>=p.liq)){ closePos(p,"強制ロスカット"); return; }
-      const d = METH[p.meth] || {}, L = p.mst, u = p.side*(t.px - p.entry)*p.q0, el = (now - p.ts)/1000;
-      const ev = mStep(p.meth, L, u, el, p.side*(t.px/p.entry-1)*100*p.lev, (p.mfe||0)*p.lev, p.q0*p.entry*0.001);
+      const e0 = p.e0 || p.entry, d = METH[p.meth] || {}, L = p.mst, u = p.side*(t.px - e0)*p.q0, el = (now - p.ts)/1000;
+      const ev = mStep(p.meth, L, u, el, p.side*(t.px/e0-1)*100*p.lev, (p.mfe||0)*p.lev, p.q0*e0*0.001, coefOf(t, p.side));
       if (ev && ev.indexOf("exit") === 0){
-        const why = ev === "exit:tp" ? "利確" : ev === "exit:time" ? (d.kind === "time" ? "固定時間で決済" : "時間ルールで決済") : (L.s > 0 ? "利益確保の損切り" : L.s >= 0 ? "建値撤退" : "損切り");
+        const why = ev === "exit:tp" ? "利確" : ev === "exit:cut" ? "早切り（下降係数"+d.cut.toFixed(1)+"超え）" : ev === "exit:time" ? (d.kind === "time" ? "固定時間で決済" : "時間ルールで決済") : (L.s > 0 ? "利益確保の損切り" : L.s >= 0 ? "建値撤退" : "損切り");
         closePos(p, why+"（"+(L.s>=0?"ライン+$":"ライン-$")+Math.abs(L.s).toFixed(2)+"・"+d.label+"）"); return;
       }
-      if (ev === "half") methPartial(p, "半分利確（"+d.label+"）");
+      if (ev === "add"){ addOnce(p, "伸び率係数"+d.add.toFixed(1)+"超え・含み益時の1回追加"); liveSetStop(p); }
+      else if (ev === "half") methPartial(p, "半分利確（"+d.label+"）");
       else if (ev === "stop") liveSetStop(p);
     }
     function halfbackCheck(p,t,now){
@@ -1770,12 +1795,12 @@ async function fetchJson(url, opt){
         positions:S.positions.map(p=>{ const t = tokens.get(p.sym), pxv = t?t.px:p.entry, un = unreal(p,t)-p.fundingPaid, m0 = p.margin0 || p.margin, cf = S.cfg;
           let rows;
           if (p.meth && p.mst){
-            const d = METH[p.meth] || {}, L = p.mst, atU = u => p.entry + p.side*u/p.q0;
+            const d = METH[p.meth] || {}, L = p.mst, atU = u => (p.e0 || p.entry) + p.side*u/p.q0;
             rows = [];
             if (d.kind === "cur"){ rows.push({k:"tp", label:"利確 +$"+d.tp2+(L.h?"（残り）":""), px:atU(d.tp2), val:"+$"+d.tp2}); if (!L.h) rows.push({k:"tp", label:"部分利確 +$"+d.tp1+"（半分）", px:atU(d.tp1), val:"半分"}); }
             if (d.kind === "half" && !L.h) rows.push({k:"tp", label:"部分利確 +$2（半分）", px:atU(2), val:"半分"});
             if (L.pk > 0) rows.push({k:"tp hit", label:"ピーク（最大含み益）", px:atU(L.pk), val:"+$"+L.pk.toFixed(2)});
-            rows.push({k:"tr", label:(p.side>0?"買い建値":"売り建値"), px:p.entry, val:usd(p.margin)});
+            rows.push({k:"tr", label:(p.side>0?"買い建値":"売り建値")+(L.a?"（追加後の平均）":""), px:p.entry, val:usd(p.margin)});
             rows.push({k:"sl", label:"損切りライン（"+d.label+"）", px:atU(L.s), val:(L.s>=0?"+$":"-$")+Math.abs(L.s).toFixed(2)});
             rows.push({k:"liq", label:"ロスカット", px:p.liq, val:"全損"});
           } else if (p.trend && p.trUsd){
