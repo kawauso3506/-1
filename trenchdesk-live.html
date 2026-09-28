@@ -567,6 +567,24 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
     return out;
   }
 
+  // 日足トレンドフォロー検証タブ（画面表示とコピーで共用）
+  function dtfLines(o){
+    if (!o) return [["日足トレンドフォロー", ["データ待ち"]]];
+    if (o.err) return [["日足トレンドフォロー", ["計算エラー: "+o.err]]];
+    const Pc = (v,d=2) => v == null ? "–" : (v>=0?"+":"−")+Math.abs(v).toFixed(d)+"%", Dl = v => v == null ? "–" : usd2(v*1.6), P = o.progress;
+    const dt = ms => ms ? new Date(ms).toLocaleDateString("ja-JP") : "–";
+    const out = [["概要", ["取得済み "+P.done+"/"+P.total+"銘柄"+(P.complete ? "（完了・24時間ごとに更新）" : o.ready ? "（前回の結果を表示中・更新中）" : "（取得中・1銘柄あたり約12秒）")+" ／ 期間 "+dt(o.from)+" 〜 "+dt(o.to), o.note]]];
+    if (o.mk && o.mk.length) out.push(["市場全体の動き（対象銘柄の買い持ち・年ごとの平均）", [o.mk.map(m => m.y+"年 "+Pc(m.mean,0)+"（"+m.n+"銘柄）").join(" ／ ")]]);
+    const line = r => r.label+"："+r.all.n+"件 ／ 1回平均 "+Pc(r.all.mean)+"（"+Dl(r.all.mean)+"）"+(r.ci==null ? "" : "±"+r.ci.toFixed(2))+" ／ 勝率"+r.all.win+"% ／ 平均利益"+Pc(r.all.aw,1)+" ／ 平均損失"+Pc(r.all.al,1)+" ／ PF "+(r.all.pf==null ? "–" : r.all.pf.toFixed(2))+" ／ 平均保有 "+r.all.days.toFixed(1)+"日 ／ ランダム入り "+Pc(r.base)+" → 差 "+Pc(r.x)+
+      (r.a && r.b ? " ／ 前半 "+Pc(r.a.mean)+"（差 "+Pc(r.xA)+"）→ 後半 "+Pc(r.b.mean)+"（差 "+Pc(r.xB)+"）" : "")+(r.ok ? " ✅" : "");
+    const oks = (o.rows||[]).filter(r => r.ok);
+    out.push(["✅ 手数料後でプラスで、ランダム入りより良かった設定（"+o.okN+"/"+o.tested+"通り）", oks.length ? oks.map(line) : ["なし（"+o.tested+"通り試して、偶然を超えて良かったものはありません）"]]);
+    out.push(["前半で最良だった設定は、後半でも通用したか（各銘柄の前半・後半。上位5つ）", (o.wf||[]).length ? o.wf.map(r => r.label+"：前半 "+Pc(r.a.mean)+"（"+r.a.n+"件）→ 後半 "+Pc(r.b.mean)+"（"+r.b.n+"件）"+(r.b.mean > 0 ? " ○" : " ×")) : ["データ待ち"]]);
+    out.push(["全設定（1回平均の高い順）", (o.rows||[]).map(line)]);
+    (o.top3||[]).forEach(r => out.push(["年別の成績："+r.label, [(r.yrs||[]).map(y => y.y+"年 "+Pc(y.mean)+"（"+y.n+"件）").join(" ／ ")]]));
+    return out;
+  }
+
   function render(){
     const s = STs[cur], f = pickFocus(s);
     setPill(s);
@@ -699,13 +717,15 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
           $("cdlProgress").textContent = tc ? ("ろうそく: 15分足 最大"+tc.m15+"本 ／ 1時間足 最大"+tc.h1+"本 ／ 4時間足 最大"+tc.h4+"本 ／ 日足 最大"+(tc.d1||0)+"本（EMA200には200本必要）／ 取得銘柄 "+tc.tokens+"件 ／ 大きな流れ: 上昇 "+sg.trend.trendUp+"銘柄・下降 "+sg.trend.trendDn+"銘柄")
             : ("1時間ろうそく: 最大"+c.h1+"本 ／ 4時間ろうそく: 最大"+c.h4+"本 ／ 追跡銘柄 "+c.tokens+"件");
         }
-        const tabDefs = (sg.trend ? [{k:"__trend", l:"トレンド戦略（"+(sg.trend.rows[0].n)+"）"}] : []).concat(sg.opt ? [{k:"__opt", l:"最適化（"+(sg.opt.n||0)+"）"}] : []).concat(sg.fs ? [{k:"__fs", l:"先物×現物（"+(sg.fs.n||0)+"）"}] : []).concat(sg.hist ? [{k:"__hist", l:"履歴検証（"+(sg.hist.progress ? sg.hist.progress.done+"/"+sg.hist.progress.total : "–")+"）"}] : []).concat(Object.keys(NM).map(k=>({k, l:NM[k]+"（"+(sg.n[k]||0)+"）"}))).concat([{k:"__buckets", l:"条件別の内訳"}]);
+        const tabDefs = (sg.trend ? [{k:"__trend", l:"トレンド戦略（"+(sg.trend.rows[0].n)+"）"}] : []).concat(sg.opt ? [{k:"__opt", l:"最適化（"+(sg.opt.n||0)+"）"}] : []).concat(sg.fs ? [{k:"__fs", l:"先物×現物（"+(sg.fs.n||0)+"）"}] : []).concat(sg.hist ? [{k:"__hist", l:"履歴検証（"+(sg.hist.progress ? sg.hist.progress.done+"/"+sg.hist.progress.total : "–")+"）"}] : []).concat(sg.dtf ? [{k:"__dtf", l:"日足トレンド（"+(sg.dtf.progress ? sg.dtf.progress.done+"/"+sg.dtf.progress.total : "–")+"）"}] : []).concat(Object.keys(NM).map(k=>({k, l:NM[k]+"（"+(sg.n[k]||0)+"）"}))).concat([{k:"__buckets", l:"条件別の内訳"}]);
         if (!sigTab || !tabDefs.find(t=>t.k===sigTab)) sigTab = tabDefs[0].k;
         const tabsHtml = tabDefs.map(t => "<button class='sigTab"+(sigTab===t.k?" sel":"")+"' data-sigtab='"+t.k+"'>"+esc(t.l)+"</button>").join("");
         $("sigTabs").innerHTML = tabsHtml;
         let body;
         if (sigTab === "__trend"){
           body = trendHtml(sg.trend);
+        } else if (sigTab === "__dtf"){
+          body = dtfLines(sg.dtf).map(([t, ls]) => "<div class='epoch'><div class='hd'><span>"+esc(t)+"</span></div>"+ls.map(l => "<div class='cfgline'>"+esc(l)+"</div>").join("")+"</div>").join("");
         } else if (sigTab === "__hist"){
           body = histLines(sg.hist).map(([t, ls]) => "<div class='epoch'><div class='hd'><span>"+esc(t)+"</span></div>"+ls.map(l => "<div class='cfgline'>"+esc(l)+"</div>").join("")+"</div>").join("");
         } else if (sigTab === "__fs"){
@@ -796,6 +816,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
       tr.rows.forEach(rw => { L.push("["+rw.label+"] "+rw.n+"件"); tr.H.forEach(h => { const x = rw.st[h]; L.push("  "+(h/3600)+"時間後: "+(x && x.n ? sigFmt(x) : "データ待ち")); });
         if (rw.rc1 && rw.rc1.n) L.push("  直近24h・1時間後: "+sigFmt(rw.rc1)); if (rw.rc4 && rw.rc4.n) L.push("  直近24h・4時間後: "+sigFmt(rw.rc4)); });
       L.push("", "--- 短期シグナル ---"); }
+    if (sg.dtf){ L.push("--- 日足トレンドフォロー検証（数日〜数週間保有・ランダム入りとの比較） ---"); dtfLines(sg.dtf).forEach(([t, ls]) => { L.push("["+t+"]"); ls.forEach(l => L.push("  "+l)); }); L.push(""); }
     if (sg.hist){ L.push("--- 履歴検証（過去約60日・ランダム入りとの比較） ---"); histLines(sg.hist).forEach(([t, ls]) => { L.push("["+t+"]"); ls.forEach(l => L.push("  "+l)); }); L.push(""); }
     if (sg.fs){ L.push("--- 先物×現物 ---"); fsLines(sg.fs).forEach(([t, ls]) => { L.push("["+t+"]"); ls.forEach(l => L.push("  "+l)); }); L.push(""); }
     if (sg.opt){ L.push("--- 最適化 ---"); optLines(sg.opt).forEach(([t, ls]) => { L.push("["+t+"]"); ls.forEach(l => L.push("  "+l)); }); L.push(""); }
