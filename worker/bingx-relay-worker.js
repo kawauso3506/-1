@@ -331,10 +331,13 @@ async function fetchJson(url, opt){
     const PM = () => PERP_MODE[S.cfg.mode] || PERP_MODE.active;
     const pollMs = () => POLL_OVERRIDE || PM().poll;
 
+    // 設定ボタンは廃止。売買の条件は固定し、エントリーするパターンと決済方式だけを検証結果で自動選択する
+    const FIXED = {mode:"normal", dir:"both", strategy:"trend", lev:8, size:0.04, gate:"std", scale:false, live:true, halfback:false, scalp:false, maxPos:10, orphan:true, timeout:0};
+    const AUTO0 = () => ({pats:{pin:"cur"}, at:0, checkedAt:0, note:"初期設定（ピンバー・今の設定）", warn:null});
     function fresh(){
-      return { startedAt:Date.now(), running:true, cash:START_USD, positions:[], trades:[], log:[], errors:[], hist:[{t:Date.now(),v:START_USD}],
+      return { auto:AUTO0(), startedAt:Date.now(), running:true, cash:START_USD, positions:[], trades:[], log:[], errors:[], hist:[{t:Date.now(),v:START_USD}],
         skips:0, polls:0, events:0, logSeq:0, lastPollAt:0, cooldown:{}, retry:{}, epochs:[], pnlDaily:{},
-        cfg:{mode:"active",dir:"both",lev:8,size:0.04,sl:1.5,tp:3,gate:"std",scale:true,live:false,strategy:"surge",fadeThresh:5,surgeThresh:5,halfback:true,scalp:false,scalpTp:1,scalpSl:1,scalpHold:45,trTp1:1.5,trTp2:3,trSl:3,maxPos:5,orphan:true,timeout:0} };
+        cfg:Object.assign({mode:"active",dir:"both",lev:8,size:0.04,sl:1.5,tp:3,gate:"std",scale:true,live:false,strategy:"surge",fadeThresh:5,surgeThresh:5,halfback:true,scalp:false,scalpTp:1,scalpSl:1,scalpHold:45,trTp1:1.5,trTp2:3,trSl:5,maxPos:5,orphan:true,timeout:0}, FIXED) };
     }
     let S = fresh();
     const tokens = new Map();
@@ -362,7 +365,7 @@ async function fetchJson(url, opt){
     function load(){
       try{
         const j = JSON.parse(store.get(FKEY) || "null");
-        if (j && j.cfg && Array.isArray(j.positions)){ const def = fresh().cfg; S = Object.assign(fresh(), j); S.cfg = Object.assign(def, j.cfg); S.positions.forEach(p => { if (p.origQty==null) p.origQty = p.qty; if (p.margin0==null) p.margin0 = p.margin; if (p.realizedNet==null) p.realizedNet = 0; if (p.tpHit==null) p.tpHit = 0; if (p.beOn==null) p.beOn = false; if (!tokens.has(p.sym)) tokens.set(p.sym,{sym:p.sym,samples:[],firstSeen:Date.now(),px:p.entry,mark:p.entry,bid:0,ask:0,bidSz:0,askSz:0,turn:0,oi:0,fr:0,chg24:0,chg1h:0,hi:p.entry,lo:p.entry,updatedAt:0}); }); }
+        if (j && j.cfg && Array.isArray(j.positions)){ const def = fresh().cfg; S = Object.assign(fresh(), j); S.cfg = Object.assign(def, j.cfg, FIXED); if (!S.auto || !S.auto.pats) S.auto = AUTO0(); S.positions.forEach(p => { if (p.origQty==null) p.origQty = p.qty; if (p.margin0==null) p.margin0 = p.margin; if (p.realizedNet==null) p.realizedNet = 0; if (p.tpHit==null) p.tpHit = 0; if (p.beOn==null) p.beOn = false; if (!tokens.has(p.sym)) tokens.set(p.sym,{sym:p.sym,samples:[],firstSeen:Date.now(),px:p.entry,mark:p.entry,bid:0,ask:0,bidSz:0,askSz:0,turn:0,oi:0,fr:0,chg24:0,chg1h:0,hi:p.entry,lo:p.entry,updatedAt:0}); }); }
       }catch(_){}
     }
     function persist(){ S.lastPollAt = lastPollAt; store.set(FKEY, JSON.stringify(S)); }
@@ -423,7 +426,7 @@ async function fetchJson(url, opt){
     const TR_ADD = 25, TR_SL = 35;      // -25%で1回だけ同額を追加、-35%で損切り（初回エントリー基準で固定）
     const TR_TPS = [[50,0.4],[70,0.3],[100,1]]; // +50%で4割、+70%で3割、+100%で残り全部
     const TR_PATS = {dbl:"ダブルトップ/ボトム", hs:"三尊/逆三尊", pb:"EMA21押し目・戻り", br:"ブレイク＆リテスト", en:"包み足", pin:"ピンバー"};
-    const TR_ENTRY_PATS = ["pin","en"]; // 実際にエントリーするパターン（検証結果で成績の良いもの）。他のパターンは検証のため記録だけ続ける
+    // 実際にエントリーするパターンと決済方式は、検証結果から自動で選ぶ（S.auto）。他のパターンも検証のため記録は続ける
     let CDL = {};
     const cdlInflight = new Set();
     function cdlSave(){ /* 保存しない（取引所から取り直す） */ }
@@ -529,8 +532,10 @@ async function fetchJson(url, opt){
       let c = CDL[sym]; if (!c){ c = {h1:[], h4:[], d1:[], m15:[], fHi:0, f15:0, last15:0}; CDL[sym] = c; }
       try{
         if (needHi){
-          const [h1, h4, d1] = await Promise.all([fetchTf(base,"1h",TF.h1,CDL_CAP,now), fetchTf(base,"4h",TF.h4,CDL_CAP,now), fetchTf(base,"1d",TF.d1,D1_CAP,now).catch(()=>[])]);
-          if (h1.length) c.h1 = h1; if (h4.length) c.h4 = h4; if (d1.length) c.d1 = d1; c.fHi = now;
+          const [h1, h4] = await Promise.all([fetchTf(base,"1h",TF.h1,CDL_CAP,now), fetchTf(base,"4h",TF.h4,CDL_CAP,now)]);
+          if (h1.length) c.h1 = h1; if (h4.length) c.h4 = h4; c.fHi = now;
+          if (now - (c.fD1||0) >= 4*TF.h1){ // 日足はゆっくりしか変わらないので4時間ごと（アクセス数を減らす）
+            const d1 = await fetchTf(base,"1d",TF.d1,D1_CAP,now).catch(()=>[]); if (d1.length) c.d1 = d1; c.fD1 = now; }
         }
         if (need15){
           const m15 = await fetchTf(base,"15m",TF.m15,M15_CAP,now);
@@ -549,7 +554,8 @@ async function fetchJson(url, opt){
         const sym = t.sym; if (cdlInflight.has(sym)) continue;
         if (!held.has(sym) && t.turn < Math.max(P.minTurn, TR_MIN_TURN)) continue;
         const c = CDL[sym];
-        const needHi = !c || now - (c.fHi||0) >= TF.h1;
+        // 15分足の確定直後（6分間）は15分足の取得が集中するので、1時間・4時間・日足の取り直しは避ける（BingXのアクセス制限100410対策）
+        const needHi = !c || (now >= cur15 + 6*60000 && now - (c.fHi||0) >= TF.h1);
         const need15 = !c || ((c.f15||0) < cur15 + 20000 && now >= cur15 + 20000); // 15分足が確定して20秒後に取りに行く
         if (!needHi && !need15) continue;
         n++; cdlInflight.add(sym);
@@ -576,21 +582,65 @@ async function fetchJson(url, opt){
         tsigPush(now, t, dir, hit.pat, hit.all, ent);
       }
     }
-    // ---- トレンド戦略のシグナル検証（1時間・4時間・24時間後の値動きを測る）----
+    // ---- トレンド戦略のシグナル検証（1時間・4時間・24時間後の値動きと、決済方式ごとの成績を測る）----
     // 保存は400件ずつ複数のキーに分ける（1つのキーに入れると、件数が増えたときに保存の上限を超えるため）
     const TSIGKEY = "trenchdesk_tsig_v1", TS2 = "trenchdesk_tsig_v2", TS_CHUNK = 400;
     const TSIG_H = [3600,14400,86400], TSIG_MAX_DONE = 6000, TSIG_MAX_PENDING = 4000;
     let TSIG = {pending:[], done:[]}, TSQ = {seq:0, saved:0, pn:0, migrate:false}, tsigDirty = false, tsigSavedAt = 0;
-    // 利確・損切りの組み合わせ
+    let REG = {up:0, dn:0, at:0}; // 相場全体の状態（上昇トレンド・下降トレンドの銘柄数）
     const TG_TP = [1,1.5,2,3], TG_SL = [2,3,5];
-    // 段階式の損切り（+$1.2で-$1へ、+$2で建値＋手数料、以降はピークから幅$Wの位置を$0.5刻みで追いかける）
-    const LAD_SL = 3, LAD_W = [2,3], LAD_H = [60,240,0]; // 幅$2/$3 × 時間ルール 1時間/4時間/なし
+    // ---- 決済方式（検証と実際の売買で、まったく同じ判定を使う。金額はポジション全体＝基準$160での含み損益）----
+    const LAD_SL = 3, LAD_W = [2,3], LAD_H = [60,240,0];
+    const METH = { cur:{label:"今の設定（+$1.5で半分→建値／+$3／-$5）", kind:"cur", sl0:5, tp1:1.5, tp2:3} };
+    for (const w of LAD_W) for (const h of LAD_H) METH[w+"|"+h] = {label:"段階式・追いかけ幅$"+w+"・時間ルール"+(h ? (h/60)+"時間" : "なし"), kind:"lad", w, h, sl0:LAD_SL};
+    METH.D = {label:"遅め追いかけ（+$3までは-$3固定→以降ピーク-$2）", kind:"late", sl0:3};
+    METH.HT = {label:"+$2で半分利確→残りはピーク-$3で追いかけ", kind:"half", sl0:3};
+    for (const hrs of [4,8,24]) METH["T"+hrs] = {label:"固定時間"+hrs+"時間で決済（損切り-$3）", kind:"time", hrs, sl0:3};
+    const SIM_KEYS = Object.keys(METH).filter(k => k !== "cur"); // "cur"は従来の記録（r.cs）を使う
+    const fl05 = v => Math.floor(v*2 + 1e-9)/2;
+    function ladStop(pk, w){
+      if (pk < 1.2) return -LAD_SL;
+      if (pk < 2) return -1;
+      let s = Math.max(-1, fl05(pk) - w);
+      if (s >= 0 && s < 0.2) s = 0.2; // 建値は手数料ぶん有利側
+      return s;
+    }
+    function mInit(key){ const d = METH[key]; return {s:-(d ? d.sl0 : LAD_SL), pk:0, x:null}; }
+    // 1回分の判定。戻り値: null / "stop"（損切りラインが上がった）/ "half"（半分利確）/ "exit:sl" "exit:tp" "exit:time"（全決済）
+    function mStep(key, L, u, el, lvPct, mfeLv, be){
+      const d = METH[key]; if (!d || !L || L.x != null) return null;
+      let ev = null;
+      if (u > L.pk) L.pk = +u.toFixed(2);
+      let ns = L.s;
+      if (d.kind === "lad") ns = Math.max(ns, ladStop(L.pk, d.w));
+      else if (d.kind === "late"){ if (L.pk >= 3) ns = Math.max(ns, fl05(L.pk) - 2); }
+      else if (d.kind === "half"){
+        if (!L.h && u >= 2){ L.h = 1; L.bk = 1; ev = "half"; }
+        if (L.h) ns = Math.max(ns, 0.2, fl05(L.pk) - 3);
+      } else if (d.kind === "cur"){
+        if (!L.h && u >= d.tp1){ L.h = 1; L.bk = d.tp1/2; ev = "half"; }
+        if (L.h) ns = Math.max(ns, be);
+        if (u >= d.tp2){ L.x = +(L.bk + d.tp2/2).toFixed(2); return "exit:tp"; }
+      }
+      if (ns > L.s){ L.s = +ns.toFixed(2); ev = ev || "stop"; }
+      if (u <= L.s){ L.x = +(L.h ? L.bk + L.s/2 : L.s).toFixed(2); return "exit:sl"; }
+      if (d.kind === "time" && el >= d.hrs*3600){ L.x = +(L.h ? L.bk + u/2 : u).toFixed(2); return "exit:time"; }
+      if (d.kind === "lad" && d.h > 0){ // 時間ルール（実際の売買と同じ判定。h分ごと）
+        const k = Math.floor(el/(d.h*60));
+        if (k >= 1){
+          if (!(mfeLv >= TR_PLUS)){ L.x = +u.toFixed(2); return "exit:time"; }
+          if ((L.mk||0) < k){ const prev = L.lm; L.mk = k; L.lm = +lvPct.toFixed(2);
+            if (prev != null && prev < 0 && lvPct < 0 && lvPct <= prev - TR_DROP){ L.x = +u.toFixed(2); return "exit:time"; } }
+        }
+      }
+      return ev;
+    }
     function tsigFinal(r){ // 24時間たって計測を終えるとき、まだ決着していないものは最後の値で決着扱いにする
       if (!r.nt || r.lastRr == null) return;
       const u = +(r.lastRr*r.nt/100).toFixed(2);
       if (r.g) for (const tp of TG_TP) for (const sl of TG_SL){ const k = tp+"|"+sl; if (r.g[k] == null) r.g[k] = u; }
       if (r.cs && r.cs.st !== 2){ r.cs.res = r.cs.st === 1 ? r.cs.bk + u/2 : u; r.cs.st = 2; }
-      if (r.lad) for (const k in r.lad){ const L = r.lad[k]; if (typeof L === "object" && L) r.lad[k] = L.x != null ? L.x : u; }
+      if (r.lad) for (const k in r.lad){ const L = r.lad[k]; if (typeof L === "object" && L) r.lad[k] = L.x != null ? L.x : +(L.h ? L.bk + u/2 : u).toFixed(2); }
     }
     function tsigLoad(){
       try{
@@ -637,43 +687,18 @@ async function fetchJson(url, opt){
     function tsigPush(now, t, dir, pat, all, ent){
       if (TSIG.pending.length >= TSIG_MAX_PENDING) return;
       const sp = t.bid>0 && t.ask>0 ? (t.ask-t.bid)/t.px*100 : 0;
-      const nt = START_USD*S.cfg.size*S.cfg.lev; // 基準のポジション金額（例: $500×4%×8倍 = $160）
-      const r = {t:now, sym:t.sym, d:dir, p0:t.px, pat, ps:all||[pat], e:ent||null, lv:S.cfg.lev, f:{}, mfe:0, mae:0, m:{sp:+sp.toFixed(3)}, nt, g:{}, cs:{tp1:S.cfg.trTp1, tp2:Math.max(S.cfg.trTp2,S.cfg.trTp1+0.5), sl:S.cfg.trSl, st:0, bk:0}, lad:{}};
-      for (const w of LAD_W) for (const h of LAD_H) r.lad[w+"|"+h] = {s:-LAD_SL, pk:0, x:null};
+      const nt = START_USD*S.cfg.size*S.cfg.lev; // 基準のポジション金額（$500×4%×8倍 = $160）
+      const r = {t:now, sym:t.sym, d:dir, p0:t.px, pat, ps:all||[pat], e:ent||null, mk:{u:REG.up, d:REG.dn}, lv:S.cfg.lev, f:{}, mfe:0, mae:0, m:{sp:+sp.toFixed(3)}, nt, g:{}, cs:{tp1:1.5, tp2:3, sl:5, st:0, bk:0}, lad:{}};
+      for (const k of SIM_KEYS) r.lad[k] = mInit(k);
       TSIG.pending.push(r); tsigDirty = true;
     }
-    function ladStop(pk, w){
-      if (pk < 1.2) return -LAD_SL;
-      if (pk < 2) return -1;
-      let s = Math.max(-1, Math.floor(pk*2 + 1e-9)/2 - w);
-      if (s >= 0 && s < 0.2) s = 0.2; // 建値は手数料ぶん有利側
-      return s;
-    }
-    function ladStep(r, usdAt, el, rr){
-      if (!r.lad) return;
-      const lvPct = rr*(r.lv||8); // 証拠金に対する%
-      for (const key in r.lad){
-        const L = r.lad[key]; if (!L || typeof L !== "object" || L.x != null) continue;
-        const kk = key.split("|"), w = +kk[0], h = +kk[1];
-        if (usdAt > L.pk){ L.pk = +usdAt.toFixed(2); const ns = ladStop(L.pk, w); if (ns > L.s) L.s = ns; }
-        if (usdAt <= L.s){ L.x = L.s; continue; }
-        if (h > 0){ // 時間ルール（実際の売買と同じ判定。h分ごと）
-          const k = Math.floor(el/(h*60));
-          if (k >= 1){
-            if (!((r.mfe||0)*(r.lv||8) >= TR_PLUS)){ L.x = +usdAt.toFixed(2); continue; }
-            if ((L.mk||0) < k){ const prev = L.lm; L.mk = k; L.lm = +lvPct.toFixed(2);
-              if (prev != null && prev < 0 && lvPct < 0 && lvPct <= prev - TR_DROP){ L.x = +usdAt.toFixed(2); continue; } }
-          }
-        }
-      }
-    }
-    // 利確・損切りの組み合わせを、実際の値動きでまとめてシミュレーションする（どちらに先に届いたか）
+    // 利確・損切りの組み合わせと、各決済方式を、実際の値動きでまとめてシミュレーションする
     function tsigSim(r, rr, el){
       if (!r.nt) return;
-      const usdAt = rr*r.nt/100;
+      const usdAt = rr*r.nt/100, lv = r.lv||8;
       for (const tp of TG_TP) for (const sl of TG_SL){ const k = tp+"|"+sl; if (r.g[k] != null) continue;
         if (usdAt >= tp) r.g[k] = tp; else if (usdAt <= -sl) r.g[k] = -sl; }
-      ladStep(r, usdAt, el, rr);
+      if (r.lad) for (const k in r.lad){ const L = r.lad[k]; if (L && typeof L === "object") mStep(k, L, usdAt, el, rr*lv, (r.mfe||0)*lv, r.nt*0.001); }
       const c = r.cs; if (!c || c.st === 2) return;
       if (c.st === 0){
         if (usdAt >= c.tp1){ c.st = 1; c.bk = c.tp1/2; }
@@ -707,15 +732,42 @@ async function fetchJson(url, opt){
       }
       if (tsigDirty && now - tsigSavedAt > 60000){ tsigSavedAt = now; tsigDirty = false; tsigSave(); }
     }
+    // ---- 自動選択の基準（1回あたりの期待値＝手数料込みの平均$で選ぶ。勝率は参考表示のみ）----
+    const AUTO_MIN = 500, AUTO_GAP = 0.10, AUTO_EVERY = 30*60000, GOAL_WIN = 40, GOAL_AVG = 2;
+    function statOf(vs, now){ // vs: [{v:手数料込み$, d:決着済みか, t:時刻}]
+      const n = vs.length; if (!n) return null;
+      vs.sort((a,b)=>a.t-b.t);
+      let s = 0, sw = 0, nw = 0, sl = 0, nl = 0, nd = 0, run = 0, mx = 0;
+      for (const x of vs){ s += x.v; if (x.d) nd++; if (x.v > 0){ sw += x.v; nw++; run = 0; } else { sl += x.v; nl++; run++; if (run > mx) mx = run; } }
+      const avg = s/n; let ss = 0; for (const x of vs) ss += (x.v-avg)*(x.v-avg);
+      const ci = n > 1 ? 1.96*Math.sqrt(ss/(n-1))/Math.sqrt(n) : null;
+      const half = Math.floor(n/2), h1 = half ? vs.slice(0,half).reduce((a,x)=>a+x.v,0)/half : null, h2 = vs.slice(half).reduce((a,x)=>a+x.v,0)/(n-half);
+      const srt = vs.map(x=>x.v).sort((a,b)=>b-a), top2 = n > 2 ? (s - srt[0] - srt[1])/(n-2) : null;
+      const rc = vs.filter(x => x.t >= now - 86400e3), rcAvg = rc.length ? rc.reduce((a,x)=>a+x.v,0)/rc.length : null;
+      const win = Math.round(nw/n*100);
+      return {n, done:nd, win, aw: nw ? sw/nw : null, al: nl ? sl/nl : null, avg, ci, h1, h2, top2, streak:mx, rcN:rc.length, rcAvg,
+        goal: nd >= AUTO_MIN && win >= GOAL_WIN && avg >= GOAL_AVG && h1 > 0 && h2 > 0};
+    }
+    function qualifies(st){ return !!st && st.done >= AUTO_MIN && st.avg > 0 && st.h1 > 0 && st.h2 > 0 && st.ci != null && st.avg - st.ci > 0 && st.top2 != null && st.top2 > 0; }
+    function unmet(st){
+      if (!st) return ["データなし"];
+      const o = [];
+      if (st.done < AUTO_MIN) o.push("決着"+st.done+"/"+AUTO_MIN+"件");
+      if (!(st.avg > 0)) o.push("期待値マイナス");
+      if (!(st.h1 > 0 && st.h2 > 0)) o.push("前半か後半が赤字");
+      if (!(st.ci != null && st.avg - st.ci > 0)) o.push("誤差を引くとプラスでない");
+      if (!(st.top2 != null && st.top2 > 0)) o.push("上位2件を除くとマイナス");
+      return o;
+    }
     function tsigSummary(){
-      const all = TSIG.done.concat(TSIG.pending), rows = [];
-      const mk = (label, recs) => { const o = {label, n:recs.length, st:{}}; for (const h of TSIG_H) o.st[h] = sigStat(recs, h); return o; };
+      const now = Date.now(), all = TSIG.done.concat(TSIG.pending), rows = [];
+      const mk = (label, recs) => { const o = {label, n:recs.length, st:{}}; for (const h of TSIG_H) o.st[h] = sigStat(recs, h);
+        o.rc1 = sigStat(recs.filter(r => r.t >= now - 86400e3), 3600); o.rc4 = sigStat(recs.filter(r => r.t >= now - 28*3600e3), 14400); return o; };
       rows.push(mk("全パターン合計", all));
       for (const k of Object.keys(TR_PATS)) rows.push(mk(TR_PATS[k], all.filter(r => r.pat === k)));
       rows.push(mk("ロング方向", all.filter(r => r.d > 0)), mk("ショート方向", all.filter(r => r.d < 0)));
-      let m15 = 0, h1 = 0, h4 = 0, d1 = 0, up = 0, dn = 0;
-      for (const [s,c] of Object.entries(CDL)){ m15 = Math.max(m15, c.m15.length); h1 = Math.max(h1, c.h1.length); h4 = Math.max(h4, c.h4.length); d1 = Math.max(d1, (c.d1||[]).length); const d = bigTrend(s); if (d>0) up++; else if (d<0) dn++; }
-      // 組み合わせごとの成績（手数料・スプレッド込み、1回あたりの平均$）
+      let m15 = 0, h1 = 0, h4 = 0, d1 = 0;
+      for (const c of Object.values(CDL)){ m15 = Math.max(m15, c.m15.length); h1 = Math.max(h1, c.h1.length); h4 = Math.max(h4, c.h4.length); d1 = Math.max(d1, (c.d1||[]).length); }
       const grid = [], feeOf = r => r.nt*(0.001 + (r.m.sp||0)/100);
       const withNt = all.filter(r => r.nt);
       const uNow = r => r.lastRr != null ? r.lastRr*r.nt/100 : null; // 未決着は現在値で評価
@@ -725,42 +777,92 @@ async function fetchJson(url, opt){
         let sa = 0, na = 0; for (const r of withNt){ const v = r.g && r.g[k] != null ? r.g[k] : uNow(r); if (v == null) continue; sa += v - feeOf(r); na++; }
         grid.push({tp, sl, n:done.length, open, win: done.length ? Math.round(wins/done.length*100) : null, avg, avgAll: na ? sa/na : null, nAll:na});
       }
-      let cur = null;
-      { const d = withNt.filter(r => r.cs && r.cs.st === 2), stg1 = withNt.filter(r => r.cs && r.cs.st === 1).length;
-        const c0 = withNt.length ? withNt[withNt.length-1].cs : null;
-        cur = {n:d.length, open:withNt.length - d.length, reachedTp1: d.filter(r=>r.cs.res > -r.cs.sl).length + stg1,
-          avg: d.length ? d.reduce((a,r)=>a + r.cs.res - feeOf(r), 0)/d.length : null, cfg:c0 ? {tp1:c0.tp1, tp2:c0.tp2, sl:c0.sl} : null}; }
-      // 決済方式の比較（勝率・平均利益・平均損失・1回平均。未決着は現在値で評価）
-      const mStat = vs => { const n = vs.length; if (!n) return null; let s = 0, sw = 0, nw = 0, sl = 0, nl = 0, nd = 0;
-        for (const x of vs){ s += x.v; if (x.d) nd++; if (x.v > 0){ sw += x.v; nw++; } else { sl += x.v; nl++; } }
-        return {n, done:nd, win:Math.round(nw/n*100), aw: nw ? sw/nw : null, al: nl ? sl/nl : null, avg: s/n}; };
-      const methods = [];
-      const addM = (label, fn) => {
-        const pick = recs => { const vs = []; for (const r of recs){ const x = fn(r); if (x) vs.push({v:x.v - feeOf(r), d:x.d}); } return mStat(vs); };
-        const o = {label, all:pick(withNt), pats:[]};
-        for (const k of Object.keys(TR_PATS)){ const st = pick(withNt.filter(r => r.pat === k)); if (st) o.pats.push(Object.assign({label:TR_PATS[k]}, st)); }
-        methods.push(o);
+      // 決済方式ごとの価値（手数料込み$・決着済みか）
+      const valOf = (r, key) => {
+        if (key === "cur"){ const c = r.cs; if (!c) return null; if (c.st === 2) return {v:c.res, d:1};
+          const u = uNow(r); return u == null ? null : {v: c.st === 1 ? c.bk + u/2 : u, d:0}; }
+        const L = r.lad && r.lad[key]; if (L == null) return null;
+        if (typeof L === "number") return {v:L, d:1}; if (L.x != null) return {v:L.x, d:1};
+        const u = uNow(r); return u == null ? null : {v: L.h ? L.bk + u/2 : u, d:0};
       };
-      addM(cur.cfg ? "今の設定（+$"+cur.cfg.tp1+"で半分→建値／+$"+cur.cfg.tp2+"／-$"+cur.cfg.sl+"・時間ルールなし）" : "今の設定", r => {
-        const c = r.cs; if (!c) return null; if (c.st === 2) return {v:c.res, d:1};
-        const u = uNow(r); if (u == null) return null; return {v: c.st === 1 ? c.bk + u/2 : u, d:0}; });
-      for (const w of LAD_W) for (const h of LAD_H){ const key = w+"|"+h;
-        addM("段階式・追いかけ幅$"+w+"・時間ルール"+(h ? (h/60)+"時間" : "なし"), r => {
-          const L = r.lad && r.lad[key]; if (L == null) return null;
-          if (typeof L === "number") return {v:L, d:1}; if (L.x != null) return {v:L.x, d:1};
-          const u = uNow(r); return u == null ? null : {v:u, d:0}; }); }
-      // エントリー条件別（実際にエントリーするパターンだけ）
-      const E = all.filter(r => r.e && TR_ENTRY_PATS.includes(r.pat));
-      const edefs = [
-        ["パターン足の出来高（直近20本平均の何倍か）", r=>r.e.vr, [[0,1,"1倍未満"],[1,1.5,"1〜1.5倍"],[1.5,2.5,"1.5〜2.5倍"],[2.5,1e9,"2.5倍以上"]]],
-        ["EMA21からの距離（ATR何本分・順方向がプラス）", r=>r.e.ds, [[-1e9,0,"EMA21より逆側"],[0,1,"0〜1本"],[1,2,"1〜2本"],[2,1e9,"2本以上"]]],
-        ["日足の向き", r=>r.e.d1==null ? null : r.e.d1*r.d, [[0.5,2,"同じ向き"],[-0.5,0.5,"はっきりしない"],[-2,-0.5,"逆向き"]]],
-        ["時間帯（日本時間）", r=>r.e.hr, [[0,6,"0〜6時"],[6,12,"6〜12時"],[12,18,"12〜18時"],[18,24,"18〜24時"]]]
+      const pick = (recs, key) => { const vs = []; for (const r of recs){ const x = valOf(r, key); if (x) vs.push({v:x.v - feeOf(r), d:x.d, t:r.t}); } return statOf(vs, now); };
+      const methods = Object.keys(METH).map(key => {
+        const o = {key, label:METH[key].label, all:pick(withNt, key), pats:[], byPat:{}};
+        for (const k of Object.keys(TR_PATS)){ const st = pick(withNt.filter(r => r.pat === k), key); if (st){ o.byPat[k] = st; o.pats.push(Object.assign({label:TR_PATS[k], pat:k}, st)); } }
+        return o;
+      });
+      // エントリー条件（単独・4時間後の値動き）
+      const E = all.filter(r => r.e && (S.auto && S.auto.pats[r.pat]));
+      const share = r => r.mk && (r.mk.u + r.mk.d) > 0 ? r.mk.u/(r.mk.u + r.mk.d) : null;
+      const COND = [
+        ["EMA21より逆側（ヒゲが突き抜けて戻った）", r => r.e && r.e.ds != null && r.e.ds < 0],
+        ["EMA21から0〜1本", r => r.e && r.e.ds != null && r.e.ds >= 0 && r.e.ds < 1],
+        ["EMA21から1本以上", r => r.e && r.e.ds != null && r.e.ds >= 1],
+        ["出来高1倍未満", r => r.e && r.e.vr != null && r.e.vr < 1],
+        ["出来高1〜1.5倍", r => r.e && r.e.vr != null && r.e.vr >= 1 && r.e.vr < 1.5],
+        ["出来高1.5倍以上", r => r.e && r.e.vr != null && r.e.vr >= 1.5],
+        ["日足が同じ向き", r => r.e && r.e.d1 != null && r.e.d1*r.d > 0],
+        ["日足がはっきりしない", r => r.e && r.e.d1 === 0],
+        ["0〜6時", r => r.e && r.e.hr >= 0 && r.e.hr < 6], ["6〜12時", r => r.e && r.e.hr >= 6 && r.e.hr < 12],
+        ["12〜18時", r => r.e && r.e.hr >= 12 && r.e.hr < 18], ["18〜24時", r => r.e && r.e.hr >= 18],
+        ["上昇相場（上昇トレンドの銘柄が7割以上）", r => { const s = share(r); return s != null && s >= 0.7; }],
+        ["下降相場（下降トレンドの銘柄が7割以上）", r => { const s = share(r); return s != null && s <= 0.3; }],
+        ["混在相場", r => { const s = share(r); return s != null && s > 0.3 && s < 0.7; }]
       ];
-      const ent = edefs.map(([title, fn, rng]) => ({title, rows: rng.map(([a,b,l]) => {
-        const xs = E.filter(r => { const v = fn(r); return v != null && v >= a && v < b; });
-        return {l, st1:sigStat(xs, 3600), st4:sigStat(xs, 14400)}; }).filter(x => x.st1.n)}));
-      return {H:TSIG_H, rows, grid, cur, methods, ent, entryPats:TR_ENTRY_PATS.map(k=>TR_PATS[k]), pending:TSIG.pending.length, done:TSIG.done.length, trendUp:up, trendDn:dn, candles:{m15, h1, h4, d1, tokens:Object.keys(CDL).length}};
+      // パターン×エントリー条件×決済方式：それぞれの組み合わせで期待値が一番高い決済方式を探す
+      const combos = [];
+      for (const pk of Object.keys(TR_PATS)){
+        const base = withNt.filter(r => r.pat === pk);
+        const groups = [["（条件なし）", base]].concat(COND.map(([l, f]) => [l, base.filter(f)]));
+        for (const [cl, recs] of groups){
+          if (recs.length < 20) continue;
+          let best = null;
+          for (const key of Object.keys(METH)){ const st = pick(recs, key); if (st && st.n >= 20 && (!best || st.avg > best.st.avg)) best = {key, label:METH[key].label, st}; }
+          if (best) combos.push({pat:TR_PATS[pk], cond:cl, best});
+        }
+      }
+      combos.sort((a,b) => b.best.st.avg - a.best.st.avg);
+      const ent = [{title:"エントリー条件別（今エントリーしているパターン）", rows: COND.map(([l, f]) => { const xs = E.filter(f); return {l, st1:sigStat(xs, 3600), st4:sigStat(xs, 14400)}; }).filter(x => x.st1.n)}];
+      // 最大含み益の分布（4時間以上たった記録のうち、+$1/+$2/+$4/+$7に一度でも届いた割合）
+      const mfeDist = Object.keys(TR_PATS).map(k => { const xs = withNt.filter(r => r.pat === k && now - r.t >= 4*3600e3), n = xs.length;
+        const p = th => n ? Math.round(xs.filter(r => r.mfe*r.nt/100 >= th).length/n*100) : null;
+        return {label:TR_PATS[k], n, p1:p(1), p2:p(2), p4:p(4), p7:p(7)}; });
+      // 自動選択の候補（パターンごとに、基準を満たす中で期待値が一番高い決済方式）
+      const cands = Object.keys(TR_PATS).map(pk => { let best = null, bestAny = null;
+        for (const m of methods){ const st = m.byPat[pk]; if (!st) continue;
+          if (!bestAny || st.avg > bestAny.st.avg) bestAny = {key:m.key, label:m.label, st};
+          if (qualifies(st) && (!best || st.avg > best.st.avg)) best = {key:m.key, label:m.label, st}; }
+        return {pat:pk, label:TR_PATS[pk], best, bestAny, unmet: bestAny ? unmet(bestAny.st) : ["データなし"]}; });
+      const A = S.auto || {};
+      const auto = {pats:Object.keys(A.pats||{}).map(k => ({pat:TR_PATS[k], meth:(METH[A.pats[k]]||{}).label||A.pats[k]})), note:A.note||"", warn:A.warn||null, at:A.at||0, checkedAt:A.checkedAt||0,
+        rule:"決着"+AUTO_MIN+"件以上・期待値プラス・誤差を引いてもプラス・前後半とも黒字・上位2件を除いてもプラス。この中で期待値が一番高い決済方式を選び、今より$"+AUTO_GAP.toFixed(2)+"以上良いときだけ切り替えます（直近24時間がマイナスなら見送り）",
+        goal:"目標: 勝率"+GOAL_WIN+"%以上・1回平均+$"+GOAL_AVG+"以上"};
+      return {H:TSIG_H, rows, grid, methods:methods.map(m => ({key:m.key, label:m.label, all:m.all, pats:m.pats})), combos:combos.slice(0,15), ent, mfeDist, cands, auto,
+        entryPats:Object.keys(A.pats||{}).map(k => TR_PATS[k]), pending:TSIG.pending.length, done:TSIG.done.length, trendUp:REG.up, trendDn:REG.dn, candles:{m15, h1, h4, d1, tokens:Object.keys(CDL).length}, _cands:cands, _methods:methods};
+    }
+    // 自動切り替え（30分ごと）。ユーザーの設定ボタンは廃止し、検証結果で決める
+    function autoSelect(now){
+      const sum = tsigSummary(), A = S.auto;
+      A.checkedAt = now; A.warn = null;
+      const q = sum._cands.filter(c => c.best);
+      if (!q.length){ A.note = "基準を満たす組み合わせはまだありません。初期設定（ピンバー・今の設定）のまま"; return; }
+      const next = {}, warns = [];
+      for (const c of q){
+        const curKey = A.pats[c.pat];
+        if (c.best.st.rcN >= 30 && c.best.st.rcAvg < 0){ warns.push(c.label+"は直近24時間の期待値がマイナス（"+(c.best.st.rcAvg>=0?"+$":"-$")+Math.abs(c.best.st.rcAvg).toFixed(2)+"）のため採用を見送り"); if (curKey) next[c.pat] = curKey; continue; }
+        if (curKey && curKey !== c.best.key){
+          const m = sum._methods.find(x => x.key === curKey), curSt = m && m.byPat[c.pat];
+          if (curSt && c.best.st.avg < curSt.avg + AUTO_GAP){ next[c.pat] = curKey; continue; }
+        }
+        next[c.pat] = c.best.key;
+      }
+      if (warns.length) A.warn = warns.join(" ／ ");
+      if (!Object.keys(next).length) return;
+      if (JSON.stringify(next) !== JSON.stringify(A.pats)){
+        A.pats = next; A.at = now;
+        A.note = "自動切り替え: "+Object.keys(next).map(k => TR_PATS[k]+"＝"+METH[next[k]].label).join(" ／ ");
+        addLog("SYS", A.note, true);
+      }
     }
 
     async function pollTickers(){
@@ -1000,8 +1102,8 @@ async function fetchJson(url, opt){
           if (p.side>0 ? slPrice>=fillPx : slPrice<=fillPx) slPrice = floorTo(fillPx - p.side*tick, prec.price);
           if (p.side>0 ? tpPrice<=fillPx : tpPrice>=fillPx) tpPrice = floorTo(fillPx + p.side*tick, prec.price);
         } else {
-          const slPct = p.trUsd ? (p.trUsd.sl/p.trUsd.q0)/fillPx : p.trend ? TR_SL/100/p.lev : p.halfback ? HB_SL/100/p.lev : S.cfg.sl/100;
-          const tpPct = (p.halfback || p.trend) ? null : S.cfg.tp/100; // 半戻し利確は決済ラインが動くので、単発のTP注文は置かない（SLのみ）
+          const slPct = p.meth ? (-p.mst.s/p.q0)/fillPx : p.trUsd ? (p.trUsd.sl/p.trUsd.q0)/fillPx : p.trend ? TR_SL/100/p.lev : p.halfback ? HB_SL/100/p.lev : S.cfg.sl/100;
+          const tpPct = (p.halfback || p.trend || p.meth) ? null : S.cfg.tp/100; // 半戻し利確は決済ラインが動くので、単発のTP注文は置かない（SLのみ）
           slPrice = floorTo(fillPx*(1 - p.side*slPct), prec.price);
           tpPrice = tpPct!=null ? floorTo(fillPx*(1 + p.side*tpPct), prec.price) : null;
         }
@@ -1053,12 +1155,9 @@ async function fetchJson(url, opt){
       const posObj = {sym:t.sym, side, lev, margin, margin0:margin, notional:N, qty:N/fill, origQty:N/fill, entry:fill, liq, ts:Date.now(), peak:fill, fundingPaid:0, feeOpen:fee, lastFund:Date.now(), kind:e.kind, slot:"main", realizedNet:0, tpHit:0, beOn:false, live:null, wsSign:null, wsCrosses:0, mfe:0, mae:0,
         ent:{ivrel:e.m.instVrel==null?null:+e.m.instVrel.toFixed(1), vrel:e.m.vrel==null?null:+e.m.vrel.toFixed(1), r30s:e.m.r30s==null?null:+e.m.r30s.toFixed(3), r5:e.m.r5==null?null:+e.m.r5.toFixed(2), spread:+(e.m.spread*100).toFixed(3), risk:e.m.risk, fr:+(t.fr*100).toFixed(4), chg24:+t.chg24.toFixed(1), buy:+e.m.buyShare.toFixed(2), hr:new Date(Date.now()+9*3600e3).getUTCHours()}};
       if (trendMode){
-        posObj.trend = true; posObj.initEntry = fill; posObj.initMargin = margin; posObj.slLev = TR_SL;
-        posObj.slPriceFixed = side>0 ? fill*(1-TR_SL/100/lev) : fill*(1+TR_SL/100/lev);
-        posObj.trAdded = false; posObj.tpDone = 0; posObj.pat = e.pat || null;
-        { const c = S.cfg, tp1 = c.trTp1, tp2 = Math.max(c.trTp2, tp1 + 0.5);
-          posObj.trUsd = {tp1, tp2, sl:c.trSl, frac:0.5, q0:posObj.qty};
-          posObj.slPriceFixed = fill - side*c.trSl/posObj.qty; posObj.slLev = null; }
+        // 決済方式は、パターンごとに自動選択されたもの（検証と同じ判定で動かす）
+        const mk = (e.meth && METH[e.meth]) ? e.meth : "cur";
+        posObj.meth = mk; posObj.q0 = posObj.qty; posObj.mst = mInit(mk); posObj.pat = e.pat || null; posObj.initMargin = margin;
       } else if (S.cfg.halfback){
         posObj.halfback = true; posObj.initEntry = fill; posObj.initMargin = margin;
         posObj.slPriceFixed = side>0 ? fill*(1-HB_SL/100/lev) : fill*(1+HB_SL/100/lev);
@@ -1247,6 +1346,47 @@ async function fetchJson(url, opt){
       if (p.tpDone < 1 && levAvg >= TR_TPS[0][0]){ p.tpDone = 1; trendPartial(p, 0.4, "利確1（+"+TR_TPS[0][0]+"%・元の数量の4割）"); }
       if (p.tpDone < 2 && levAvg >= TR_TPS[1][0]){ p.tpDone = 2; trendPartial(p, 0.5, "利確2（+"+TR_TPS[1][0]+"%・元の数量の3割）"); }
       if (levAvg >= TR_TPS[2][0]){ closePos(p,"利確3（+"+TR_TPS[2][0]+"%・全決済）"); return; }
+    }
+    // ---- 自動選択された決済方式での売買（検証のシミュレーションと同じ mStep で判定する）----
+    const stopBusy = new Set();
+    async function liveSetStop(p){ // BingX側の損切りを、今の損切りライン（$）に合わせて置き直す
+      if (!S.cfg.live || !p.live || p.live.status!=="open" || stopBusy.has(p.sym)) return;
+      stopBusy.add(p.sym);
+      try{
+        const base = baseOf(p.sym), prec = await getPrecision(base), t = tokens.get(p.sym);
+        const raw = p.entry + p.side*p.mst.s/p.q0;
+        let target = p.side>0 ? floorTo(raw, prec.price) : ceilTo(raw, prec.price);
+        const cur = t ? (t.mark || t.px) : null;
+        if (cur > 0){ const mg = Math.max(cur*0.0008, Math.pow(10,-prec.price));
+          if (p.side>0 && target >= cur - mg) return; if (p.side<0 && target <= cur + mg) return; } // 現在価格に近すぎる時はサーバーが見張る
+        if (!(target>0) || target === p.live.stopPx) return;
+        if (await liveRestop(p, target, true)) addLog("LIVE", base+" BingX側の損切りを $"+px(target)+"（"+(p.mst.s>=0?"+$":"-$")+Math.abs(p.mst.s).toFixed(2)+"）に置き直し", true);
+      }catch(err){
+        if (/110411|110412|than the current price/i.test(String(err.message))){
+          if (!p.live.srvStopLogged){ p.live.srvStopLogged = true; addLog("SYS", baseOf(p.sym)+" BingXデモの価格が実際の相場とずれていて、損切りを置き直せません。サーバーが実際の相場で見張り、届いたら成行で決済します", true); }
+        } else addLog("LIVE", baseOf(p.sym)+" 損切りの置き直しに失敗: "+err.message, true);
+      }finally{ stopBusy.delete(p.sym); }
+    }
+    function methPartial(p, label){ // 半分を決済（BingX側も成行で半分決済→残りの損切りを置き直す）
+      const t = tokens.get(p.sym), last = t ? t.px : p.entry, q = p.qty*0.5;
+      if (!(q>0)) return;
+      liveClose(p, 0.5, label).then(() => liveSetStop(p)).catch(()=>{});
+      const exitPx = fillExit(p,t,q,last), fee = q*exitPx*FEEF(), marginPart = p.margin*0.5, fundPart = p.fundingPaid*0.5;
+      const back = Math.max(0, marginPart + p.side*(exitPx-p.entry)*q - fundPart - fee);
+      S.cash += back; p.realizedNet = (p.realizedNet||0) + (back - marginPart);
+      p.qty -= q; p.margin -= marginPart; p.notional *= 0.5; p.fundingPaid -= fundPart; S.events++;
+      addLog("TRADE", baseOf(p.sym)+" "+label+" "+((back-marginPart)>=0?"+":"−")+"$"+Math.abs(back-marginPart).toFixed(2), true);
+    }
+    function methCheck(p,t,now){
+      if ((p.side>0 && t.px<=p.liq) || (p.side<0 && t.px>=p.liq)){ closePos(p,"強制ロスカット"); return; }
+      const d = METH[p.meth] || {}, L = p.mst, u = p.side*(t.px - p.entry)*p.q0, el = (now - p.ts)/1000;
+      const ev = mStep(p.meth, L, u, el, p.side*(t.px/p.entry-1)*100*p.lev, (p.mfe||0)*p.lev, p.q0*p.entry*0.001);
+      if (ev && ev.indexOf("exit") === 0){
+        const why = ev === "exit:tp" ? "利確" : ev === "exit:time" ? (d.kind === "time" ? "固定時間で決済" : "時間ルールで決済") : (L.s > 0 ? "利益確保の損切り" : L.s >= 0 ? "建値撤退" : "損切り");
+        closePos(p, why+"（"+(L.s>=0?"ライン+$":"ライン-$")+Math.abs(L.s).toFixed(2)+"・"+d.label+"）"); return;
+      }
+      if (ev === "half") methPartial(p, "半分利確（"+d.label+"）");
+      else if (ev === "stop") liveSetStop(p);
     }
     function halfbackCheck(p,t,now){
       if ((p.side>0 && t.px<=p.liq) || (p.side<0 && t.px>=p.liq)){ closePos(p,"強制ロスカット"); return; }
@@ -1536,10 +1676,13 @@ async function fetchJson(url, opt){
       seedCandlesStep(now).catch(()=>{});
       try{ sigStep(now); }catch(_){}
       try{ tsigStep(now); }catch(_){}
+      if (now - REG.at >= 60000){ let up = 0, dn = 0; for (const s of Object.keys(CDL)){ const d = bigTrend(s); if (d>0) up++; else if (d<0) dn++; } REG = {up, dn, at:now}; }
+      if (now - (S.auto.checkedAt||0) >= AUTO_EVERY && TSIG.done.length + TSIG.pending.length > 0){ try{ autoSelect(now); }catch(err){ S.auto.checkedAt = now; addLog("SYS","自動選択の計算に失敗: "+err.message,true); } }
       for (const p of [...S.positions]){
         const t = tokens.get(p.sym); if (!t || !isFresh(t)) continue;
         { const f0 = p.side*(t.px/p.entry-1)*100; if (f0 > (p.mfe||0)) p.mfe = f0; if (f0 < (p.mae||0)) p.mae = f0;
           if (!p.trend && cf.timeout > 0 && now - p.ts > msMin(cf.timeout) && (p.mfe||0) < 0.3 && f0 < 0){ closePos(p,"時間切れ（"+cf.timeout+"分・含み益に届かず）"); continue; } }
+        if (p.meth){ methCheck(p,t,now); continue; }
         if (p.trend){ trendCheck(p,t,now); continue; }
         if (p.halfback){ halfbackCheck(p,t,now); continue; }
         if (p.scalp){ scalpCheck(p,t,now); continue; }
@@ -1561,13 +1704,14 @@ async function fetchJson(url, opt){
       if (S.cfg.strategy === "trend"){
         for (const t of tokens.values()){
           const c = CDL[t.sym]; if (!c || !c.sig || c.sig.used) continue;
-          if (!TR_ENTRY_PATS.includes(c.sig.pat)){ c.sig.used = true; continue; } // 成績の悪いパターンは記録だけで、エントリーしない
+          const meth = S.auto.pats[c.sig.pat];
+          if (!meth){ c.sig.used = true; continue; } // 自動選択で採用されていないパターンは記録だけで、エントリーしない
           if (now - c.sig.at > 10*60000){ c.sig.used = true; continue; }     // 15分足の確定から10分以内だけ有効
           if (held.has(t.sym) || !isFresh(t) || t.turn < TR_MIN_TURN) continue;
           if (S.cooldown[t.sym] && now - S.cooldown[t.sym] < 15*60000) continue;
           const m = metricsOf(t); if (m.spread > MAX_SPREAD) continue;
           if (bigTrend(t.sym) !== c.sig.dir) { c.sig.used = true; continue; }
-          cands.push({t, e:{basic:true, dir:c.sig.dir>0?"long":"short", kind:"トレンド・"+TR_PATS[c.sig.pat], pat:c.sig.pat, score:1, m}, c});
+          cands.push({t, e:{basic:true, dir:c.sig.dir>0?"long":"short", kind:"トレンド・"+TR_PATS[c.sig.pat]+"（"+(METH[meth]||{}).label+"）", pat:c.sig.pat, meth, score:1, m}, c});
         }
         for (const x of cands){ if (S.positions.length >= MAXP) break; x.c.sig.used = true; openPos(x.t, x.e); }
         return;
@@ -1593,7 +1737,9 @@ async function fetchJson(url, opt){
         persist();
       }catch(e){
         lastError = e.message;
-        if (lastErrLogged !== e.message){ lastErrLogged = e.message; addLog("SYS","データ取得エラー: "+e.message,true); }
+        if (/100410/.test(e.message)){ // BingXのアクセス制限。次の更新で自動的に取り直すので、エラー一覧には載せない
+          if (lastErrLogged !== "100410"){ lastErrLogged = "100410"; addLog("SYS","BingXのアクセス制限（100410）のため今回の価格取得を見送り。次の更新で取り直します",true); }
+        } else if (lastErrLogged !== e.message){ lastErrLogged = e.message; addLog("SYS","データ取得エラー: "+e.message,true); }
       }
       busy = false; onUpdate();
       timer = null;
@@ -1618,12 +1764,21 @@ async function fetchJson(url, opt){
       const dirL = {both:"ロング＋ショート",long:"ロングのみ",short:"ショートのみ"}[S.cfg.dir];
       return { kind:"perp", title:"先物 ロング/ショート（ペーパー）", colTaker:"出来高×", now, running:S.running, startUsd:START_USD, equity:eq, pnlUsd:eq-START_USD, cash:S.cash, cfg:S.cfg, gates:GATES,
         labels:{vol:"危険度・ボラ（激しさ）",down:"逆行リスク（過熱度）"},
-        chips:[dirL+" ・ "+S.cfg.lev+"x", S.cfg.strategy==="fade" ? "逆張り（5分±"+S.cfg.fadeThresh+"%＋高値/安値から"+WICK_PCT+"%のヒゲ確認）" : S.cfg.strategy==="surge" ? "出来高急増（通常比×"+S.cfg.surgeThresh+"で瞬時に順張り）" : S.cfg.strategy==="dual" ? "併用：出来高急増（初動）＋逆張り（失速）" : S.cfg.strategy==="trend" ? "トレンド（4h/1hで方向確認→15分足のピンバー・包み足で入る）" : "順張り", S.cfg.strategy==="trend" ? "資金管理: +$"+S.cfg.trTp1+"で半分利確→損切りを建値へ・+$"+Math.max(S.cfg.trTp2,S.cfg.trTp1+0.5)+"で全利確・損切り-$"+S.cfg.trSl : S.cfg.halfback ? "資金管理: 半戻し利確（-"+HB_ADD+"%で1回追加・-"+HB_SL+"%固定損切り）" : S.cfg.scalp ? "資金管理: 超高速スキャルピング（+$"+S.cfg.scalpTp+"利確・-$"+S.cfg.scalpSl+"損切り・"+S.cfg.scalpHold+"秒）" : "SL "+S.cfg.sl+"% ／ 利確 "+S.cfg.tp+"%","モード: "+(MODE_OPTS.find(o=>o.v===S.cfg.mode)||{l:""}).l,"ゲート: "+(g?g.label:"OFF")].concat(S.cfg.live?["実発注 ON（BingXデモ）"]:[]).concat(S.cfg.timeout?["時間切れ決済 "+S.cfg.timeout+"分"]:[]).concat(warm>0?["ウォームアップ中（あと約"+warm+"秒）"]:[]),
+        chips:[dirL+" ・ "+S.cfg.lev+"x", S.cfg.strategy==="fade" ? "逆張り（5分±"+S.cfg.fadeThresh+"%＋高値/安値から"+WICK_PCT+"%のヒゲ確認）" : S.cfg.strategy==="surge" ? "出来高急増（通常比×"+S.cfg.surgeThresh+"で瞬時に順張り）" : S.cfg.strategy==="dual" ? "併用：出来高急増（初動）＋逆張り（失速）" : S.cfg.strategy==="trend" ? "トレンド（4h/1hで方向確認→15分足のパターンで入る・自動選択）" : "順張り", S.cfg.strategy==="trend" ? "採用中: "+(Object.keys(S.auto.pats).map(k => TR_PATS[k]+"＝"+((METH[S.auto.pats[k]]||{}).label||"")).join(" ／ ")||"なし") : S.cfg.halfback ? "資金管理: 半戻し利確（-"+HB_ADD+"%で1回追加・-"+HB_SL+"%固定損切り）" : S.cfg.scalp ? "資金管理: 超高速スキャルピング（+$"+S.cfg.scalpTp+"利確・-$"+S.cfg.scalpSl+"損切り・"+S.cfg.scalpHold+"秒）" : "SL "+S.cfg.sl+"% ／ 利確 "+S.cfg.tp+"%","モード: "+(MODE_OPTS.find(o=>o.v===S.cfg.mode)||{l:""}).l,"ゲート: "+(g?g.label:"OFF")].concat(S.cfg.live?["実発注 ON（BingXデモ）"]:[]).concat(S.cfg.timeout?["時間切れ決済 "+S.cfg.timeout+"分"]:[]).concat(warm>0?["ウォームアップ中（あと約"+warm+"秒）"]:[]),
         stats:{trades:S.trades.length,wins:S.trades.filter(x=>x.pnlUsd>0).length,skips:S.skips,polls:S.polls,watching:tokens.size,events:S.events},
         health:{lastPollAt,lastError,pollMs:pollMs(),source:"open-api.bingx.com（リレー経由）"},
         positions:S.positions.map(p=>{ const t = tokens.get(p.sym), pxv = t?t.px:p.entry, un = unreal(p,t)-p.fundingPaid, m0 = p.margin0 || p.margin, cf = S.cfg;
           let rows;
-          if (p.trend && p.trUsd){
+          if (p.meth && p.mst){
+            const d = METH[p.meth] || {}, L = p.mst, atU = u => p.entry + p.side*u/p.q0;
+            rows = [];
+            if (d.kind === "cur"){ rows.push({k:"tp", label:"利確 +$"+d.tp2+(L.h?"（残り）":""), px:atU(d.tp2), val:"+$"+d.tp2}); if (!L.h) rows.push({k:"tp", label:"部分利確 +$"+d.tp1+"（半分）", px:atU(d.tp1), val:"半分"}); }
+            if (d.kind === "half" && !L.h) rows.push({k:"tp", label:"部分利確 +$2（半分）", px:atU(2), val:"半分"});
+            if (L.pk > 0) rows.push({k:"tp hit", label:"ピーク（最大含み益）", px:atU(L.pk), val:"+$"+L.pk.toFixed(2)});
+            rows.push({k:"tr", label:(p.side>0?"買い建値":"売り建値"), px:p.entry, val:usd(p.margin)});
+            rows.push({k:"sl", label:"損切りライン（"+d.label+"）", px:atU(L.s), val:(L.s>=0?"+$":"-$")+Math.abs(L.s).toFixed(2)});
+            rows.push({k:"liq", label:"ロスカット", px:p.liq, val:"全損"});
+          } else if (p.trend && p.trUsd){
             const U = p.trUsd, atU = u => p.entry + p.side*u/U.q0;
             rows = [];
             rows.push({k:"tp", label:"利確 +$"+U.tp2+"（残り全部）", px:atU(U.tp2), val:"+$"+U.tp2});
@@ -1673,36 +1828,12 @@ async function fetchJson(url, opt){
           }
           return { mint:p.sym, symbol:baseOf(p.sym), side:p.side>0?"long":"short", lev:p.lev, qty:p.qty, costUsd:p.margin, valueUsd:p.margin+un, retPct:((p.realizedNet||0)+un)/m0*100, entryPx:p.entry, px:pxv, ts:p.ts, rows }; }),
         watch, trades:S.trades.slice(0,100), log:S.log.slice(0,60), errors:(S.errors||[]).slice(0,30), calendar:calendarStats(), hist:S.hist.slice(-300).map(h=>h.v), startedAt:S.startedAt,
-        ctl:[
-          {key:"mode",label:"アクティブ度",opts:MODE_OPTS,val:S.cfg.mode},
-          {key:"dir",label:"方向",opts:[{l:"両方",v:"both"},{l:"ロングのみ",v:"long"},{l:"ショートのみ",v:"short"}],val:S.cfg.dir},
-          {key:"strategy",label:"戦略",opts:[{l:"順張り",v:"momentum"},{l:"出来高急増（瞬間検知）",v:"surge"},{l:"逆張り（行き過ぎ狩り）",v:"fade"},{l:"併用（急増＋失速の両方）",v:"dual"},{l:"トレンド（4h/1h＋15分足）",v:"trend"}],val:S.cfg.strategy},
-          {key:"fadeThresh",label:"逆張りのしきい値（5分変化）",opts:ALLOW.fadeThresh.map(v=>({l:"±"+v+"%",v})),val:S.cfg.fadeThresh},
-          {key:"surgeThresh",label:"出来高急増のしきい値（通常比）",opts:ALLOW.surgeThresh.map(v=>({l:"×"+v,v})),val:S.cfg.surgeThresh},
-          {key:"lev",label:"レバレッジ",opts:ALLOW.lev.map(v=>({l:v+"x",v})),val:S.cfg.lev},
-          {key:"size",label:"1回の証拠金（評価額比）",opts:ALLOW.size.map(v=>({l:Math.round(v*100)+"%",v})),val:S.cfg.size},
-          {key:"sl",label:"損切り（価格の逆行）",opts:ALLOW.sl.map(v=>({l:v+"%",v})),val:S.cfg.sl},
-          {key:"tp",label:"MAX利確（価格の順行）",opts:ALLOW.tp.map(v=>({l:v+"%",v})),val:S.cfg.tp},
-          {key:"gate",label:"リスクゲート",opts:GATE_OPTS,val:S.cfg.gate},
-          {key:"scale",label:"リスク連動サイズ",opts:YN,val:S.cfg.scale},
-          {key:"live",label:"BingXデモへ実発注",opts:YN,val:S.cfg.live},
-          {key:"halfback",label:"資金管理: 半戻し利確（-15%で1回追加・-32%固定損切り）",opts:YN,val:S.cfg.halfback},
-          {key:"scalp",label:"資金管理: 超高速スキャルピング（$固定利確・損切り）",opts:YN,val:S.cfg.scalp},
-          {key:"scalpTp",label:"スキャルピング利確（$）",opts:ALLOW.scalpTp.map(v=>({l:"$"+v,v})),val:S.cfg.scalpTp},
-          {key:"scalpSl",label:"スキャルピング損切り（$）",opts:ALLOW.scalpSl.map(v=>({l:"$"+v,v})),val:S.cfg.scalpSl},
-          {key:"scalpHold",label:"スキャルピング保有時間上限",opts:ALLOW.scalpHold.map(v=>({l:v+"秒",v})),val:S.cfg.scalpHold},
-          {key:"trTp1",label:"トレンド: 部分利確（ポジション全体の含み益・半分を決済して損切りを建値へ）",opts:ALLOW.trTp1.map(v=>({l:"+$"+v,v})),val:S.cfg.trTp1},
-          {key:"trTp2",label:"トレンド: 残りの利確（ポジション全体の含み益）",opts:ALLOW.trTp2.map(v=>({l:"+$"+v,v})),val:S.cfg.trTp2},
-          {key:"trSl",label:"トレンド: 損切り（ポジション全体の含み損）",opts:ALLOW.trSl.map(v=>({l:"-$"+v,v})),val:S.cfg.trSl},
-          {key:"maxPos",label:"最大同時保有数",opts:ALLOW.maxPos.map(v=>({l:v+"件",v})),val:S.cfg.maxPos},
-          {key:"orphan",label:"BingXにだけあるポジションを自動決済",opts:YN,val:S.cfg.orphan},
-          {key:"timeout",label:"時間切れ決済（含み益に届かず、マイナスのまま）",opts:[{l:"OFF",v:0},{l:"30分",v:30},{l:"1時間",v:60},{l:"3時間",v:180},{l:"6時間",v:360}],val:S.cfg.timeout}
-        ],
+        ctl:[], // 設定ボタンは廃止（条件は固定、パターンと決済方式は検証結果で自動選択）
         liveNote:"実発注は、アプリのペーパーと同じ数量（"+S.cfg.lev+"x）で、接続設定のリレー経由でBingXデモ口座に送信します。リレー未設定の場合はONにできません。",
         liveAccount: S.cfg.live ? { data: liveAccount, err: liveAccountErr, updatedAt: lastLiveAccountAt } : null,
         pdca: epochStats(), sig: sigSummaryCached(),
         foot:(S.cfg.strategy==="trend"
-          ? ("戦略: トレンド（"+S.cfg.lev+"x）。4時間足と1時間足の両方で、EMA21＞EMA75＞EMA200かつ終値がEMA75より上ならロング方向（逆ならショート方向）と判定します。その向きで、15分足が確定した瞬間に、"+TR_ENTRY_PATS.map(k=>TR_PATS[k]).join("・")+"が出ていれば入ります（他のパターンは検証のため記録だけ続けます）。対象は24時間売買代金$5M以上の銘柄です。資金管理（金額はポジション全体の含み損益）: +$"+S.cfg.trTp1+"に届いたら半分を利確し、損切りを建値（手数料ぶん有利側）へ移動。残りは+$"+Math.max(S.cfg.trTp2,S.cfg.trTp1+0.5)+"で利確。損切りは-$"+S.cfg.trSl+"。利確・損切りの注文はBingX側にも置きます。時間のルール：1時間たっても一度も+1%に届かなければ決済、その後は1時間ごとに損益を計測し、前回も今回もマイナスで今回が前回より5%以上悪化していたら決済します。手数料は片道"+(FEEF()*100).toFixed(3)+"%で概算。実際の取引所とは異なり、この戦略に優位性があるとは限りません。")
+          ? ("戦略: トレンド（"+S.cfg.lev+"x・証拠金は評価額の"+Math.round(S.cfg.size*100)+"%・実発注"+(S.cfg.live?"ON":"OFF")+"）。4時間足と1時間足の両方で、EMA21＞EMA75＞EMA200かつ終値がEMA75より上ならロング方向（逆ならショート方向）と判定し、その向きで15分足が確定した瞬間にパターンが出たら入ります。設定ボタンは廃止し、どのパターンで入るか・どの決済方式を使うかは、検証結果から30分ごとに自動で選びます（基準は1回あたりの期待値。勝率は参考）。全パターン・全決済方式の検証は、採用・不採用に関係なく続けます。対象は24時間売買代金$5M以上の銘柄です。手数料は片道"+(FEEF()*100).toFixed(3)+"%で概算。実際の取引所とは異なり、この戦略に優位性があるとは限りません。")
           : S.cfg.halfback
           ? ("資金管理: 半戻し利確（固定ルール・"+S.cfg.lev+"x）。出来高急増を検知した瞬間にその方向へ乗ります。証拠金維持率-"+HB_ADD+"%まで逆行したら、初期と同じサイズを1回だけ追加します。損切りラインは、初回エントリー時点を基準に証拠金維持率-"+HB_SL+"%の位置に固定し、追加しても動きません。利確は、その時点までの最高値（安値）を記録し、そこから伸びた分の半分まで戻ってきた時点で、残り全部を利確します。回転重視のため保有時間の上限はありません。手数料は片道"+(FEEF()*100).toFixed(3)+"%、強制ロスカットは維持証拠金率0.5%で概算。実際の取引所の約定・ロスカットとは異なります。")
           : S.cfg.scalp
@@ -1751,7 +1882,7 @@ async function fetchJson(url, opt){
       else if (c==="closeOne" && b.mint){ const p = S.positions.find(x=>x.sym===b.mint); if (p) closePos(p,"手動クローズ"); }
       else if (c==="reset"){ const cfg = S.cfg; S = fresh(); S.cfg = cfg; noteEpoch(); addLog("SYS","セッションをリセット（ペーパー）"); }
       else if (c==="sigReset"){ sigResetAll(); tsigResetAll(); addLog("SYS","シグナル検証の記録をリセット（トレンド戦略の記録も含む）"); }
-      else if (c==="cfg" && b.cfg){
+      else if (c==="cfg" && b.cfg && false){ // 設定ボタンは廃止
         let changed = false;
         for (const k of Object.keys(b.cfg)) if (ALLOW[k] && ALLOW[k].includes(b.cfg[k])){
           if (k==="live" && b.cfg[k]===true && (!RELAY_URL || !RELAY_TOKEN)){ addLog("SYS","実発注をONにするには、接続設定でリレーURLとトークンを入力してください。",true); continue; }
