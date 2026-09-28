@@ -1370,14 +1370,136 @@ async function fetchJson(url, opt){
       for (const pk of Object.keys(TR_PATS)) for (const [g, gl] of H_GROUPS){
         const all = hCalc(acc, pk, g, [0,1]); if (!all || all.n < 15) continue;
         const a = hCalc(acc, pk, g, [0]), b = hCalc(acc, pk, g, [1]);
-        const ok = all.n >= 60 && !!a && !!b && a.n >= 20 && b.n >= 20 && all.xl > 0 && a.xl > 0 && b.xl > 0 && all.cil != null && all.xl - all.cil > 0; // 前後半ともプラスで、誤差の幅を引いてもプラス
+        const ok = all.n >= 60 && !!a && !!b && a.n >= 20 && b.n >= 20 && all.xl > 0 && a.xl > 0 && b.xl > 0 && all.cil != null && all.xl - all.cil*(3.5/1.96) > 0; // 前後半ともプラスで、誤差の幅の約1.8倍（3.5σ）を引いてもプラス（通常の95%の幅では、効果のない相場でも偽の✅が出やすいため）
         tested++; if (ok) okN++; rows.push({pat:pk, label:TR_PATS[pk], g, gl, all, a, b, ok});
       }
       const bm = d => { const a = acc["B|"+d+"|all"]; if (!a) return null; let n = 0, s1 = 0, s4 = 0, s24 = 0; for (const h of [0,1]){ n += a[h].n; s1 += a[h].s1; s4 += a[h].s4; s24 += a[h].s24; } return n ? {n, f1:s1/n - H_COST, f4:s4/n - H_COST, f24:s24/n - H_COST} : null; };
       return {progress:{done:doneN, total:H_TOP, complete:H.complete, ready, since:H.since, doneAt:H.doneAt}, ready, market:{long:bm(1), short:bm(-1)}, rows, tested, okN,
-        note:"過去約"+H_DAYS+"日分の15分足（各パターンが出た直後の終値で入った場合）。「ランダム入り」は、同じ向き・同じトレンド条件で、2時間おきに入った場合の平均。「差」＝パターンの値 − ランダム入り。手数料は往復0.15%（$160換算で$0.24）。段階式$2は15分足で再現するため、5分足の検証より厳しめに出ます。✅＝60件以上で、前半・後半とも段階式$2の差がプラスで、誤差の幅を引いてもプラス。ただし条件を多く試すほど偶然の✅も混ざります（何も効果がない値動きでも、1〜2通りは出ます）"};
+        note:"過去約"+H_DAYS+"日分の15分足（各パターンが出た直後の終値で入った場合）。「ランダム入り」は、同じ向き・同じトレンド条件で、2時間おきに入った場合の平均。「差」＝パターンの値 − ランダム入り。手数料は往復0.15%（$160換算で$0.24）。段階式$2は15分足で再現するため、5分足の検証より厳しめに出ます。✅＝60件以上で、前半・後半とも段階式$2の差がプラスで、誤差の幅の約1.8倍（3.5σ）を引いてもプラス。ただし条件を多く試すほど偶然の✅も混ざります"};
     }
     function histCached(now){ if (!hCache || now - hCacheAt > 60000){ try{ hCache = hSummary(now); }catch(err){ hCache = {err:err.message}; } hCacheAt = now; } return hCache; }
+
+    // ============================================================
+    // 日足トレンドフォロー検証：数日〜数週間持つ手法（手数料の影響が小さい）を、過去最大約4年分の日足で検証する
+    // 売買はしない（検証のみ）。各時点で確定していた足だけで判断し、シグナルの翌日の始値で入る
+    // 同じ向き・同じトレンド条件で、ランダムな日に入った場合（基準）と同じ決済ルールで比べる
+    // ============================================================
+    const DKEY = "trenchdesk_dtf_v1", D_VER = 1, D_TOP = 60, D_STEP_MS = 12000, D_BASE_GAP = 7, D_COST = 0.15, D_FUND = 0.03, D_WARM = 210, D_MINBARS = 420, D_NOM = 1.6, D_Z = 3.5; // ✅の誤差の基準は3.5σ（何も効果がないランダムな相場で、偽の✅が出る確率を約5%に抑えるため。通常の95%の幅では約55%出てしまった）
+    const D_ENTRIES = [{key:"b20", n:20, l:"20日高値ブレイク"}, {key:"b55", n:55, l:"55日高値ブレイク"}];
+    const D_FILTERS = [{key:"nf", l:"トレンド条件なし"}, {key:"ef", l:"EMA50＞EMA200のときだけ"}];
+    const D_EXITS = [{key:"a2", kind:"atr", a:2, l:"ATR2本分のトレーリング"}, {key:"a3", kind:"atr", a:3, l:"ATR3本分のトレーリング"}, {key:"a4", kind:"atr", a:4, l:"ATR4本分のトレーリング"},
+      {key:"d10", kind:"don", m:10, l:"10日安値割れで決済"}, {key:"d20", kind:"don", m:20, l:"20日安値割れで決済"}];
+    let DT = {acc:{}, done:{}, since:0, complete:false, doneAt:0, prev:null, from:0, to:0}, dBusy = false, dLastAt = 0, dCache = null, dCacheAt = 0, dErrLogged = false;
+    try{ const j = JSON.parse(store.get(DKEY) || "null"); if (j && j.acc && j.ver === D_VER) DT = Object.assign(DT, j); }catch(_){}
+    DT.ver = D_VER;
+    function dSave(){ store.set(DKEY, JSON.stringify(DT)); }
+    function dPrep(cs){
+      const n = cs.length, o = cs.map(x=>x.o), h = cs.map(x=>x.h), l = cs.map(x=>x.l), c = cs.map(x=>x.c), t = cs.map(x=>x.t);
+      const e50 = emaSeries(cs,50), e200 = emaSeries(cs,200), atr = new Array(n).fill(0), tr = new Array(n);
+      tr[0] = h[0]-l[0]; for (let i=1;i<n;i++) tr[i] = Math.max(h[i]-l[i], Math.abs(h[i]-c[i-1]), Math.abs(l[i]-c[i-1]));
+      let s = 0; for (let i=0;i<n;i++){ s += tr[i]; if (i >= 14) s -= tr[i-14]; if (i >= 13) atr[i] = s/14; }
+      const hh = {}, ll = {}; // hh[m][i]＝直近m本（当日を除く）の最高値、ll[m][i]＝最安値
+      for (const m of [10,20,55]){ hh[m] = new Array(n).fill(NaN); ll[m] = new Array(n).fill(NaN);
+        for (let i=m;i<n;i++){ let a = -Infinity, b = Infinity; for (let k=i-m;k<i;k++){ if (h[k] > a) a = h[k]; if (l[k] < b) b = l[k]; } hh[m][i] = a; ll[m][i] = b; } }
+      return {n,o,h,l,c,t,e50,e200,atr,hh,ll};
+    }
+    // 1回分の売買を再現する。eの始値で入り、その日以降のストップを毎日判定（同じ日の中では不利な側が先に動いたと仮定＝厳しめ）
+    function dTrade(D, e, dir, ex){
+      const n = D.n, entry = D.o[e], atr0 = D.atr[e-1]; if (!(atr0 > 0) || !(entry > 0)) return null;
+      const a0 = ex.kind === "atr" ? ex.a : 3, risk = a0*atr0/entry*100;
+      let stop = dir > 0 ? entry - a0*atr0 : entry + a0*atr0, ext = entry;
+      for (let j=e;j<n;j++){
+        let lvl = stop;
+        if (ex.kind === "don"){ const dl = dir > 0 ? D.ll[ex.m][j] : D.hh[ex.m][j]; if (dl === dl) lvl = dir > 0 ? Math.max(lvl, dl) : Math.min(lvl, dl); }
+        if (dir > 0 ? D.l[j] <= lvl : D.h[j] >= lvl){
+          const px = (dir > 0 ? D.o[j] <= lvl : D.o[j] >= lvl) ? D.o[j] : lvl, days = j - e + 1;
+          const net = dir*(px/entry-1)*100 - D_COST - (dir > 0 ? D_FUND*days : 0); // ロングだけ資金調達率のコストを引く（ショートは受け取りを見込まない＝保守的）
+          return {e, ex:j, net, days, r:net/risk};
+        }
+        if (dir > 0) ext = Math.max(ext, D.h[j]); else ext = Math.min(ext, D.l[j]);
+        if (ex.kind === "atr"){ const ns = dir > 0 ? ext - a0*D.atr[j] : ext + a0*D.atr[j]; stop = dir > 0 ? Math.max(stop, ns) : Math.min(stop, ns); }
+      }
+      return null; // まだ決済されていない取引は、成績に入れない
+    }
+    function dAdd(key, half, year, sym, tr){
+      let a = DT.acc[key]; if (!a) a = DT.acc[key] = {h:[{n:0,s:0,q:0,w:0,sw:0,sl:0,sr:0,sd:0},{n:0,s:0,q:0,w:0,sw:0,sl:0,sr:0,sd:0}], y:{}, sym:{}};
+      const x = a.h[half]; x.n++; x.s += tr.net; x.q += tr.net*tr.net; if (tr.net > 0){ x.w++; x.sw += tr.net; } else x.sl += tr.net; x.sr += tr.r; x.sd += tr.days;
+      const yy = a.y[year] || (a.y[year] = [0,0]); yy[0]++; yy[1] += tr.net;
+      if (sym){ const ss = a.sym[sym] || (a.sym[sym] = [0,0]); ss[0]++; ss[1] += tr.net; }
+    }
+    function dProcess(sym, cs){
+      const D = dPrep(cs), n = D.n, mid = Math.floor((D_WARM + n)/2); let off = 0; for (let i=0;i<sym.length;i++) off += sym.charCodeAt(i); off %= D_BASE_GAP;
+      const yearOf = e => new Date(D.t[e]).getUTCFullYear(); let cnt = 0;
+      // 市場全体（買い持ち）の年別の値動き（相場の局面を見るため）
+      { const M = DT.acc.M || (DT.acc.M = {}); const by = {}; for (let i=0;i<n;i++){ const y = yearOf(i); (by[y] || (by[y] = [i,i]))[1] = i; }
+        for (const y in by){ const a = by[y][0], b = by[y][1]; if (b - a + 1 >= 90){ const m = M[y] || (M[y] = [0,0]); m[0]++; m[1] += (D.c[b]/D.o[a]-1)*100; } } }
+      if (!DT.from || D.t[0] < DT.from) DT.from = D.t[0]; if (D.t[n-1] > DT.to) DT.to = D.t[n-1];
+      for (const en of D_ENTRIES) for (const fl of D_FILTERS) for (const dir of [1,-1]) for (const ex of D_EXITS){
+        const key = "E|"+en.key+"|"+fl.key+"|"+ex.key+"|"+dir; let i = D_WARM;
+        while (i < n-2){
+          const sig = dir > 0 ? D.c[i] > D.hh[en.n][i] : D.c[i] < D.ll[en.n][i];
+          const trendOK = fl.key === "nf" || (dir > 0 ? D.e50[i] > D.e200[i] : D.e50[i] < D.e200[i]);
+          if (sig && trendOK){ const tr = dTrade(D, i+1, dir, ex); if (!tr) break; dAdd(key, tr.e < mid ? 0 : 1, yearOf(tr.e), sym, tr); cnt++; i = tr.ex; } else i++;
+        }
+      }
+      // 基準：同じ向き・同じトレンド条件で、1週間おきの日に入った場合（パターンのない、ただの入り方）
+      for (const fl of D_FILTERS) for (const dir of [1,-1]) for (const ex of D_EXITS){
+        const key = "B|"+fl.key+"|"+ex.key+"|"+dir; let i = D_WARM + off;
+        while (i < n-2){
+          const trendOK = fl.key === "nf" || (dir > 0 ? D.e50[i] > D.e200[i] : D.e50[i] < D.e200[i]);
+          if (trendOK){ const tr = dTrade(D, i+1, dir, ex); if (!tr) break; dAdd(key, tr.e < mid ? 0 : 1, yearOf(tr.e), null, tr); i = tr.ex + ((off - (tr.ex % D_BASE_GAP) + D_BASE_GAP) % D_BASE_GAP); } else i += D_BASE_GAP;
+        }
+      }
+      return cnt;
+    }
+    async function dStep(now){
+      if (dBusy) return; const cur15 = Math.floor(now/TF.m15)*TF.m15;
+      if (now < cur15 + 6*60000 || now - dLastAt < D_STEP_MS) return;
+      if (!DT.since) DT.since = now;
+      if (DT.complete && now - DT.since > 24*3600e3){ DT.prev = {acc:DT.acc, from:DT.from, to:DT.to, doneAt:DT.doneAt}; DT.acc = {}; DT.done = {}; DT.complete = false; DT.since = now; DT.from = 0; DT.to = 0; dSave(); }
+      if (DT.complete) return;
+      const uni = [...tokens.values()].filter(t => t.px > 0 && t.turn >= TR_MIN_TURN).sort((a,b) => b.turn - a.turn).slice(0, D_TOP).map(t => t.sym);
+      const next = uni.find(s => DT.done[s] == null);
+      if (!next){ if (uni.length >= 10){ DT.complete = true; DT.doneAt = now; DT.prev = null; dSave(); addLog("SYS","日足トレンドフォローの検証が完了しました（"+Object.keys(DT.done).length+"銘柄）", true); } return; }
+      dBusy = true; dLastAt = now;
+      try{
+        const cs = await fetchTfBack(baseOf(next), "1d", TF.d1, 1400, Date.now());
+        let cnt = -1; if (cs.length >= D_MINBARS) cnt = dProcess(next, cs);
+        DT.done[next] = cnt; dSave(); dCache = null; dErrLogged = false;
+      }catch(err){
+        dLastAt = now + 30000;
+        if (!dErrLogged){ dErrLogged = true; addLog("SYS","日足検証のデータ取得に失敗（自動でやり直します）: "+err.message, true); }
+      } finally { dBusy = false; }
+    }
+    function dMerge(a, hs){ const o = {n:0,s:0,q:0,w:0,sw:0,sl:0,sr:0,sd:0}; if (!a) return o; for (const h of hs) for (const k in o) o[k] += a.h[h][k]; return o; }
+    function dStat(m){
+      if (!m.n) return null; const mean = m.s/m.n, ln = m.n - m.w;
+      return {n:m.n, mean, win:Math.round(m.w/m.n*100), aw:m.w ? m.sw/m.w : null, al:ln ? m.sl/ln : null, pf:m.sl < 0 ? m.sw/-m.sl : null, r:m.sr/m.n, days:m.sd/m.n};
+    }
+    function dCi(a){ // 銘柄ごとに固まって動くので、銘柄単位でまとめた誤差の幅
+      if (!a) return null; let N = 0, S = 0; for (const k in a.sym){ N += a.sym[k][0]; S += a.sym[k][1]; } if (N < 2) return null;
+      const mu = S/N; let ss = 0; for (const k in a.sym){ const d = a.sym[k][1] - a.sym[k][0]*mu; ss += d*d; } return 1.96*Math.sqrt(ss)/N;
+    }
+    function dSummary(now){
+      const acc = DT.complete ? DT.acc : (DT.prev ? DT.prev.acc : DT.acc), ready = !!(DT.complete || DT.prev), rows = [];
+      for (const en of D_ENTRIES) for (const fl of D_FILTERS) for (const ex of D_EXITS) for (const dir of [1,-1]){
+        const a = acc["E|"+en.key+"|"+fl.key+"|"+ex.key+"|"+dir], b = acc["B|"+fl.key+"|"+ex.key+"|"+dir];
+        const all = dStat(dMerge(a,[0,1])); if (!all) continue;
+        const sa = dStat(dMerge(a,[0])), sb = dStat(dMerge(a,[1])), ba = dStat(dMerge(b,[0,1])), bA = dStat(dMerge(b,[0])), bB = dStat(dMerge(b,[1])), ci = dCi(a);
+        const x = ba ? all.mean - ba.mean : null, xA = sa && bA ? sa.mean - bA.mean : null, xB = sb && bB ? sb.mean - bB.mean : null;
+        const ok = all.n >= 100 && all.mean > 0 && ci != null && all.mean - ci*(D_Z/1.96) > 0 && xA != null && xB != null && xA > 0 && xB > 0 && sa.n >= 30 && sb.n >= 30;
+        const yrs = Object.keys(a.y).sort().map(y => ({y, n:a.y[y][0], mean:a.y[y][1]/a.y[y][0]}));
+        rows.push({label:en.l+"×"+fl.l+"×"+ex.l+"・"+(dir > 0 ? "ロング" : "ショート"), dir, all, ci, base:ba ? ba.mean : null, x, a:sa, b:sb, xA, xB, ok, yrs});
+      }
+      const byMean = rows.slice().sort((p,q) => q.all.mean - p.all.mean);
+      const wf = rows.filter(r => r.a && r.a.n >= 30 && r.b).sort((p,q) => q.a.mean - p.a.mean).slice(0,5);
+      const mk = acc.M ? Object.keys(acc.M).sort().map(y => ({y, n:acc.M[y][0], mean:acc.M[y][1]/acc.M[y][0]})) : [];
+      const top3 = byMean.filter(r => r.all.n >= 100).slice(0,3);
+      return {ready, progress:{done:Object.keys(DT.done).length, total:D_TOP, complete:DT.complete, doneAt:DT.doneAt}, from:DT.complete || !DT.prev ? DT.from : DT.prev.from, to:DT.complete || !DT.prev ? DT.to : DT.prev.to,
+        rows:byMean, wf, mk, top3, okN:rows.filter(r => r.ok).length, tested:rows.length,
+        note:"日足（UTC0時=日本時間9時に確定）。シグナルが出た日の終値で判断し、翌日の始値で入る。1銘柄につき同時に1ポジション。損益は往復手数料等0.15%＋ロングは資金調達率0.03%/日を引いた後（ショートは資金調達の受け取りを見込まない）。$は基準ポジション$160換算。「ランダム入り」＝同じ向き・同じトレンド条件で、1週間おきの日に入り、同じ決済ルールで手仕舞った場合。✅＝100件以上・手数料後でプラス・誤差の幅（銘柄単位）の約1.8倍（3.5σ）を引いてもプラス・前半後半ともランダム入りより良い（効果のないランダムな相場で、✅が1つでも出る確率を約5%に抑えた基準）。注意：①今の売買代金上位の銘柄だけを使うので、上場廃止・低迷した銘柄が入らず、ロングに有利に出ます（生存者バイアス）②暗号資産は同じ方向に動きやすく、独立した件数は見かけより少ない ③"+D_ENTRIES.length*D_FILTERS.length*D_EXITS.length*2+"通りを試すので、偶然の✅も混ざります"};
+    }
+    function dtfCached(now){ if (!dCache || now - dCacheAt > 60000){ try{ dCache = dSummary(now); }catch(err){ dCache = {err:err.message}; } dCacheAt = now; } return dCache; }
 
     async function pollTickers(){
       const rows = src === "bingx" ? await fetchBingx() : await fetchBybit();
@@ -2152,6 +2274,7 @@ async function fetchJson(url, opt){
       try{ out.trend = tsigSummary(); }catch(_){ out.trend = null; }
       out.opt = optCached(Date.now());
       try{ out.hist = histCached(Date.now()); }catch(_){ out.hist = null; }
+      try{ out.dtf = dtfCached(Date.now()); }catch(_){ out.dtf = null; }
       try{ out.fs = Object.assign({}, fsCached(Date.now()), {live:fsRows.map(r => Object.assign({}, r, {sym:baseOf(r.sym), name:r.st ? FS_STATES[r.st] : "–"}))}); }catch(_){ out.fs = null; }
       return out;
     }
@@ -2201,6 +2324,7 @@ async function fetchJson(url, opt){
       try{ txStep(now); }catch(_){}
       fsStep(now).catch(()=>{});
       hStep(now).catch(()=>{});
+      dStep(now).catch(()=>{});
       if (now - REG.at >= 60000){ let up = 0, dn = 0; for (const s of Object.keys(CDL)){ const d = bigTrend(s); if (d>0) up++; else if (d<0) dn++; } REG = {up, dn, at:now}; }
       if (now - (S.auto.checkedAt||0) >= AUTO_EVERY && TSIG.done.length + TSIG.pending.length > 0){ try{ autoSelect(now); }catch(err){ S.auto.checkedAt = now; addLog("SYS","自動選択の計算に失敗: "+err.message,true); } }
       for (const p of [...S.positions]){
