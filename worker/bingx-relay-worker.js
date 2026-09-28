@@ -118,6 +118,19 @@ async function route(req, env) {
         return json({ demo: isDemo, result: data }, r.ok ? 200 : r.status);
       }
 
+      // 先物×現物の監視用（公開データ・署名不要。常に本番市場から取得）
+      if (req.method === "GET" && ["/market/spot-ticker","/market/spot-trades","/market/trades","/market/oi"].includes(u.pathname)) {
+        const symbol = u.searchParams.get("symbol"), limit = u.searchParams.get("limit") || "100";
+        const P = {"/market/spot-ticker":"/openApi/spot/v1/ticker/24hr", "/market/spot-trades":"/openApi/spot/v1/market/trades", "/market/trades":"/openApi/swap/v2/quote/trades", "/market/oi":"/openApi/swap/v2/quote/openInterest"}[u.pathname];
+        let qs = "?timestamp=" + Date.now();
+        if (u.pathname !== "/market/spot-ticker"){ if (!symbol) return json({ error: "symbol is required" }, 400); qs += "&symbol=" + encodeURIComponent(toBingxSymbol(symbol)); }
+        if (u.pathname === "/market/spot-trades" || u.pathname === "/market/trades") qs += "&limit=" + encodeURIComponent(limit);
+        const r = await fetch(MARKET_BASE + P + qs);
+        const text = await r.text();
+        let data; try { data = JSON.parse(text); } catch (_) { data = { raw: text }; }
+        return json({ demo: isDemo, result: data }, r.ok ? 200 : r.status);
+      }
+
       if (req.method === "GET" && u.pathname === "/balance") {
         const r = await bingxRequest(env, "GET", "/openApi/swap/v2/user/balance");
         return json({ demo: isDemo, result: r });
@@ -1041,6 +1054,206 @@ async function fetchJson(url, opt){
     }
     function optCached(now){ if (!OPT || now - optAt > 30*60000){ try{ OPT = optSummary(now); }catch(err){ OPT = {err:err.message}; } optAt = now; } return OPT; }
 
+    // ============================================================
+    // 先物×現物の監視（売買代金上位30銘柄）
+    // 先物と現物の「価格」は裁定取引でほぼ同じに動くので、買われている・売られているは「成行の買い・売りの比率」で判定する
+    // ①先物加熱・現物売られる（上昇傾向）②先物加熱・現物加熱（上昇傾向）③先物売られる・現物買われる（方向不明）④先物売られる・現物売られる（下落傾向）
+    // ============================================================
+    const FS_TOP = 30, FS_TRADE_PER_POLL = 2, FS_BUY_HI = 0.55, FS_BUY_LO = 0.45, FS_VR = 1.5, FS_BARS = 120;
+    const FS_STATES = {1:"①先物加熱・現物売られる", 2:"②先物加熱・現物加熱", 3:"③先物売られる・現物買われる", 4:"④先物売られる・現物売られる"};
+    const FS_BIAS = {1:1, 2:1, 3:0, 4:-1};
+    const SPOT = new Map();        // 現物: sym -> {samples:[{t,px,qv}], px, qv}
+    const FLOW = new Map();        // sym -> {fb, sb, fq, sq, at, oi:[{t,v}], st, stAt, stSince, dipAt}
+    let fsRot = 0, fsOiRot = 0, fsTop = [];
+    async function fsPollSpot(){
+      const j = await relay("/market/spot-ticker"); const d = j && j.result && j.result.data;
+      const now = Date.now();
+      for (const o of (Array.isArray(d) ? d : [])){
+        if (!o || !o.symbol || !/-USDT$/.test(o.symbol)) continue;
+        const px = parseFloat(o.lastPrice), qv = parseFloat(o.quoteVolume != null ? o.quoteVolume : (parseFloat(o.volume)||0)*px);
+        if (!(px > 0) || !isFinite(qv)) continue;
+        let s = SPOT.get(o.symbol); if (!s){ s = {samples:[]}; SPOT.set(o.symbol, s); }
+        s.px = px; s.qv = qv; s.samples.push({t:now, px, qv}); if (s.samples.length > 200) s.samples.shift();
+      }
+    }
+    // 直近の約定から、成行の買いの比率（金額ベース）を出す。buyerMaker=true は「買い手が指値側」＝成行の売り
+    function buyShareOf(list, now){
+      let b = 0, tot = 0, n = 0;
+      for (const x of (Array.isArray(list) ? list : [])){
+        const tm = +(x.time || x.T || 0); if (tm && now - tm > 300000) continue; // 直近5分
+        const q = parseFloat(x.quoteQty != null ? x.quoteQty : (parseFloat(x.qty)||0)*(parseFloat(x.price)||0)); if (!(q > 0)) continue;
+        const bm = x.buyerMaker != null ? x.buyerMaker : x.isBuyerMaker; const maker = bm === true || bm === "true";
+        tot += q; n++; if (!maker) b += q;
+      }
+      return n >= 5 ? {share:b/tot, n, q:tot} : null;
+    }
+    async function fsPollFlows(now){
+      // 対象：先物の売買代金上位30で、現物もある銘柄
+      fsTop = [...tokens.values()].filter(t => t.px > 0 && SPOT.has(t.sym) && CDL[t.sym]).sort((a,b) => b.turn - a.turn).slice(0, FS_TOP).map(t => t.sym);
+      if (!fsTop.length) return;
+      const jobs = [];
+      for (let i=0;i<FS_TRADE_PER_POLL;i++){
+        const sym = fsTop[(fsRot++) % fsTop.length], base = baseOf(sym);
+        jobs.push(Promise.all([relay("/market/trades?symbol="+base+"USDT&limit=500").catch(()=>null), relay("/market/spot-trades?symbol="+base+"USDT&limit=100").catch(()=>null)]).then(([fj, sj]) => {
+          const f = buyShareOf(fj && fj.result && fj.result.data, Date.now()), sp = buyShareOf(sj && sj.result && sj.result.data, Date.now());
+          let x = FLOW.get(sym); if (!x){ x = {oi:[]}; FLOW.set(sym, x); }
+          x.fb = f ? f.share : null; x.fn = f ? f.n : 0; x.sb = sp ? sp.share : null; x.sn = sp ? sp.n : 0; x.at = Date.now();
+        }));
+      }
+      { const sym = fsTop[(fsOiRot++) % fsTop.length], base = baseOf(sym); // 建玉は1回に1銘柄ずつ
+        jobs.push(relay("/market/oi?symbol="+base+"USDT").then(j => { const d = j && j.result && j.result.data; const v = parseFloat(d && (d.openInterest != null ? d.openInterest : d.oi));
+          if (v > 0){ let x = FLOW.get(sym); if (!x){ x = {oi:[]}; FLOW.set(sym, x); } x.oi.push({t:Date.now(), v}); if (x.oi.length > 12) x.oi.shift(); } }).catch(()=>{})); }
+      await Promise.all(jobs);
+    }
+    function spotRet(s, sec){ const sm = s.samples, n = sm.length; if (n < 2) return null; const nowT = sm[n-1].t; let ref = null;
+      for (let i=n-1;i>=0;i--) if (sm[i].t <= nowT - sec*1000){ ref = sm[i]; break; } if (!ref) return null; return (sm[n-1].px/ref.px - 1)*100; }
+    function volRate(sm, key, sec, day){ const n = sm.length; if (n < 2 || !(day > 0)) return null; const nowT = sm[n-1].t; let ref = null;
+      for (let i=n-1;i>=0;i--) if (sm[i].t <= nowT - sec*1000){ ref = sm[i]; break; } if (!ref) return null;
+      const dv = Math.max(0, sm[n-1][key] - ref[key]), dt = Math.max(1, (nowT - ref.t)/1000); return (dv/dt)/(day/86400); }
+    function fsRow(sym, now){ // その銘柄の今の状態と数値
+      const t = tokens.get(sym), s = SPOT.get(sym), x = FLOW.get(sym) || {}; if (!t || !s) return null;
+      const m = metricsOf(t), fvr = volRate(t.samples, "turn", 300, t.turn), svr = volRate(s.samples, "qv", 300, s.qv);
+      const oi = x.oi || [], oiChg = oi.length >= 2 && oi[0].v > 0 ? (oi[oi.length-1].v/oi[0].v - 1)*100 : null;
+      const fresh = x.at && now - x.at < 240000;
+      let st = 0;
+      if (fresh && x.fb != null && x.sb != null && fvr != null){
+        const fHeat = x.fb >= FS_BUY_HI && fvr >= FS_VR, fSold = x.fb <= FS_BUY_LO && fvr >= FS_VR, sBuy = x.sb >= FS_BUY_HI, sSell = x.sb <= FS_BUY_LO;
+        st = fHeat && sSell ? 1 : fHeat && sBuy ? 2 : fSold && sBuy ? 3 : fSold && sSell ? 4 : 0;
+      }
+      const r = v => v == null ? null : +v.toFixed(3);
+      return {sym, st, fb:r(x.fb), sb:r(x.sb), fvr:r(fvr), svr:r(svr), fr1:r(m.r1), fr5:r(m.r5), fr15:r(m.r15), sr5:r(spotRet(s,300)), oi:r(oiChg), fr:r(t.fr*100), prem:s.px > 0 ? r((t.px/s.px - 1)*100) : null, fresh:!!fresh};
+    }
+    // ---- 記録（状態に入った瞬間と、その方向への急な押し目・戻り）。値動きは1分ごとに2時間 ----
+    const FSKEY = "trenchdesk_fs_v1", FS_CHUNK = 400, FS_MAX_PENDING = 3000, FS_MAX_DONE = 6000;
+    let FSR = {pending:[], done:[]}, FSQ = {seq:0, saved:0, pn:0}, fsDirty = false, fsSavedAt = 0, FSOPT = null, fsOptAt = 0;
+    try{ const m = JSON.parse(store.get(FSKEY) || "null");
+      if (m && typeof m.seq === "number"){ FSQ = {seq:m.seq, saved:m.seq, pn:m.pn||0};
+        for (let i=0;i<FSQ.pn;i++){ try{ for (const r of JSON.parse(store.get(FSKEY+"_p"+i) || "[]")) FSR.pending.push(r); }catch(_){} }
+        for (let c=Math.floor((m.n0||0)/FS_CHUNK); c<=Math.floor((m.seq-1)/FS_CHUNK); c++){ try{ for (const r of JSON.parse(store.get(FSKEY+"_d"+c) || "[]")) if (r.q >= (m.n0||0)) FSR.done.push(r); }catch(_){} } } }catch(_){}
+    function fsSave(){
+      const newPn = Math.ceil(FSR.pending.length/FS_CHUNK);
+      for (let i=0;i<newPn;i++) store.set(FSKEY+"_p"+i, JSON.stringify(FSR.pending.slice(i*FS_CHUNK,(i+1)*FS_CHUNK)));
+      for (let i=newPn;i<FSQ.pn;i++) store.set(FSKEY+"_p"+i, "");
+      FSQ.pn = newPn;
+      const n0 = FSR.done.length ? FSR.done[0].q : FSQ.seq;
+      for (let c=Math.max(Math.floor(n0/FS_CHUNK), Math.floor(FSQ.saved/FS_CHUNK)); c<=Math.floor((FSQ.seq-1)/FS_CHUNK); c++)
+        store.set(FSKEY+"_d"+c, JSON.stringify(FSR.done.filter(r => Math.floor(r.q/FS_CHUNK) === c)));
+      FSQ.saved = FSQ.seq; store.set(FSKEY, JSON.stringify({seq:FSQ.seq, n0, pn:FSQ.pn}));
+    }
+    function fsResetAll(){
+      const n0 = FSR.done.length ? FSR.done[0].q : FSQ.seq;
+      for (let c=Math.floor(n0/FS_CHUNK); c<=Math.floor((FSQ.seq-1)/FS_CHUNK); c++) store.set(FSKEY+"_d"+c, "");
+      for (let i=0;i<FSQ.pn;i++) store.set(FSKEY+"_p"+i, "");
+      FSR = {pending:[], done:[]}; FSQ = {seq:0, saved:0, pn:0}; FSOPT = null; store.set(FSKEY, JSON.stringify({seq:0, n0:0, pn:0}));
+    }
+    function fsPush(kind, now, row, t, extra){
+      if (FSR.pending.length >= FS_MAX_PENDING) return;
+      const sp = t.bid>0 && t.ask>0 ? (t.ask-t.bid)/t.px*100 : 0;
+      FSR.pending.push(Object.assign({k:kind, t:now, sym:row.sym, st:row.st, b:FS_BIAS[row.st], p0:t.px, m:{sp:+sp.toFixed(3)},
+        x:{fb:row.fb, sb:row.sb, fvr:row.fvr, svr:row.svr, fr1:row.fr1, fr5:row.fr5, fr15:row.fr15, sr5:row.sr5, oi:row.oi, fr:row.fr, prem:row.prem}, pth:[], bh:0, bl:0, f:{}}, extra||{}));
+      fsDirty = true;
+    }
+    let fsRows = [];
+    let fsBusy = false;
+    async function fsStep(now){
+      if (fsBusy) return; fsBusy = true;
+      try{ await fsStepInner(now); } finally { fsBusy = false; }
+    }
+    async function fsStepInner(now){
+      try{ await fsPollSpot(); }catch(_){}
+      try{ await fsPollFlows(now); }catch(_){}
+      fsRows = fsTop.map(sym => fsRow(sym, now)).filter(Boolean);
+      for (const row of fsRows){
+        const x = FLOW.get(row.sym) || {}, t = tokens.get(row.sym); if (!t) continue;
+        // 状態に入った瞬間を記録（同じ状態は15分に1回まで）
+        if (row.st && row.st !== x.st){
+          if (!x.lastRec || x.lastRec[row.st] == null || now - x.lastRec[row.st] >= 15*60000){ fsPush("st", now, row, t); x.lastRec = x.lastRec || {}; x.lastRec[row.st] = now; }
+          x.stSince = now;
+        }
+        if (row.st) { x.st = row.st; x.stAt = now; } else if (x.st && now - (x.stAt||0) > 60*60000) x.st = 0;
+        FLOW.set(row.sym, x);
+        // 方向のある状態（①②④）に入ってから60分以内の、方向と逆向きの急な動き＝押し目・戻り
+        const bias = x.st && now - (x.stAt||0) <= 60*60000 ? FS_BIAS[x.st] : 0;
+        if (bias && (!x.dipAt || now - x.dipAt >= 5*60000)){
+          const c = CDL[row.sym]; const atr = c && c.m15 && c.m15.length > 20 ? atrOf(c.m15,14) : null, cl = c && c.m15.length ? c.m15[c.m15.length-1].c : 0;
+          if (atr > 0 && cl > 0 && row.fr1 != null && row.fr5 != null){
+            const atrP = atr/cl*100, k1 = -bias*row.fr1/(atrP/Math.sqrt(15)), k5 = -bias*row.fr5/(atrP/Math.sqrt(3)); // 1分・5分の「普段の値幅」を15分足ATRから換算
+            if (k1 >= 1.5 || k5 >= 1.0){ x.dipAt = now; fsPush("dip", now, Object.assign({}, row, {st:x.st}), t, {k1:+k1.toFixed(2), k5:+k5.toFixed(2), b:bias}); }
+          }
+        }
+      }
+      // 記録の値動き（1分ごと・買い方向の%）
+      const keep = [];
+      for (const r of FSR.pending){
+        const t = tokens.get(r.sym), el = (now - r.t)/1000;
+        if (t && t.px > 0){
+          const u = +((t.px/r.p0 - 1)*100).toFixed(3);
+          if (u > r.bh) r.bh = u; if (u < r.bl) r.bl = u;
+          while (el >= (r.pth.length+1)*60 && r.pth.length < FS_BARS){ r.pth.push([u, +r.bh.toFixed(3), +r.bl.toFixed(3)]); r.bh = u; r.bl = u; }
+          for (const h of [900,3600,7200]) if (r.f[h] == null && el >= h) r.f[h] = u;
+        }
+        if (r.pth.length >= FS_BARS || el > 2.5*3600){ if (r.f[900] != null){ delete r.bh; delete r.bl; r.q = FSQ.seq++; FSR.done.push(r); } }
+        else keep.push(r);
+      }
+      if (FSR.pending.length) fsDirty = true;
+      FSR.pending = keep;
+      if (FSR.done.length > FS_MAX_DONE){ const oldC = Math.floor(FSR.done[0].q/FS_CHUNK); FSR.done.splice(0, FSR.done.length - FS_MAX_DONE); const newC = Math.floor(FSR.done[0].q/FS_CHUNK); for (let c=oldC;c<newC;c++) store.set(FSKEY+"_d"+c, ""); }
+      if (fsDirty && now - fsSavedAt > 60000){ fsSavedAt = now; fsDirty = false; fsSave(); }
+    }
+    // ---- 分析 ----
+    function fsReplay(r, dir, tp, sl, maxBars){ // 1分ごとの値動きから利確・損切りを再現（同じ1分の中では先に不利側へ動いたと仮定）
+      const P = r.pth; if (!P || !P.length) return null; const end = Math.min(P.length, maxBars || P.length);
+      for (let i=0;i<end;i++){ const c = dir*P[i][0], hi = dir > 0 ? P[i][1] : -P[i][2], lo = dir > 0 ? P[i][2] : -P[i][1];
+        if (lo <= -sl) return -sl; if (hi >= tp) return tp; if (i === end-1) return c; }
+      return dir*P[end-1][0];
+    }
+    function fsSummary(now){
+      const all = FSR.done.concat(FSR.pending), fee = r => 0.1 + ((r.m && r.m.sp)||0);
+      const dirView = (recs, d) => recs.map(r => ({t:r.t, sym:r.sym, m:r.m, f:Object.fromEntries(Object.entries(r.f).map(([h,v]) => [h, (d != null ? d : (r.b||1))*v]))}));
+      const H = [900,3600,7200];
+      const stRow = (label, recs, d) => { const v = dirView(recs, d); const o = {l:label, n:recs.length}; for (const h of H) o[h] = sigStat(v, h); return o; };
+      // A. 状態ごとの、その後の値動き（方向のある状態はその方向で、③は買い方向で評価）
+      const S1 = all.filter(r => r.k === "st");
+      const states = Object.keys(FS_STATES).map(k => stRow(FS_STATES[k]+(FS_BIAS[k] ? (FS_BIAS[k] > 0 ? "（買い方向で評価）" : "（売り方向で評価）") : "（買い方向で評価）"), S1.filter(r => r.st === +k)));
+      // 過熱の度合い別（①②＝買い方向、④＝売り方向）
+      const B = (title, recs, fn, rng) => ({title, rows: rng.map(([a,b,l]) => stRow(l, recs.filter(r => { const v = fn(r); return v != null && v >= a && v < b; }))).filter(x => x.n)});
+      const up = S1.filter(r => r.b > 0), dn = S1.filter(r => r.b < 0);
+      const heat = [
+        B("上昇側（①②）：先物の出来高（普段の何倍）", up, r => r.x.fvr, [[1.5,3,"1.5〜3倍"],[3,5,"3〜5倍"],[5,10,"5〜10倍"],[10,1e9,"10倍以上"]]),
+        B("上昇側（①②）：先物の成行買いの比率", up, r => r.x.fb, [[0.55,0.6,"55〜60%"],[0.6,0.7,"60〜70%"],[0.7,1.01,"70%以上"]]),
+        B("上昇側（①②）：現物の成行買いの比率", up, r => r.x.sb, [[0,0.35,"35%未満（強く売られる）"],[0.35,0.45,"35〜45%"],[0.45,0.55,"45〜55%"],[0.55,0.7,"55〜70%"],[0.7,1.01,"70%以上（強く買われる）"]]),
+        B("上昇側（①②）：先物の直近5分の上昇", up, r => r.x.fr5, [[-1e9,0,"下落中"],[0,0.3,"0〜0.3%"],[0.3,1,"0.3〜1%"],[1,1e9,"1%以上"]]),
+        B("上昇側（①②）：建玉の増減", up, r => r.x.oi, [[-1e9,0,"減少"],[0,1,"0〜1%増"],[1,1e9,"1%以上増"]]),
+        B("下降側（④）：先物の出来高（普段の何倍）", dn, r => r.x.fvr, [[1.5,3,"1.5〜3倍"],[3,5,"3〜5倍"],[5,1e9,"5倍以上"]]),
+        B("下降側（④）：先物の成行買いの比率", dn, r => r.x.fb, [[0,0.3,"30%未満"],[0.3,0.4,"30〜40%"],[0.4,0.46,"40〜45%"]])
+      ].filter(b => b.rows.length);
+      // 成行の買い・売りの判定が正しいかの確認（成行買いが多い時に、直前1分の価格が上がっているか）
+      const hiB = all.filter(r => r.x.fb != null && r.x.fb >= 0.55 && r.x.fr1 != null), loB = all.filter(r => r.x.fb != null && r.x.fb <= 0.45 && r.x.fr1 != null);
+      const avg = xs => xs.length ? xs.reduce((a,r)=>a + r.x.fr1, 0)/xs.length : null;
+      const check = {hi:avg(hiB), hiN:hiB.length, lo:avg(loB), loN:loB.length};
+      // B. 押し目・戻りでのエントリー（利確・損切りの組み合わせを再現）
+      const D = all.filter(r => r.k === "dip");
+      const TP = [0.3,0.5,0.8,1.2,2.0], SL = [0.3,0.5,0.8,1.2];
+      const st$ = (recs, fn) => { const vs = []; for (const r of recs){ const v = fn(r); if (v != null) vs.push({v:(v - fee(r))*1.6, d:r.pth.length >= FS_BARS ? 1 : 0, t:r.t}); } return statOf(vs, now); }; // $は基準ポジション$160換算
+      const oos = (recs, fn) => { const xs = recs.slice().sort((a,b)=>a.t-b.t), h = Math.floor(xs.length/2); return {a:st$(xs.slice(0,h), fn), b:st$(xs.slice(h), fn)}; };
+      const dipGroups = [];
+      for (const [gl, gf] of [["上昇側（①②）の押し目で買い", r => r.b > 0], ["下降側（④）の戻りで売り", r => r.b < 0]]){
+        const base = D.filter(gf);
+        for (const [ml, mf] of [["（大きさ問わず）", r => true], ["1分で普段の1.5〜2倍", r => r.k1 >= 1.5 && r.k1 < 2], ["1分で普段の2〜3倍", r => r.k1 >= 2 && r.k1 < 3], ["1分で普段の3倍以上", r => r.k1 >= 3],
+                                 ["5分で普段の1〜1.5倍", r => r.k5 >= 1 && r.k5 < 1.5], ["5分で普段の1.5〜2倍", r => r.k5 >= 1.5 && r.k5 < 2], ["5分で普段の2倍以上", r => r.k5 >= 2]]){
+          const recs = base.filter(mf); if (recs.length < 10) continue;
+          const cands = [];
+          for (const tp of TP) for (const sl of SL){ const fn = r => fsReplay(r, r.b, tp, sl); const o = oos(recs, fn); cands.push({l:"利確+"+tp+"%・損切り-"+sl+"%", all:st$(recs, fn), a:o.a, b:o.b}); }
+          for (const [bl, bars] of [["30分で決済（損切り-0.8%）",30],["1時間で決済（損切り-0.8%）",60],["2時間で決済（損切り-0.8%）",120]]){ const fn = r => fsReplay(r, r.b, 99, 0.8, bars); const o = oos(recs, fn); cands.push({l:bl, all:st$(recs, fn), a:o.a, b:o.b}); }
+          cands.sort((x,y) => ((y.a&&y.a.avg)||-99) - ((x.a&&x.a.avg)||-99));
+          dipGroups.push({g:gl, m:ml, n:recs.length, top:cands.slice(0,3)});
+        }
+      }
+      return {at:now, n:all.length, nSt:S1.length, nDip:D.length, pending:FSR.pending.length, states, heat, check, dips:dipGroups,
+        rule:"判定：成行買いの比率が"+Math.round(FS_BUY_HI*100)+"%以上＝買われている、"+Math.round(FS_BUY_LO*100)+"%以下＝売られている。先物は出来高が普段の"+FS_VR+"倍以上も条件（加熱・売り込み）。押し目・戻りは、方向のある状態に入ってから60分以内に、1分で普段の1.5倍以上か5分で普段の1倍以上、逆に動いた時。$は基準ポジション$160換算・手数料込み"};
+    }
+    function fsCached(now){ if (!FSOPT || now - fsOptAt > 10*60000){ try{ FSOPT = fsSummary(now); }catch(err){ FSOPT = {err:err.message}; } fsOptAt = now; } return FSOPT; }
+
     async function pollTickers(){
       const rows = src === "bingx" ? await fetchBingx() : await fetchBybit();
       const now = Date.now(), P = PM(), heldSet = new Set(S.positions.map(p=>p.sym));
@@ -1810,6 +2023,7 @@ async function fetchJson(url, opt){
         out.candles = {h1:h1max, h4:h4max, h1need:EMA1_PERIOD, h4need:EMA4_PERIOD, tokens:cnt}; }
       try{ out.trend = tsigSummary(); }catch(_){ out.trend = null; }
       out.opt = optCached(Date.now());
+      try{ out.fs = Object.assign({}, fsCached(Date.now()), {live:fsRows.map(r => Object.assign({}, r, {sym:baseOf(r.sym), name:r.st ? FS_STATES[r.st] : "–"}))}); }catch(_){ out.fs = null; }
       return out;
     }
     function sigSummaryCached(){
@@ -1856,6 +2070,7 @@ async function fetchJson(url, opt){
       try{ sigStep(now); }catch(_){}
       try{ tsigStep(now); }catch(_){}
       try{ txStep(now); }catch(_){}
+      fsStep(now).catch(()=>{});
       if (now - REG.at >= 60000){ let up = 0, dn = 0; for (const s of Object.keys(CDL)){ const d = bigTrend(s); if (d>0) up++; else if (d<0) dn++; } REG = {up, dn, at:now}; }
       if (now - (S.auto.checkedAt||0) >= AUTO_EVERY && TSIG.done.length + TSIG.pending.length > 0){ try{ autoSelect(now); }catch(err){ S.auto.checkedAt = now; addLog("SYS","自動選択の計算に失敗: "+err.message,true); } }
       for (const p of [...S.positions]){
@@ -2061,7 +2276,7 @@ async function fetchJson(url, opt){
       else if (c==="close"){ for (const p of [...S.positions]) closePos(p,"手動クローズ"); }
       else if (c==="closeOne" && b.mint){ const p = S.positions.find(x=>x.sym===b.mint); if (p) closePos(p,"手動クローズ"); }
       else if (c==="reset"){ const cfg = S.cfg; S = fresh(); S.cfg = cfg; noteEpoch(); addLog("SYS","セッションをリセット（ペーパー）"); }
-      else if (c==="sigReset"){ sigResetAll(); tsigResetAll(); txResetAll(); addLog("SYS","シグナル検証の記録をリセット（トレンド戦略の記録も含む）"); }
+      else if (c==="sigReset"){ sigResetAll(); tsigResetAll(); txResetAll(); fsResetAll(); addLog("SYS","シグナル検証の記録をリセット（トレンド戦略の記録も含む）"); }
       else if (c==="cfg" && b.cfg && false){ // 設定ボタンは廃止
         let changed = false;
         for (const k of Object.keys(b.cfg)) if (ALLOW[k] && ALLOW[k].includes(b.cfg[k])){
