@@ -566,21 +566,29 @@ async function fetchJson(url, opt){
       const keep = new Set(tokens.keys());
       for (const k of Object.keys(CDL)) if (!keep.has(k)) delete CDL[k];
     }
-    // 15分足が1本確定するたびに呼ばれる：大きな流れ（4時間・1時間）と同じ向きのパターンが出ていれば、シグナルとして記録
+    // エントリー時の条件（あとで良いエントリーと悪いエントリーを見分けるため）
+    function entOf(c, dir, now){
+      const cs = c.m15, n = cs.length, L = cs[n-1], atr = atrOf(cs,14), e21 = emaOf(cs,21);
+      let vs = 0, vn = 0; for (let i=Math.max(0,n-21); i<n-1; i++){ vs += cs[i].v||0; vn++; }
+      const vr = (vn && vs>0 && L.v>0) ? L.v/(vs/vn) : null, ds = (atr>0 && e21!=null) ? dir*(L.c - e21)/atr : null;
+      const rng = L.h - L.l, wick = rng > 0 ? (dir>0 ? Math.min(L.o,L.c) - L.l : L.h - Math.max(L.o,L.c))/rng : null;
+      let hi = -Infinity, lo = Infinity; for (let i=Math.max(0,n-50); i<n; i++){ hi = Math.max(hi, cs[i].h); lo = Math.min(lo, cs[i].l); }
+      const dh = atr > 0 ? (dir>0 ? (hi - L.c) : (L.c - lo))/atr : null; // 直近50本の高値（ショートは安値）までの距離（ATR何本分）
+      return {vr: vr==null?null:+vr.toFixed(2), ds: ds==null?null:+ds.toFixed(2), d1: tfTrend(c.d1), hr: new Date(now+9*3600e3).getUTCHours(),
+        wk: wick==null?null:+wick.toFixed(2), dh: dh==null?null:+dh.toFixed(2), ap: (atr>0 && L.c>0) ? +(atr/L.c*100).toFixed(3) : null};
+    }
+    function emaGap(cs, dir){ const a = emaOf(cs,21), b = emaOf(cs,75); return (a!=null && b>0) ? +(dir*(a-b)/b*100).toFixed(3) : null; } // トレンドの強さ（EMA21とEMA75の開き・%）
+    // 15分足が1本確定するたびに呼ばれる
     function onNew15(sym, c, now){
-      const dir = bigTrend(sym); if (!dir) return;
+      const bt = bigTrend(sym), t = tokens.get(sym);
+      // 探索用：トレンドに関係なく、両方向のパターンを記録する（トレンドの判定方法を比べるため）
+      if (t && t.px > 0) for (const d of [1,-1]){ const hx = m15Pattern(c.m15, d); if (hx){ try{ txPush(now, t, c, d, hx, bt); }catch(_){} } }
+      // 実際の売買・これまでの検証：4時間・1時間の流れと同じ向きのパターンだけ
+      const dir = bt; if (!dir) return;
       if (S.cfg.dir === "long" && dir < 0) return; if (S.cfg.dir === "short" && dir > 0) return;
       const hit = m15Pattern(c.m15, dir); if (!hit) return;
       c.sig = {dir, pat:hit.pat, at:now, bar:c.last15};
-      const t = tokens.get(sym);
-      if (t && t.px > 0){
-        // エントリー時の条件（あとで良いエントリーと悪いエントリーを見分けるため）
-        const cs = c.m15, n = cs.length, L = cs[n-1], atr = atrOf(cs,14), e21 = emaOf(cs,21);
-        let vs = 0, vn = 0; for (let i=Math.max(0,n-21); i<n-1; i++){ vs += cs[i].v||0; vn++; }
-        const vr = (vn && vs>0 && L.v>0) ? L.v/(vs/vn) : null, ds = (atr>0 && e21!=null) ? dir*(L.c - e21)/atr : null;
-        const ent = {vr: vr==null?null:+vr.toFixed(2), ds: ds==null?null:+ds.toFixed(2), d1: tfTrend(c.d1), hr: new Date(now+9*3600e3).getUTCHours()};
-        tsigPush(now, t, dir, hit.pat, hit.all, ent);
-      }
+      if (t && t.px > 0) tsigPush(now, t, dir, hit.pat, hit.all, entOf(c, dir, now));
     }
     // ---- トレンド戦略のシグナル検証（1時間・4時間・24時間後の値動きと、決済方式ごとの成績を測る）----
     // 保存は400件ずつ複数のキーに分ける（1つのキーに入れると、件数が増えたときに保存の上限を超えるため）
@@ -887,6 +895,151 @@ async function fetchJson(url, opt){
         addLog("SYS", A.note, true);
       }
     }
+
+    // ============================================================
+    // 探索用の記録（最適化の土台）：トレンドに関係なく両方向のパターンを記録し、値動きを5分ごとに8時間分残す
+    // 値動きは [終値, 高値, 安値]（ポジション全体$での含み損益）。これがあれば、決済方式やしきい値をあとから何度でも再計算できる
+    // ============================================================
+    const TXKEY = "trenchdesk_tx_v1", TX_CHUNK = 400, TX_BARS = 96, TX_MAX_PENDING = 4000, TX_MAX_DONE = 8000;
+    let TX = {pending:[], done:[]}, TXQ = {seq:0, saved:0, pn:0}, txDirty = false, txSavedAt = 0;
+    function txLoad(){
+      try{
+        const m = JSON.parse(store.get(TXKEY) || "null"); if (!m || typeof m.seq !== "number") return;
+        TXQ = {seq:m.seq, saved:m.seq, pn:m.pn||0};
+        for (let i=0;i<TXQ.pn;i++){ try{ for (const r of JSON.parse(store.get(TXKEY+"_p"+i) || "[]")) TX.pending.push(r); }catch(_){} }
+        const n0 = m.n0||0;
+        for (let c=Math.floor(n0/TX_CHUNK); c<=Math.floor((m.seq-1)/TX_CHUNK); c++){
+          try{ for (const r of JSON.parse(store.get(TXKEY+"_d"+c) || "[]")) if (r.q >= n0) TX.done.push(r); }catch(_){}
+        }
+      }catch(_){}
+    }
+    txLoad();
+    function txSave(){
+      const newPn = Math.ceil(TX.pending.length/TX_CHUNK);
+      for (let i=0;i<newPn;i++) store.set(TXKEY+"_p"+i, JSON.stringify(TX.pending.slice(i*TX_CHUNK,(i+1)*TX_CHUNK)));
+      for (let i=newPn;i<TXQ.pn;i++) store.set(TXKEY+"_p"+i, "");
+      TXQ.pn = newPn;
+      const n0 = TX.done.length ? TX.done[0].q : TXQ.seq;
+      for (let c=Math.max(Math.floor(n0/TX_CHUNK), Math.floor(TXQ.saved/TX_CHUNK)); c<=Math.floor((TXQ.seq-1)/TX_CHUNK); c++)
+        store.set(TXKEY+"_d"+c, JSON.stringify(TX.done.filter(r => Math.floor(r.q/TX_CHUNK) === c)));
+      TXQ.saved = TXQ.seq;
+      store.set(TXKEY, JSON.stringify({seq:TXQ.seq, n0, pn:TXQ.pn}));
+    }
+    function txResetAll(){
+      const n0 = TX.done.length ? TX.done[0].q : TXQ.seq;
+      for (let c=Math.floor(n0/TX_CHUNK); c<=Math.floor((TXQ.seq-1)/TX_CHUNK); c++) store.set(TXKEY+"_d"+c, "");
+      for (let i=0;i<TXQ.pn;i++) store.set(TXKEY+"_p"+i, "");
+      TX = {pending:[], done:[]}; TXQ = {seq:0, saved:0, pn:0}; txSavedAt = 0; txDirty = false; OPT = null;
+      store.set(TXKEY, JSON.stringify({seq:0, n0:0, pn:0}));
+    }
+    function txPush(now, t, c, d, hit, bt){
+      if (TX.pending.length >= TX_MAX_PENDING) return;
+      const cs = c.m15, L = cs[cs.length-1], atr = atrOf(cs,14); if (!(atr > 0) || !(L.c > 0)) return;
+      const nt = START_USD*S.cfg.size*S.cfg.lev, sp = t.bid>0 && t.ask>0 ? (t.ask-t.bid)/t.px*100 : 0;
+      const tr = {h4:tfTrend(c.h4), h1:tfTrend(c.h1), d1:tfTrend(c.d1), g4:emaGap(c.h4, d), g1:emaGap(c.h1, d)};
+      tr.al = (tr.h4 === d && tr.h1 === d) ? 1 : 0; // 今の条件（4時間・1時間が同じ向き）
+      TX.pending.push({t:now, sym:t.sym, d, p0:t.px, pat:hit.pat, ps:hit.all, nt, m:{sp:+sp.toFixed(3)}, au:+(atr/L.c*nt).toFixed(3),
+        e:entOf(c, d, now), tr, mk:{u:REG.up, d:REG.dn}, pth:[], bh:0, bl:0, f:{}});
+      txDirty = true;
+    }
+    function txStep(now){
+      const keep = [];
+      for (const r of TX.pending){
+        const t = tokens.get(r.sym), el = (now - r.t)/1000;
+        if (t && t.px > 0){
+          const u = +(r.d*(t.px/r.p0-1)*r.nt).toFixed(2);
+          if (u > r.bh) r.bh = u; if (u < r.bl) r.bl = u; r.lu = u;
+          while (el >= (r.pth.length+1)*300 && r.pth.length < TX_BARS){ r.pth.push([u, +r.bh.toFixed(2), +r.bl.toFixed(2)]); r.bh = u; r.bl = u; }
+          for (const h of [3600,14400,28800]) if (r.f[h] == null && el >= h) r.f[h] = +(r.d*(t.px/r.p0-1)*100).toFixed(3);
+        }
+        if (r.pth.length >= TX_BARS || el > 9*3600){ if (r.pth.length >= 12){ delete r.bh; delete r.bl; r.q = TXQ.seq++; TX.done.push(r); } }
+        else keep.push(r);
+      }
+      if (TX.pending.length) txDirty = true;
+      TX.pending = keep;
+      if (TX.done.length > TX_MAX_DONE){
+        const oldC = Math.floor(TX.done[0].q/TX_CHUNK);
+        TX.done.splice(0, TX.done.length - TX_MAX_DONE);
+        const newC = Math.floor(TX.done[0].q/TX_CHUNK);
+        for (let c=oldC; c<newC; c++) store.set(TXKEY+"_d"+c, "");
+      }
+      if (txDirty && now - txSavedAt > 60000){ txSavedAt = now; txDirty = false; txSave(); }
+    }
+    // 5分ごとの値動きから決済を再現する（同じ5分の中では、先に不利な側に動いたと仮定＝厳しめに評価）
+    // spec: {w:追いかけ幅, cut:{n:何本(5分単位)の値動きで測るか, th:下落係数のしきい値}}
+    function replay(r, spec){
+      const P = r.pth; if (!P || !P.length) return null;
+      let s = -LAD_SL, pk = 0;
+      for (let i=0;i<P.length;i++){
+        const c = P[i][0], h = P[i][1], l = P[i][2];
+        if (l <= s) return s;
+        if (h > pk){ pk = h; s = Math.max(s, ladStop(pk, spec.w)); }
+        if (c <= s) return s;
+        if (spec.cut && r.au > 0){ const j = i - spec.cut.n, base = j < 0 ? 0 : P[j][0]; if ((c - base)/r.au <= -spec.cut.th) return c; }
+      }
+      return P[P.length-1][0];
+    }
+    let OPT = null, optAt = 0;
+    function optSummary(now){
+      const all = TX.done.concat(TX.pending).filter(r => r.pth && r.pth.length >= 3);
+      const fee = r => r.nt*(0.001 + ((r.m && r.m.sp)||0)/100);
+      const BASE = {w:2, cut:null}, bv = new Map();
+      for (const r of all) bv.set(r, replay(r, BASE) - fee(r));
+      const done = r => r.pth.length >= TX_BARS;
+      const st = (recs, fn) => { const vs = []; for (const r of recs){ const v = fn(r); if (v != null) vs.push({v, d:done(r)?1:0, t:r.t}); } return statOf(vs, now); };
+      const oos = (recs, fn) => { const xs = recs.slice().sort((a,b)=>a.t-b.t), h = Math.floor(xs.length/2); return {a:st(xs.slice(0,h), fn), b:st(xs.slice(h), fn)}; }; // 前半で選び、後半で確かめる
+      const baseV = r => bv.get(r);
+      // A. 下落係数（早切り）の最適化：しきい値×測る期間
+      const GROUPS = [["ピンバー（今のトレンド条件）", r => r.pat === "pin" && r.tr.al], ["全パターン（今のトレンド条件）", r => r.tr.al], ["ピンバー（トレンド条件なし）", r => r.pat === "pin"]];
+      const cut = GROUPS.map(([label, f]) => {
+        const recs = all.filter(f), rows = [];
+        for (const n of [1,3,6]) for (const th of [0.8,1.0,1.2,1.5,1.8,2.0,2.5]){
+          const spec = {w:2, cut:{n, th}}, fn = r => replay(r, spec) - fee(r), o = oos(recs, fn);
+          rows.push({l:"直近"+(n*5)+"分・係数"+th.toFixed(1), all:st(recs, fn), a:o.a, b:o.b});
+        }
+        rows.sort((x,y) => ((y.a&&y.a.avg)||-99) - ((x.a&&x.a.avg)||-99));
+        const o0 = oos(recs, baseV);
+        return {label, n:recs.length, base:{l:"早切りなし（段階式$2のみ）", all:st(recs, baseV), a:o0.a, b:o0.b}, top:rows.slice(0,6)};
+      });
+      // B. トレンドの判定方法の比較
+      const g4s = all.filter(r => r.tr.al && r.tr.g4 != null).map(r => r.tr.g4).sort((a,b)=>a-b), g4med = g4s.length ? g4s[Math.floor(g4s.length/2)] : 0;
+      const TRF = [
+        ["条件なし（全部）", r => true],
+        ["4時間足と1時間足が同じ向き（今の条件）", r => r.tr.al === 1],
+        ["4時間足だけ同じ向き", r => r.tr.h4 === r.d],
+        ["1時間足だけ同じ向き", r => r.tr.h1 === r.d],
+        ["4時間・1時間・日足すべて同じ向き", r => r.tr.al === 1 && r.tr.d1 === r.d],
+        ["今の条件＋トレンドが強い（4時間足EMAの開きが上位半分）", r => r.tr.al === 1 && r.tr.g4 != null && r.tr.g4 >= g4med],
+        ["今の条件＋トレンドが弱い（開きが下位半分）", r => r.tr.al === 1 && r.tr.g4 != null && r.tr.g4 < g4med],
+        ["4時間足がはっきりしない（レンジ）", r => r.tr.h4 === 0],
+        ["4時間足と逆向きに入る", r => r.tr.h4 === -r.d]
+      ];
+      const trend = [["ピンバー", r => r.pat === "pin"], ["包み足", r => r.pat === "en"], ["全パターン", r => true]].map(([pl, pf]) => ({label:pl,
+        rows: TRF.map(([l, f]) => { const recs = all.filter(r => pf(r) && f(r)), o = oos(recs, baseV); return {l, all:st(recs, baseV), a:o.a, b:o.b, f4:sigStat(recs, 14400)}; }).filter(x => x.all)}));
+      // C. エントリー条件の最適化（今のトレンド条件の中で、条件2つまでの組み合わせ）
+      const share = r => r.mk && (r.mk.u + r.mk.d) > 0 ? r.mk.u/(r.mk.u + r.mk.d) : null;
+      const EC = [
+        ["EMA21より逆側", r => r.e.ds != null && r.e.ds < 0], ["EMA21から0〜1本", r => r.e.ds != null && r.e.ds >= 0 && r.e.ds < 1], ["EMA21から1本以上", r => r.e.ds != null && r.e.ds >= 1],
+        ["出来高1倍未満", r => r.e.vr != null && r.e.vr < 1], ["出来高1〜1.5倍", r => r.e.vr != null && r.e.vr >= 1 && r.e.vr < 1.5], ["出来高1.5倍以上", r => r.e.vr != null && r.e.vr >= 1.5],
+        ["ヒゲが値幅の6割以上", r => r.e.wk != null && r.e.wk >= 0.6], ["ヒゲが値幅の3割未満", r => r.e.wk != null && r.e.wk < 0.3],
+        ["高値まで1本未満（ショートは安値）", r => r.e.dh != null && r.e.dh < 1], ["高値まで1〜3本", r => r.e.dh != null && r.e.dh >= 1 && r.e.dh < 3], ["高値まで3本以上", r => r.e.dh != null && r.e.dh >= 3],
+        ["値動きが穏やか（ATR0.5%未満）", r => r.e.ap != null && r.e.ap < 0.5], ["値動きが普通（ATR0.5〜1%）", r => r.e.ap != null && r.e.ap >= 0.5 && r.e.ap < 1], ["値動きが荒い（ATR1%以上）", r => r.e.ap != null && r.e.ap >= 1],
+        ["日足も同じ向き", r => r.e.d1 === r.d], ["0〜6時", r => r.e.hr < 6], ["6〜12時", r => r.e.hr >= 6 && r.e.hr < 12], ["12〜18時", r => r.e.hr >= 12 && r.e.hr < 18], ["18〜24時", r => r.e.hr >= 18],
+        ["上昇相場", r => { const x = share(r); return x != null && x >= 0.7; }], ["下降相場", r => { const x = share(r); return x != null && x <= 0.3; }], ["混在相場", r => { const x = share(r); return x != null && x > 0.3 && x < 0.7; }]
+      ];
+      const entry = [];
+      for (const [pl, pf] of [["ピンバー", r => r.pat === "pin"], ["包み足", r => r.pat === "en"], ["全パターン", r => true]]){
+        const base = all.filter(r => r.tr.al && pf(r) && r.e);
+        const sets = EC.map(([l, f]) => [l, base.filter(f)]);
+        const cands = sets.map(([l, recs]) => ({l, recs}));
+        for (let i=0;i<sets.length;i++) for (let j=i+1;j<sets.length;j++){ const f2 = EC[j][1]; cands.push({l:sets[i][0]+"＋"+sets[j][0], recs:sets[i][1].filter(f2)}); }
+        for (const c of cands){ if (c.recs.length < 40) continue; const o = oos(c.recs, baseV); if (!o.a || !o.b) continue; entry.push({pat:pl, l:c.l, all:st(c.recs, baseV), a:o.a, b:o.b}); }
+      }
+      entry.sort((x,y) => y.a.avg - x.a.avg);
+      return {at:now, n:all.length, done:all.filter(done).length, pending:TX.pending.length, note:"値動きは5分ごとの記録から再現（同じ5分の中では先に不利側へ動いたと仮定＝厳しめ）。基本の決済は段階式・幅$2。「前半」で選んで「後半」でもプラスなら、偶然ではない可能性が高い",
+        cut, trend, entry:entry.slice(0,15)};
+    }
+    function optCached(now){ if (!OPT || now - optAt > 30*60000){ try{ OPT = optSummary(now); }catch(err){ OPT = {err:err.message}; } optAt = now; } return OPT; }
 
     async function pollTickers(){
       const rows = src === "bingx" ? await fetchBingx() : await fetchBybit();
@@ -1656,6 +1809,7 @@ async function fetchJson(url, opt){
       { let h1max=0, h4max=0, cnt=0; for (const c of Object.values(CDL)){ h1max = Math.max(h1max, c.h1.length); h4max = Math.max(h4max, c.h4.length); cnt++; }
         out.candles = {h1:h1max, h4:h4max, h1need:EMA1_PERIOD, h4need:EMA4_PERIOD, tokens:cnt}; }
       try{ out.trend = tsigSummary(); }catch(_){ out.trend = null; }
+      out.opt = optCached(Date.now());
       return out;
     }
     function sigSummaryCached(){
@@ -1701,6 +1855,7 @@ async function fetchJson(url, opt){
       seedCandlesStep(now).catch(()=>{});
       try{ sigStep(now); }catch(_){}
       try{ tsigStep(now); }catch(_){}
+      try{ txStep(now); }catch(_){}
       if (now - REG.at >= 60000){ let up = 0, dn = 0; for (const s of Object.keys(CDL)){ const d = bigTrend(s); if (d>0) up++; else if (d<0) dn++; } REG = {up, dn, at:now}; }
       if (now - (S.auto.checkedAt||0) >= AUTO_EVERY && TSIG.done.length + TSIG.pending.length > 0){ try{ autoSelect(now); }catch(err){ S.auto.checkedAt = now; addLog("SYS","自動選択の計算に失敗: "+err.message,true); } }
       for (const p of [...S.positions]){
@@ -1906,7 +2061,7 @@ async function fetchJson(url, opt){
       else if (c==="close"){ for (const p of [...S.positions]) closePos(p,"手動クローズ"); }
       else if (c==="closeOne" && b.mint){ const p = S.positions.find(x=>x.sym===b.mint); if (p) closePos(p,"手動クローズ"); }
       else if (c==="reset"){ const cfg = S.cfg; S = fresh(); S.cfg = cfg; noteEpoch(); addLog("SYS","セッションをリセット（ペーパー）"); }
-      else if (c==="sigReset"){ sigResetAll(); tsigResetAll(); addLog("SYS","シグナル検証の記録をリセット（トレンド戦略の記録も含む）"); }
+      else if (c==="sigReset"){ sigResetAll(); tsigResetAll(); txResetAll(); addLog("SYS","シグナル検証の記録をリセット（トレンド戦略の記録も含む）"); }
       else if (c==="cfg" && b.cfg && false){ // 設定ボタンは廃止
         let changed = false;
         for (const k of Object.keys(b.cfg)) if (ALLOW[k] && ALLOW[k].includes(b.cfg[k])){
