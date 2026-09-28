@@ -111,7 +111,8 @@ async function route(req, env) {
         const symbol = u.searchParams.get("symbol"), interval = u.searchParams.get("interval") || "1h", limit = u.searchParams.get("limit") || "100";
         if (!symbol) return json({ error: "symbol is required" }, 400);
         // ろうそく（K線）は公開データで署名不要。実勢の値動きを見るため、常にリアル環境（デモではなく本番の公開API）から取得する
-        const qs = "?symbol=" + encodeURIComponent(toBingxSymbol(symbol)) + "&interval=" + encodeURIComponent(interval) + "&limit=" + encodeURIComponent(limit);
+        let qs = "?symbol=" + encodeURIComponent(toBingxSymbol(symbol)) + "&interval=" + encodeURIComponent(interval) + "&limit=" + encodeURIComponent(limit);
+        const et = u.searchParams.get("endTime"); if (et && /^\d+$/.test(et)) qs += "&endTime=" + et; // 過去にさかのぼって取得する用
         const r = await fetch("https://open-api.bingx.com/openApi/swap/v3/quote/klines" + qs);
         const text = await r.text();
         let data; try { data = JSON.parse(text); } catch (_) { data = { raw: text }; }
@@ -346,7 +347,8 @@ async function fetchJson(url, opt){
 
     // 設定ボタンは廃止。売買の条件は固定し、エントリーするパターンと決済方式だけを検証結果で自動選択する
     const FIXED = {mode:"normal", dir:"both", strategy:"trend", lev:8, size:0.04, gate:"std", scale:false, live:true, halfback:false, scalp:false, maxPos:10, orphan:true, timeout:0};
-    const AUTO0 = () => ({pats:{pin:"cur"}, at:0, checkedAt:0, note:"初期設定（ピンバー・今の設定）", warn:null});
+    // 初期設定：包み足で入り、段階式（ピークから$2下を$0.5刻みで追いかけ・利確の上限なし）で利益を伸ばす。履歴検証で、ランダム入りより良かったのは包み足だけだった
+    const AUTO0 = () => ({pats:{en:"2|60"}, at:0, checkedAt:0, note:"初期設定（包み足・段階式$2で利益を追いかける）", warn:null});
     function fresh(){
       return { auto:AUTO0(), startedAt:Date.now(), running:true, cash:START_USD, positions:[], trades:[], log:[], errors:[], hist:[{t:Date.now(),v:START_USD}],
         skips:0, polls:0, events:0, logSeq:0, lastPollAt:0, cooldown:{}, retry:{}, epochs:[], pnlDaily:{},
@@ -378,7 +380,7 @@ async function fetchJson(url, opt){
     function load(){
       try{
         const j = JSON.parse(store.get(FKEY) || "null");
-        if (j && j.cfg && Array.isArray(j.positions)){ const def = fresh().cfg; S = Object.assign(fresh(), j); S.cfg = Object.assign(def, j.cfg, FIXED); if (!S.auto || !S.auto.pats) S.auto = AUTO0(); S.positions.forEach(p => { if (p.origQty==null) p.origQty = p.qty; if (p.margin0==null) p.margin0 = p.margin; if (p.realizedNet==null) p.realizedNet = 0; if (p.tpHit==null) p.tpHit = 0; if (p.beOn==null) p.beOn = false; if (!tokens.has(p.sym)) tokens.set(p.sym,{sym:p.sym,samples:[],firstSeen:Date.now(),px:p.entry,mark:p.entry,bid:0,ask:0,bidSz:0,askSz:0,turn:0,oi:0,fr:0,chg24:0,chg1h:0,hi:p.entry,lo:p.entry,updatedAt:0}); }); }
+        if (j && j.cfg && Array.isArray(j.positions)){ const def = fresh().cfg; S = Object.assign(fresh(), j); S.cfg = Object.assign(def, j.cfg, FIXED); if (!S.auto || !S.auto.pats || !S.auto.at) S.auto = AUTO0(); S.positions.forEach(p => { if (p.origQty==null) p.origQty = p.qty; if (p.margin0==null) p.margin0 = p.margin; if (p.realizedNet==null) p.realizedNet = 0; if (p.tpHit==null) p.tpHit = 0; if (p.beOn==null) p.beOn = false; if (!tokens.has(p.sym)) tokens.set(p.sym,{sym:p.sym,samples:[],firstSeen:Date.now(),px:p.entry,mark:p.entry,bid:0,ask:0,bidSz:0,askSz:0,turn:0,oi:0,fr:0,chg24:0,chg1h:0,hi:p.entry,lo:p.entry,updatedAt:0}); }); }
       }catch(_){}
     }
     function persist(){ S.lastPollAt = lastPollAt; store.set(FKEY, JSON.stringify(S)); }
@@ -623,6 +625,8 @@ async function fetchJson(url, opt){
       for (const c of [1.0,1.5,2.0]) METH["C"+Math.round(c*10)] = Object.assign({}, LB, {label:"段階式$2＋早切り（下降係数"+c.toFixed(1)+"）", cut:c});
       for (const a of [1.0,1.5]) METH["A"+Math.round(a*10)] = Object.assign({}, LB, {label:"段階式$2＋追加（伸び率係数"+a.toFixed(1)+"・含み益時に1回）", add:a});
       METH.CA = Object.assign({}, LB, {label:"段階式$2＋早切り1.5＋追加1.0", cut:1.5, add:1.0}); }
+    // 追いかけ幅を、その銘柄の普段の値動き（15分足ATRの$換算）に合わせる：荒い銘柄は広く、穏やかな銘柄は狭く。エントリー時に決めて途中で変えない
+    for (const va of [1.5,2.0,3.0]) METH["V"+Math.round(va*10)] = {label:"段階式・追いかけ幅=普段の値動きの"+va.toFixed(1)+"倍（$1.5〜4）・時間ルール1時間", kind:"lad", va, h:60, sl0:LAD_SL};
     const SIM_KEYS = Object.keys(METH).filter(k => k !== "cur"); // "cur"は従来の記録（r.cs）を使う
     const fl05 = v => Math.floor(v*2 + 1e-9)/2;
     function ladStop(pk, w){
@@ -636,13 +640,14 @@ async function fetchJson(url, opt){
     // 1回分の判定。戻り値: null / "stop"（損切りラインが上がった）/ "half"（半分利確）/ "exit:sl" "exit:tp" "exit:time"（全決済）
     // 追加ありの場合の合計損益（1本目の$で表した価格 u から計算。追加分の手数料 fe を引く）
     const mVal = (L, u, fe) => L.a ? 2*u - L.ua - fe : (L.h ? L.bk + u/2 : u);
-    function mStep(key, L, u, el, lvPct, mfeLv, be, k){
+    function mStep(key, L, u, el, lvPct, mfeLv, be, k, au){
       const d = METH[key]; if (!d || !L || L.x != null) return null;
       let ev = null;
       if (u > L.pk) L.pk = +u.toFixed(2);
       let ns = L.s;
       if (d.kind === "lad"){
-        ns = Math.max(ns, ladStop(L.pk, d.w));
+        if (d.va && L.w == null) L.w = au != null && au > 0 ? clamp(d.va*au, 1.5, 4) : 2; // 値動きに合わせた幅（データがなければ$2）
+        ns = Math.max(ns, ladStop(L.pk, d.va ? L.w : d.w));
         if (d.add && !L.a && u > 0 && k != null && k >= d.add){ L.a = 1; L.ua = +u.toFixed(2); ev = "add"; } // 含み益のときだけ1回追加
         if (L.a) ns = Math.max(ns, L.ua/2 + 0.2); // 追加後は平均建値＋手数料より下で負けない
       }
@@ -738,7 +743,7 @@ async function fetchJson(url, opt){
       const usdAt = rr*r.nt/100, lv = r.lv||8;
       for (const tp of TG_TP) for (const sl of TG_SL){ const k = tp+"|"+sl; if (r.g[k] != null) continue;
         if (usdAt >= tp) r.g[k] = tp; else if (usdAt <= -sl) r.g[k] = -sl; }
-      if (r.lad) for (const key in r.lad){ const L = r.lad[key]; if (L && typeof L === "object" && L.x == null) mStep(key, L, usdAt, el, rr*lv, (r.mfe||0)*lv, r.nt*0.001, k); }
+      if (r.lad) for (const key in r.lad){ const L = r.lad[key]; if (L && typeof L === "object" && L.x == null) mStep(key, L, usdAt, el, rr*lv, (r.mfe||0)*lv, r.nt*0.001, k, r.e && r.e.ap != null ? r.e.ap/100*r.nt : null); }
       const c = r.cs; if (!c || c.st === 2) return;
       if (c.st === 0){
         if (usdAt >= c.tp1){ c.st = 1; c.bk = c.tp1/2; }
@@ -1268,10 +1273,21 @@ async function fetchJson(url, opt){
     // 4時間・24時間の値動きは相場全体の上げ下げに左右されるので、基準との「差」だけが、パターン本来の効果になる
     // 未来の情報は使わない（各時点で確定していた足だけでトレンドとパターンを判定）。売買はしない（検証のみ）
     // ============================================================
-    const HKEY = "trenchdesk_hist_v1", H_TOP = 60, H_STEP_MS = 25000, H_GAP = 8, H_WARM = 119, H_FWD = 96, H_COST = 0.15, H_NT = 160, H_FEE = H_NT*0.0015;
+    const HKEY = "trenchdesk_hist_v1", H_VER = 2, H_DAYS = 60, H_TOP = 60, H_STEP_MS = 25000, H_GAP = 8, H_WARM = 119, H_FWD = 96, H_COST = 0.15, H_NT = 160, H_FEE = H_NT*0.0015;
     const H_GROUPS = [["all","トレンド条件なし（全部）"],["al","4時間・1時間が同じ向き（今の条件）"],["al3","4時間・1時間・日足すべて同じ向き"],["h4","4時間足だけ同じ向き"],["h1","1時間足だけ同じ向き"],["rng","4時間足がはっきりしない（レンジ）"],["ctr","4時間足と逆向きに入る"]];
     let H = {acc:{}, done:{}, since:0, complete:false, doneAt:0, prev:null}, hBusy = false, hLastAt = 0, hCache = null, hCacheAt = 0, hErrLogged = false;
-    try{ const j = JSON.parse(store.get(HKEY) || "null"); if (j && j.acc) H = Object.assign(H, j); }catch(_){}
+    try{ const j = JSON.parse(store.get(HKEY) || "null"); if (j && j.acc && j.ver === H_VER) H = Object.assign(H, j); }catch(_){} // 検証期間を変えた時は、古い結果を使わずやり直す
+    H.ver = H_VER;
+    // 新しい方から過去にさかのぼって、need本のろうそくを取得する（1回の取得は最大1440本のため、複数回に分ける）
+    async function fetchTfBack(base, iv, tfMs, need, now){
+      let out = [], end = null;
+      for (let k=0;k<6 && out.length < need;k++){
+        const r = await relay("/market/klines?symbol="+base+"USDT&interval="+iv+"&limit=1440"+(end ? "&endTime="+end : ""));
+        const arr = parseKlineArr(r, tfMs, now); if (!arr.length) break;
+        out = arr.concat(out); end = out[0].t - 1; if (arr.length < 200) break; // 上場直後の銘柄は、ここで過去が尽きる
+      }
+      return out.slice(-need);
+    }
     function hSave(){ store.set(HKEY, JSON.stringify(H)); }
     function trendSeries(cs){ // 各時点で「その足が最後に確定していた」場合のトレンド（1/-1/0）
       const e21 = emaSeries(cs,21), e75 = emaSeries(cs,75), e200 = emaSeries(cs,200), out = new Array(cs.length).fill(0);
@@ -1324,7 +1340,7 @@ async function fetchJson(url, opt){
       hBusy = true; hLastAt = now;
       try{
         const base = baseOf(next), n0 = Date.now();
-        const m15 = await fetchTf(base,"15m",TF.m15,1440,n0), h1 = await fetchTf(base,"1h",TF.h1,800,n0), h4 = await fetchTf(base,"4h",TF.h4,420,n0), d1 = await fetchTf(base,"1d",TF.d1,260,n0);
+        const m15 = await fetchTfBack(base,"15m",TF.m15,H_DAYS*96+220,n0), h1 = await fetchTfBack(base,"1h",TF.h1,H_DAYS*24+260,n0), h4 = await fetchTfBack(base,"4h",TF.h4,H_DAYS*6+260,n0), d1 = await fetchTfBack(base,"1d",TF.d1,H_DAYS+260,n0);
         let cnt = 0;
         if (m15.length > H_WARM + H_FWD + 50 && h1.length >= 260 && h4.length >= 230 && d1.length >= 210) cnt = hProcess(m15, h1, h4, d1);
         H.done[next] = cnt; hSave(); hCache = null; hErrLogged = false;
@@ -1359,7 +1375,7 @@ async function fetchJson(url, opt){
       }
       const bm = d => { const a = acc["B|"+d+"|all"]; if (!a) return null; let n = 0, s1 = 0, s4 = 0, s24 = 0; for (const h of [0,1]){ n += a[h].n; s1 += a[h].s1; s4 += a[h].s4; s24 += a[h].s24; } return n ? {n, f1:s1/n - H_COST, f4:s4/n - H_COST, f24:s24/n - H_COST} : null; };
       return {progress:{done:doneN, total:H_TOP, complete:H.complete, ready, since:H.since, doneAt:H.doneAt}, ready, market:{long:bm(1), short:bm(-1)}, rows, tested, okN,
-        note:"過去約14日分の15分足（各パターンが出た直後の終値で入った場合）。「ランダム入り」は、同じ向き・同じトレンド条件で、2時間おきに入った場合の平均。「差」＝パターンの値 − ランダム入り。手数料は往復0.15%（$160換算で$0.24）。段階式$2は15分足で再現するため、5分足の検証より厳しめに出ます。✅＝60件以上で、前半・後半とも段階式$2の差がプラスで、誤差の幅を引いてもプラス。ただし条件を多く試すほど偶然の✅も混ざります（何も効果がない値動きでも、1〜2通りは出ます）"};
+        note:"過去約"+H_DAYS+"日分の15分足（各パターンが出た直後の終値で入った場合）。「ランダム入り」は、同じ向き・同じトレンド条件で、2時間おきに入った場合の平均。「差」＝パターンの値 − ランダム入り。手数料は往復0.15%（$160換算で$0.24）。段階式$2は15分足で再現するため、5分足の検証より厳しめに出ます。✅＝60件以上で、前半・後半とも段階式$2の差がプラスで、誤差の幅を引いてもプラス。ただし条件を多く試すほど偶然の✅も混ざります（何も効果がない値動きでも、1〜2通りは出ます）"};
     }
     function histCached(now){ if (!hCache || now - hCacheAt > 60000){ try{ hCache = hSummary(now); }catch(err){ hCache = {err:err.message}; } hCacheAt = now; } return hCache; }
 
@@ -1601,7 +1617,7 @@ async function fetchJson(url, opt){
           if (p.side>0 ? slPrice>=fillPx : slPrice<=fillPx) slPrice = floorTo(fillPx - p.side*tick, prec.price);
           if (p.side>0 ? tpPrice<=fillPx : tpPrice>=fillPx) tpPrice = floorTo(fillPx + p.side*tick, prec.price);
         } else {
-          const slPct = p.meth ? (-p.mst.s/p.q0)/fillPx : p.trUsd ? (p.trUsd.sl/p.trUsd.q0)/fillPx : p.trend ? TR_SL/100/p.lev : p.halfback ? HB_SL/100/p.lev : S.cfg.sl/100;
+          const slPct = p.meth ? (-p.mst.s/kdOf(p))/fillPx : p.trUsd ? (p.trUsd.sl/p.trUsd.q0)/fillPx : p.trend ? TR_SL/100/p.lev : p.halfback ? HB_SL/100/p.lev : S.cfg.sl/100;
           const tpPct = (p.halfback || p.trend || p.meth) ? null : S.cfg.tp/100; // 半戻し利確は決済ラインが動くので、単発のTP注文は置かない（SLのみ）
           slPrice = floorTo(fillPx*(1 - p.side*slPct), prec.price);
           tpPrice = tpPct!=null ? floorTo(fillPx*(1 + p.side*tpPct), prec.price) : null;
@@ -1656,7 +1672,8 @@ async function fetchJson(url, opt){
       if (trendMode){
         // 決済方式は、パターンごとに自動選択されたもの（検証と同じ判定で動かす）
         const mk = (e.meth && METH[e.meth]) ? e.meth : "cur";
-        posObj.meth = mk; posObj.q0 = posObj.qty; posObj.e0 = fill; posObj.mst = mInit(mk); posObj.pat = e.pat || null; posObj.initMargin = margin;
+        posObj.meth = mk; posObj.q0 = posObj.qty; posObj.e0 = fill; posObj.mst = mInit(mk);
+        { const cc = CDL[t.sym], cs = cc && cc.m15, at = cs && cs.length > 20 ? atrOf(cs,14) : null; posObj.au = at > 0 && cs[cs.length-1].c > 0 ? at/cs[cs.length-1].c*(START_USD*S.cfg.size*S.cfg.lev) : null; } // 普段の値動き（15分足ATR）の$換算 posObj.pat = e.pat || null; posObj.initMargin = margin;
       } else if (S.cfg.halfback){
         posObj.halfback = true; posObj.initEntry = fill; posObj.initMargin = margin;
         posObj.slPriceFixed = side>0 ? fill*(1-HB_SL/100/lev) : fill*(1+HB_SL/100/lev);
@@ -1848,12 +1865,14 @@ async function fetchJson(url, opt){
     }
     // ---- 自動選択された決済方式での売買（検証のシミュレーションと同じ mStep で判定する）----
     const stopBusy = new Set();
+    // 損益の$は、証拠金が評価額の増減で変わっても、基準のポジション$160（=$500×4%×8倍）に換算して判定する（検証と同じ物差しにするため）
+    const kdOf = p => (START_USD*S.cfg.size*S.cfg.lev)/(p.e0 || p.entry);
     async function liveSetStop(p){ // BingX側の損切りを、今の損切りライン（$）に合わせて置き直す
       if (!S.cfg.live || !p.live || p.live.status!=="open" || stopBusy.has(p.sym)) return;
       stopBusy.add(p.sym);
       try{
         const base = baseOf(p.sym), prec = await getPrecision(base), t = tokens.get(p.sym);
-        const raw = (p.e0 || p.entry) + p.side*p.mst.s/p.q0;
+        const raw = (p.e0 || p.entry) + p.side*p.mst.s/kdOf(p);
         let target = p.side>0 ? floorTo(raw, prec.price) : ceilTo(raw, prec.price);
         const cur = t ? (t.mark || t.px) : null;
         if (cur > 0){ const mg = Math.max(cur*0.0008, Math.pow(10,-prec.price));
@@ -1878,8 +1897,8 @@ async function fetchJson(url, opt){
     }
     function methCheck(p,t,now){
       if ((p.side>0 && t.px<=p.liq) || (p.side<0 && t.px>=p.liq)){ closePos(p,"強制ロスカット"); return; }
-      const e0 = p.e0 || p.entry, d = METH[p.meth] || {}, L = p.mst, u = p.side*(t.px - e0)*p.q0, el = (now - p.ts)/1000;
-      const ev = mStep(p.meth, L, u, el, p.side*(t.px/e0-1)*100*p.lev, (p.mfe||0)*p.lev, p.q0*e0*0.001, coefOf(t, p.side));
+      const e0 = p.e0 || p.entry, d = METH[p.meth] || {}, L = p.mst, u = p.side*(t.px - e0)*kdOf(p), el = (now - p.ts)/1000;
+      const ev = mStep(p.meth, L, u, el, p.side*(t.px/e0-1)*100*p.lev, (p.mfe||0)*p.lev, START_USD*S.cfg.size*S.cfg.lev*0.001, coefOf(t, p.side), p.au);
       if (ev && ev.indexOf("exit") === 0){
         const why = ev === "exit:tp" ? "利確" : ev === "exit:cut" ? "早切り（下降係数"+d.cut.toFixed(1)+"超え）" : ev === "exit:time" ? (d.kind === "time" ? "固定時間で決済" : "時間ルールで決済") : (L.s > 0 ? "利益確保の損切り" : L.s >= 0 ? "建値撤退" : "損切り");
         closePos(p, why+"（"+(L.s>=0?"ライン+$":"ライン-$")+Math.abs(L.s).toFixed(2)+"・"+d.label+"）"); return;
@@ -2276,7 +2295,7 @@ async function fetchJson(url, opt){
         positions:S.positions.map(p=>{ const t = tokens.get(p.sym), pxv = t?t.px:p.entry, un = unreal(p,t)-p.fundingPaid, m0 = p.margin0 || p.margin, cf = S.cfg;
           let rows;
           if (p.meth && p.mst){
-            const d = METH[p.meth] || {}, L = p.mst, atU = u => (p.e0 || p.entry) + p.side*u/p.q0;
+            const d = METH[p.meth] || {}, L = p.mst, atU = u => (p.e0 || p.entry) + p.side*u/kdOf(p);
             rows = [];
             if (d.kind === "cur"){ rows.push({k:"tp", label:"利確 +$"+d.tp2+(L.h?"（残り）":""), px:atU(d.tp2), val:"+$"+d.tp2}); if (!L.h) rows.push({k:"tp", label:"部分利確 +$"+d.tp1+"（半分）", px:atU(d.tp1), val:"半分"}); }
             if (d.kind === "half" && !L.h) rows.push({k:"tp", label:"部分利確 +$2（半分）", px:atU(2), val:"半分"});
