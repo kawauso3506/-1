@@ -887,10 +887,13 @@ async function fetchJson(url, opt){
       const sum = tsigSummary(), A = S.auto;
       A.checkedAt = now; A.warn = null;
       const q = sum._cands.filter(c => c.best);
+      const hs = histCached(now), hOK = pat => !!(hs && hs.ready && hs.rows && hs.rows.some(r => r.pat === pat && r.g === "al" && r.ok));
       if (!q.length){ A.note = "基準を満たす組み合わせはまだありません。初期設定（ピンバー・今の設定）のまま"; return; }
       const next = {}, warns = [];
       for (const c of q){
         const curKey = A.pats[c.pat];
+        // 入り口（パターン）そのものが、同じ条件のランダム入りより良いことを、過去約14日の履歴検証で確認できたものだけ切り替え対象にする
+        if (!hOK(c.pat)){ warns.push(c.label+"は"+(hs && hs.ready ? "履歴検証で、ランダム入りより良いと確認できない" : "履歴検証の完了待ち")+"ため、切り替えを見送り"); if (curKey) next[c.pat] = curKey; continue; }
         if (c.best.st.rcN >= 30 && c.best.st.rcAvg < 0){ warns.push(c.label+"は直近24時間の期待値がマイナス（"+(c.best.st.rcAvg>=0?"+$":"-$")+Math.abs(c.best.st.rcAvg).toFixed(2)+"）のため採用を見送り"); if (curKey) next[c.pat] = curKey; continue; }
         if (curKey && curKey !== c.best.key){
           const m = sum._methods.find(x => x.key === curKey), curSt = m && m.byPat[c.pat];
@@ -1078,14 +1081,17 @@ async function fetchJson(url, opt){
     }
     // 直近の約定から、成行の買いの比率（金額ベース）を出す。buyerMaker=true は「買い手が指値側」＝成行の売り
     function buyShareOf(list, now){
-      let b = 0, tot = 0, n = 0;
+      let b = 0, tot = 0, n = 0, tmin = now;
       for (const x of (Array.isArray(list) ? list : [])){
         const tm = +(x.time || x.T || 0); if (tm && now - tm > 300000) continue; // 直近5分
+        if (tm && tm < tmin) tmin = tm;
         const q = parseFloat(x.quoteQty != null ? x.quoteQty : (parseFloat(x.qty)||0)*(parseFloat(x.price)||0)); if (!(q > 0)) continue;
         const bm = x.buyerMaker != null ? x.buyerMaker : x.isBuyerMaker; const maker = bm === true || bm === "true";
         tot += q; n++; if (!maker) b += q;
       }
-      return n >= 5 ? {share:b/tot, n, q:tot} : null;
+      // 取得できた約定が覆う秒数（直近5分まで）。1秒あたりの売買代金＝出来高の勢いの計算に使う
+      const span = Math.max(20, Math.min(300, (now - tmin)/1000));
+      return n >= 5 ? {share:b/tot, n, q:tot, span, rate:tot/span} : null;
     }
     async function fsPollFlows(now){
       // 対象：先物の売買代金上位30で、現物もある銘柄
@@ -1097,7 +1103,7 @@ async function fetchJson(url, opt){
         jobs.push(Promise.all([relay("/market/trades?symbol="+base+"USDT&limit=500").catch(()=>null), relay("/market/spot-trades?symbol="+base+"USDT&limit=100").catch(()=>null)]).then(([fj, sj]) => {
           const f = buyShareOf(fj && fj.result && fj.result.data, Date.now()), sp = buyShareOf(sj && sj.result && sj.result.data, Date.now());
           let x = FLOW.get(sym); if (!x){ x = {oi:[]}; FLOW.set(sym, x); }
-          x.fb = f ? f.share : null; x.fn = f ? f.n : 0; x.sb = sp ? sp.share : null; x.sn = sp ? sp.n : 0; x.at = Date.now();
+          x.fb = f ? f.share : null; x.fn = f ? f.n : 0; x.sb = sp ? sp.share : null; x.sn = sp ? sp.n : 0; x.fq = f ? f.rate : null; x.sq = sp ? sp.rate : null; x.at = Date.now();
         }));
       }
       { const sym = fsTop[(fsOiRot++) % fsTop.length], base = baseOf(sym); // 建玉は1回に1銘柄ずつ
@@ -1112,7 +1118,8 @@ async function fetchJson(url, opt){
       const dv = Math.max(0, sm[n-1][key] - ref[key]), dt = Math.max(1, (nowT - ref.t)/1000); return (dv/dt)/(day/86400); }
     function fsRow(sym, now){ // その銘柄の今の状態と数値
       const t = tokens.get(sym), s = SPOT.get(sym), x = FLOW.get(sym) || {}; if (!t || !s) return null;
-      const m = metricsOf(t), fvr = volRate(t.samples, "turn", 300, t.turn), svr = volRate(s.samples, "qv", 300, s.qv);
+      // 出来高の勢い＝直近の約定から求めた1秒あたりの売買代金 ÷ 24時間平均の1秒あたり売買代金（24時間出来高の増分は、古い分が抜けて0になるため使わない）
+      const m = metricsOf(t), fvr = x.fq != null && t.turn > 0 ? x.fq/(t.turn/86400) : null, svr = x.sq != null && s.qv > 0 ? x.sq/(s.qv/86400) : null;
       const oi = x.oi || [], oiChg = oi.length >= 2 && oi[0].v > 0 ? (oi[oi.length-1].v/oi[0].v - 1)*100 : null;
       const fresh = x.at && now - x.at < 240000;
       let st = 0;
@@ -1138,13 +1145,13 @@ async function fetchJson(url, opt){
       const n0 = FSR.done.length ? FSR.done[0].q : FSQ.seq;
       for (let c=Math.max(Math.floor(n0/FS_CHUNK), Math.floor(FSQ.saved/FS_CHUNK)); c<=Math.floor((FSQ.seq-1)/FS_CHUNK); c++)
         store.set(FSKEY+"_d"+c, JSON.stringify(FSR.done.filter(r => Math.floor(r.q/FS_CHUNK) === c)));
-      FSQ.saved = FSQ.seq; store.set(FSKEY, JSON.stringify({seq:FSQ.seq, n0, pn:FSQ.pn}));
+      FSQ.saved = FSQ.seq; store.set(FSKEY, JSON.stringify({seq:FSQ.seq, n0, pn:FSQ.pn})); store.set(FSKEY+"_chk", JSON.stringify(FSCHK));
     }
     function fsResetAll(){
       const n0 = FSR.done.length ? FSR.done[0].q : FSQ.seq;
       for (let c=Math.floor(n0/FS_CHUNK); c<=Math.floor((FSQ.seq-1)/FS_CHUNK); c++) store.set(FSKEY+"_d"+c, "");
       for (let i=0;i<FSQ.pn;i++) store.set(FSKEY+"_p"+i, "");
-      FSR = {pending:[], done:[]}; FSQ = {seq:0, saved:0, pn:0}; FSOPT = null; store.set(FSKEY, JSON.stringify({seq:0, n0:0, pn:0}));
+      FSR = {pending:[], done:[]}; FSQ = {seq:0, saved:0, pn:0}; FSOPT = null; FSCHK = {hN:0, hS:0, lN:0, lS:0}; store.set(FSKEY, JSON.stringify({seq:0, n0:0, pn:0}));
     }
     function fsPush(kind, now, row, t, extra){
       if (FSR.pending.length >= FS_MAX_PENDING) return;
@@ -1153,7 +1160,8 @@ async function fetchJson(url, opt){
         x:{fb:row.fb, sb:row.sb, fvr:row.fvr, svr:row.svr, fr1:row.fr1, fr5:row.fr5, fr15:row.fr15, sr5:row.sr5, oi:row.oi, fr:row.fr, prem:row.prem}, pth:[], bh:0, bl:0, f:{}}, extra||{}));
       fsDirty = true;
     }
-    let fsRows = [];
+    let fsRows = [], FSCHK = {hN:0, hS:0, lN:0, lS:0};
+    try{ const j = JSON.parse(store.get(FSKEY+"_chk") || "null"); if (j && typeof j.hN === "number") FSCHK = j; }catch(_){}
     let fsBusy = false;
     async function fsStep(now){
       if (fsBusy) return; fsBusy = true;
@@ -1165,6 +1173,8 @@ async function fetchJson(url, opt){
       fsRows = fsTop.map(sym => fsRow(sym, now)).filter(Boolean);
       for (const row of fsRows){
         const x = FLOW.get(row.sym) || {}, t = tokens.get(row.sym); if (!t) continue;
+        if (row.fresh && row.fb != null && row.fr5 != null && x.chkAt !== x.at){ x.chkAt = x.at; // 約定データが更新された時だけ1回数える
+          if (row.fb >= FS_BUY_HI){ FSCHK.hN++; FSCHK.hS += row.fr5; } else if (row.fb <= FS_BUY_LO){ FSCHK.lN++; FSCHK.lS += row.fr5; } }
         // 状態に入った瞬間を記録（同じ状態は15分に1回まで）
         if (row.st && row.st !== x.st){
           if (!x.lastRec || x.lastRec[row.st] == null || now - x.lastRec[row.st] >= 15*60000){ fsPush("st", now, row, t); x.lastRec = x.lastRec || {}; x.lastRec[row.st] = now; }
@@ -1198,7 +1208,7 @@ async function fetchJson(url, opt){
       if (FSR.pending.length) fsDirty = true;
       FSR.pending = keep;
       if (FSR.done.length > FS_MAX_DONE){ const oldC = Math.floor(FSR.done[0].q/FS_CHUNK); FSR.done.splice(0, FSR.done.length - FS_MAX_DONE); const newC = Math.floor(FSR.done[0].q/FS_CHUNK); for (let c=oldC;c<newC;c++) store.set(FSKEY+"_d"+c, ""); }
-      if (fsDirty && now - fsSavedAt > 60000){ fsSavedAt = now; fsDirty = false; fsSave(); }
+      if (now - fsSavedAt > 60000){ fsSavedAt = now; fsDirty = false; fsSave(); }
     }
     // ---- 分析 ----
     function fsReplay(r, dir, tp, sl, maxBars){ // 1分ごとの値動きから利確・損切りを再現（同じ1分の中では先に不利側へ動いたと仮定）
@@ -1228,9 +1238,8 @@ async function fetchJson(url, opt){
         B("下降側（④）：先物の成行買いの比率", dn, r => r.x.fb, [[0,0.3,"30%未満"],[0.3,0.4,"30〜40%"],[0.4,0.46,"40〜45%"]])
       ].filter(b => b.rows.length);
       // 成行の買い・売りの判定が正しいかの確認（成行買いが多い時に、直前1分の価格が上がっているか）
-      const hiB = all.filter(r => r.x.fb != null && r.x.fb >= 0.55 && r.x.fr1 != null), loB = all.filter(r => r.x.fb != null && r.x.fb <= 0.45 && r.x.fr1 != null);
-      const avg = xs => xs.length ? xs.reduce((a,r)=>a + r.x.fr1, 0)/xs.length : null;
-      const check = {hi:avg(hiB), hiN:hiB.length, lo:avg(loB), loN:loB.length};
+      // 成行の買い比率（直近5分）と、同じ5分間の先物の値動きを、全銘柄・全更新で集計（成行買いが多い時ほど価格が上がっていれば、判定の向きは正しい）
+      const check = {hi:FSCHK.hN ? FSCHK.hS/FSCHK.hN : null, hiN:FSCHK.hN, lo:FSCHK.lN ? FSCHK.lS/FSCHK.lN : null, loN:FSCHK.lN};
       // B. 押し目・戻りでのエントリー（利確・損切りの組み合わせを再現）
       const D = all.filter(r => r.k === "dip");
       const TP = [0.3,0.5,0.8,1.2,2.0], SL = [0.3,0.5,0.8,1.2];
@@ -1253,6 +1262,106 @@ async function fetchJson(url, opt){
         rule:"判定：成行買いの比率が"+Math.round(FS_BUY_HI*100)+"%以上＝買われている、"+Math.round(FS_BUY_LO*100)+"%以下＝売られている。先物は出来高が普段の"+FS_VR+"倍以上も条件（加熱・売り込み）。押し目・戻りは、方向のある状態に入ってから60分以内に、1分で普段の1.5倍以上か5分で普段の1倍以上、逆に動いた時。$は基準ポジション$160換算・手数料込み"};
     }
     function fsCached(now){ if (!FSOPT || now - fsOptAt > 10*60000){ try{ FSOPT = fsSummary(now); }catch(err){ FSOPT = {err:err.message}; } fsOptAt = now; } return FSOPT; }
+
+    // ============================================================
+    // 履歴検証：過去約15日分の15分足で「パターンが出た時」と「同じ向き・同じ条件でランダムに入った時（基準）」を比べる
+    // 4時間・24時間の値動きは相場全体の上げ下げに左右されるので、基準との「差」だけが、パターン本来の効果になる
+    // 未来の情報は使わない（各時点で確定していた足だけでトレンドとパターンを判定）。売買はしない（検証のみ）
+    // ============================================================
+    const HKEY = "trenchdesk_hist_v1", H_TOP = 60, H_STEP_MS = 25000, H_GAP = 8, H_WARM = 119, H_FWD = 96, H_COST = 0.15, H_NT = 160, H_FEE = H_NT*0.0015;
+    const H_GROUPS = [["all","トレンド条件なし（全部）"],["al","4時間・1時間が同じ向き（今の条件）"],["al3","4時間・1時間・日足すべて同じ向き"],["h4","4時間足だけ同じ向き"],["h1","1時間足だけ同じ向き"],["rng","4時間足がはっきりしない（レンジ）"],["ctr","4時間足と逆向きに入る"]];
+    let H = {acc:{}, done:{}, since:0, complete:false, doneAt:0, prev:null}, hBusy = false, hLastAt = 0, hCache = null, hCacheAt = 0, hErrLogged = false;
+    try{ const j = JSON.parse(store.get(HKEY) || "null"); if (j && j.acc) H = Object.assign(H, j); }catch(_){}
+    function hSave(){ store.set(HKEY, JSON.stringify(H)); }
+    function trendSeries(cs){ // 各時点で「その足が最後に確定していた」場合のトレンド（1/-1/0）
+      const e21 = emaSeries(cs,21), e75 = emaSeries(cs,75), e200 = emaSeries(cs,200), out = new Array(cs.length).fill(0);
+      for (let i=199;i<cs.length;i++){ const c = cs[i].c;
+        if (e21[i]>e75[i] && e75[i]>e200[i] && c>e75[i]) out[i] = 1; else if (e21[i]<e75[i] && e75[i]<e200[i] && c<e75[i]) out[i] = -1; }
+      return out;
+    }
+    function hIdx(cs, tf, T, k){ while (k+1 < cs.length && cs[k+1].t + tf <= T) k++; return k; } // 時刻T以前に確定した最後の足
+    function hAdd(key, half, f1, f4, f24, l){
+      let a = H.acc[key]; if (!a){ a = H.acc[key] = [{n:0,s1:0,s4:0,s24:0,sl:0,q4:0,ql:0},{n:0,s1:0,s4:0,s24:0,sl:0,q4:0,ql:0}]; }
+      const x = a[half]; x.n++; x.s1 += f1; x.s4 += f4; x.s24 += f24; x.sl += l; x.q4 += f4*f4; x.ql += l*l;
+    }
+    function hProcess(m15, h1, h4, d1){
+      const n = m15.length, last = n - 1 - H_FWD; if (last <= H_WARM + 20) return 0;
+      const t1 = trendSeries(h1), t4 = trendSeries(h4), td = trendSeries(d1);
+      let k1 = -1, k4 = -1, kd = -1, cnt = 0; const mid = Math.floor((H_WARM + last)/2), lastEv = {};
+      for (let i = H_WARM; i <= last; i++){
+        const T = m15[i].t + TF.m15;
+        k1 = hIdx(h1, TF.h1, T, k1); k4 = hIdx(h4, TF.h4, T, k4); kd = hIdx(d1, TF.d1, T, kd);
+        const s1 = k1 >= 0 ? t1[k1] : 0, s4 = k4 >= 0 ? t4[k4] : 0, sd = kd >= 0 ? td[kd] : 0;
+        const half = i < mid ? 0 : 1, p0 = m15[i].c, isBase = (i % H_GAP === 0), win = m15.slice(i - H_WARM, i + 1);
+        for (const d of [1,-1]){
+          const gs = ["all"], a4 = s4 === d, a1 = s1 === d;
+          if (a4 && a1){ gs.push("al"); if (sd === d) gs.push("al3"); }
+          if (a4) gs.push("h4"); if (a1) gs.push("h1"); if (s4 === 0) gs.push("rng"); if (s4 === -d) gs.push("ctr");
+          let st = null;
+          const S = () => st || (st = (() => { const pth = new Array(H_FWD);
+            for (let k=1;k<=H_FWD;k++){ const c = m15[i+k];
+              pth[k-1] = [d*(c.c/p0-1)*H_NT, d>0 ? (c.h/p0-1)*H_NT : -(c.l/p0-1)*H_NT, d>0 ? (c.l/p0-1)*H_NT : -(c.h/p0-1)*H_NT]; }
+            const f = k => d*(m15[i+k].c/p0-1)*100;
+            return {f1:f(4), f4:f(16), f24:f(96), l:replay({pth}, {w:2, cut:null})}; })());
+          if (isBase){ const s = S(); for (const g of gs) hAdd("B|"+d+"|"+g, half, s.f1, s.f4, s.f24, s.l); }
+          const hit = m15Pattern(win, d);
+          if (hit){ const key = hit.pat+"|"+d;
+            if (lastEv[key] == null || i - lastEv[key] >= H_GAP){ lastEv[key] = i; const s = S(); for (const g of gs) hAdd(hit.pat+"|"+d+"|"+g, half, s.f1, s.f4, s.f24, s.l); cnt++; } }
+        }
+      }
+      return cnt;
+    }
+    async function hStep(now){
+      if (hBusy) return; const cur15 = Math.floor(now/TF.m15)*TF.m15;
+      if (now < cur15 + 6*60000 || now - hLastAt < H_STEP_MS) return; // 15分足の確定直後はアクセスが集中するので避ける
+      if (!H.since) H.since = now;
+      // 24時間たったら新しい範囲でやり直す（終わるまでは前回の結果を表示に使う）
+      if (H.complete && now - H.since > 24*3600e3){ H.prev = {acc:H.acc, since:H.since, doneAt:H.doneAt}; H.acc = {}; H.done = {}; H.complete = false; H.since = now; hSave(); }
+      if (H.complete) return;
+      const uni = [...tokens.values()].filter(t => t.px > 0 && t.turn >= TR_MIN_TURN).sort((a,b) => b.turn - a.turn).slice(0, H_TOP).map(t => t.sym);
+      const next = uni.find(s => H.done[s] == null);
+      if (!next){ if (uni.length >= 10){ H.complete = true; H.doneAt = now; H.prev = null; hSave(); addLog("SYS","履歴検証が完了しました（"+Object.keys(H.done).length+"銘柄）", true); } return; }
+      hBusy = true; hLastAt = now;
+      try{
+        const base = baseOf(next), n0 = Date.now();
+        const m15 = await fetchTf(base,"15m",TF.m15,1440,n0), h1 = await fetchTf(base,"1h",TF.h1,800,n0), h4 = await fetchTf(base,"4h",TF.h4,420,n0), d1 = await fetchTf(base,"1d",TF.d1,260,n0);
+        let cnt = 0;
+        if (m15.length > H_WARM + H_FWD + 50 && h1.length >= 260 && h4.length >= 230 && d1.length >= 210) cnt = hProcess(m15, h1, h4, d1);
+        H.done[next] = cnt; hSave(); hCache = null; hErrLogged = false;
+      }catch(err){
+        hLastAt = now + 30000; // 失敗（アクセス制限など）は少し待って同じ銘柄をやり直す
+        if (!hErrLogged){ hErrLogged = true; addLog("SYS","履歴検証のデータ取得に失敗（自動でやり直します）: "+err.message, true); }
+      } finally { hBusy = false; }
+    }
+    // 同じ向き・同じ条件でランダムに入った場合（基準）と比べる。基準は、パターンの向きの内訳に合わせて平均する
+    function hCalc(acc, K, g, halves){
+      let n = 0, q4 = 0, ql = 0; const P = {s1:0,s4:0,s24:0,sl:0}, B = {s1:0,s4:0,s24:0,sl:0};
+      const mg = (a) => { const o = {n:0,s1:0,s4:0,s24:0,sl:0,q4:0,ql:0}; for (const h of halves) for (const k in o) o[k] += a[h][k]; return o; };
+      for (const d of [1,-1]){
+        const pa = acc[K+"|"+d+"|"+g], ba = acc["B|"+d+"|"+g]; if (!pa || !ba) continue;
+        const p = mg(pa), b = mg(ba); if (!p.n || !b.n) continue;
+        n += p.n; q4 += p.q4; ql += p.ql; for (const k of ["s1","s4","s24","sl"]){ P[k] += p[k]; B[k] += b[k]/b.n*p.n; }
+      }
+      if (!n) return null;
+      const r = {n, p1:P.s1/n - H_COST, p4:P.s4/n - H_COST, p24:P.s24/n - H_COST, pl:P.sl/n - H_FEE, b1:B.s1/n - H_COST, b4:B.s4/n - H_COST, b24:B.s24/n - H_COST, bl:B.sl/n - H_FEE};
+      r.x1 = r.p1 - r.b1; r.x4 = r.p4 - r.b4; r.x24 = r.p24 - r.b24; r.xl = r.pl - r.bl;
+      r.ci4 = n > 1 ? 1.96*Math.sqrt(Math.max(0, q4/n - (P.s4/n)**2)/n) : null; r.cil = n > 1 ? 1.96*Math.sqrt(Math.max(0, ql/n - (P.sl/n)**2)/n) : null;
+      return r;
+    }
+    function hSummary(now){
+      const acc = H.complete ? H.acc : (H.prev ? H.prev.acc : H.acc), doneN = Object.keys(H.done).length, ready = !!(H.complete || H.prev);
+      const rows = []; let tested = 0, okN = 0;
+      for (const pk of Object.keys(TR_PATS)) for (const [g, gl] of H_GROUPS){
+        const all = hCalc(acc, pk, g, [0,1]); if (!all || all.n < 15) continue;
+        const a = hCalc(acc, pk, g, [0]), b = hCalc(acc, pk, g, [1]);
+        const ok = all.n >= 60 && !!a && !!b && a.n >= 20 && b.n >= 20 && all.xl > 0 && a.xl > 0 && b.xl > 0 && all.cil != null && all.xl - all.cil > 0; // 前後半ともプラスで、誤差の幅を引いてもプラス
+        tested++; if (ok) okN++; rows.push({pat:pk, label:TR_PATS[pk], g, gl, all, a, b, ok});
+      }
+      const bm = d => { const a = acc["B|"+d+"|all"]; if (!a) return null; let n = 0, s1 = 0, s4 = 0, s24 = 0; for (const h of [0,1]){ n += a[h].n; s1 += a[h].s1; s4 += a[h].s4; s24 += a[h].s24; } return n ? {n, f1:s1/n - H_COST, f4:s4/n - H_COST, f24:s24/n - H_COST} : null; };
+      return {progress:{done:doneN, total:H_TOP, complete:H.complete, ready, since:H.since, doneAt:H.doneAt}, ready, market:{long:bm(1), short:bm(-1)}, rows, tested, okN,
+        note:"過去約14日分の15分足（各パターンが出た直後の終値で入った場合）。「ランダム入り」は、同じ向き・同じトレンド条件で、2時間おきに入った場合の平均。「差」＝パターンの値 − ランダム入り。手数料は往復0.15%（$160換算で$0.24）。段階式$2は15分足で再現するため、5分足の検証より厳しめに出ます。✅＝60件以上で、前半・後半とも段階式$2の差がプラスで、誤差の幅を引いてもプラス。ただし条件を多く試すほど偶然の✅も混ざります（何も効果がない値動きでも、1〜2通りは出ます）"};
+    }
+    function histCached(now){ if (!hCache || now - hCacheAt > 60000){ try{ hCache = hSummary(now); }catch(err){ hCache = {err:err.message}; } hCacheAt = now; } return hCache; }
 
     async function pollTickers(){
       const rows = src === "bingx" ? await fetchBingx() : await fetchBybit();
@@ -2023,6 +2132,7 @@ async function fetchJson(url, opt){
         out.candles = {h1:h1max, h4:h4max, h1need:EMA1_PERIOD, h4need:EMA4_PERIOD, tokens:cnt}; }
       try{ out.trend = tsigSummary(); }catch(_){ out.trend = null; }
       out.opt = optCached(Date.now());
+      try{ out.hist = histCached(Date.now()); }catch(_){ out.hist = null; }
       try{ out.fs = Object.assign({}, fsCached(Date.now()), {live:fsRows.map(r => Object.assign({}, r, {sym:baseOf(r.sym), name:r.st ? FS_STATES[r.st] : "–"}))}); }catch(_){ out.fs = null; }
       return out;
     }
@@ -2071,6 +2181,7 @@ async function fetchJson(url, opt){
       try{ tsigStep(now); }catch(_){}
       try{ txStep(now); }catch(_){}
       fsStep(now).catch(()=>{});
+      hStep(now).catch(()=>{});
       if (now - REG.at >= 60000){ let up = 0, dn = 0; for (const s of Object.keys(CDL)){ const d = bigTrend(s); if (d>0) up++; else if (d<0) dn++; } REG = {up, dn, at:now}; }
       if (now - (S.auto.checkedAt||0) >= AUTO_EVERY && TSIG.done.length + TSIG.pending.length > 0){ try{ autoSelect(now); }catch(err){ S.auto.checkedAt = now; addLog("SYS","自動選択の計算に失敗: "+err.message,true); } }
       for (const p of [...S.positions]){
