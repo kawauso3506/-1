@@ -796,7 +796,7 @@ details.a-ctl .ctl,details.a-ctl .why{margin-top:10px}
       tr.rows.forEach(rw => { L.push("["+rw.label+"] "+rw.n+"件"); tr.H.forEach(h => { const x = rw.st[h]; L.push("  "+(h/3600)+"時間後: "+(x && x.n ? sigFmt(x) : "データ待ち")); });
         if (rw.rc1 && rw.rc1.n) L.push("  直近24h・1時間後: "+sigFmt(rw.rc1)); if (rw.rc4 && rw.rc4.n) L.push("  直近24h・4時間後: "+sigFmt(rw.rc4)); });
       L.push("", "--- 短期シグナル ---"); }
-    if (sg.hist){ L.push("--- 履歴検証（過去約14日・ランダム入りとの比較） ---"); histLines(sg.hist).forEach(([t, ls]) => { L.push("["+t+"]"); ls.forEach(l => L.push("  "+l)); }); L.push(""); }
+    if (sg.hist){ L.push("--- 履歴検証（過去約60日・ランダム入りとの比較） ---"); histLines(sg.hist).forEach(([t, ls]) => { L.push("["+t+"]"); ls.forEach(l => L.push("  "+l)); }); L.push(""); }
     if (sg.fs){ L.push("--- 先物×現物 ---"); fsLines(sg.fs).forEach(([t, ls]) => { L.push("["+t+"]"); ls.forEach(l => L.push("  "+l)); }); L.push(""); }
     if (sg.opt){ L.push("--- 最適化 ---"); optLines(sg.opt).forEach(([t, ls]) => { L.push("["+t+"]"); ls.forEach(l => L.push("  "+l)); }); L.push(""); }
     Object.keys(NM).forEach(k => { L.push("[" + NM[k] + "]"); HH.forEach(hh => { const x = sg.tables[k][hh]; L.push("  "+hl(hh)+": "+(x && x.n ? sigFmt(x) : "データ待ち")); }); });
