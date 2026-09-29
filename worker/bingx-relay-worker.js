@@ -45,7 +45,7 @@ async function bingxRequest(env, method, path, params = {}) {
   const signature = await sign(env.BINGX_API_SECRET, paramString);
   const url = `${base}${path}?${paramString}&signature=${signature}`;
   const r = await fetch(url, { method, headers: { "X-BX-APIKEY": env.BINGX_API_KEY } });
-  const text = await r.text();
+  const text = (await r.text()).replace(/"(orderId|tranId|tradeId|positionId)"\s*:\s*(\d{15,})/g, '"$1":"$2"'); // 19桁の注文番号は、数値にすると末尾がずれるため、文字列にして受け取る
   let data;
   try { data = JSON.parse(text); } catch (_) { data = { raw: text }; }
   if (data && typeof data === "object") { const m = text.match(/"orderId"\s*:\s*"?(\d+)"?/); if (m) data._orderId = m[1]; }
@@ -137,6 +137,23 @@ async function route(req, env) {
         const symbol = u.searchParams.get("symbol"), orderId = u.searchParams.get("orderId");
         if (!symbol || !orderId) return json({ error: "symbol, orderId は必須です" }, 400);
         const r = await bingxRequest(env, "GET", "/openApi/swap/v2/trade/order", { symbol: toBingxSymbol(symbol), orderId: String(orderId) });
+        return json({ demo: isDemo, result: r });
+      }
+      // 収支明細（確定損益・取引手数料・資金調達）
+      if (req.method === "GET" && u.pathname === "/income") {
+        const p = { limit: Number(u.searchParams.get("limit")) || 1000 };
+        const st = u.searchParams.get("startTime"); if (st && /^\d+$/.test(st)) p.startTime = Number(st);
+        const sy = u.searchParams.get("symbol"); if (sy) p.symbol = toBingxSymbol(sy);
+        const r = await bingxRequest(env, "GET", "/openApi/swap/v2/user/income", p);
+        return json({ demo: isDemo, result: r });
+      }
+      // 注文履歴（約定済みの注文。手動トレードの実際の約定価格・損益を調べる）
+      if (req.method === "GET" && u.pathname === "/order-history") {
+        const symbol = u.searchParams.get("symbol");
+        if (!symbol) return json({ error: "symbol は必須です" }, 400);
+        const p = { symbol: toBingxSymbol(symbol), limit: Number(u.searchParams.get("limit")) || 100 };
+        const st = u.searchParams.get("startTime"); if (st && /^\d+$/.test(st)) p.startTime = Number(st);
+        const r = await bingxRequest(env, "GET", "/openApi/swap/v2/trade/allOrders", p);
         return json({ demo: isDemo, result: r });
       }
       // 未約定の注文一覧（切り替え時の後片付け用。symbolなし＝全銘柄）
@@ -356,7 +373,7 @@ RULE.beCost = 2*(RULE.fee + RULE.slip); // 建値に上げるときの上乗せ�
 RULE.slPct = +((RULE.riskEq/(RULE.marginPct*RULE.lev) - 2*(RULE.fee + RULE.slip))*100).toFixed(3);
 
 const V3_KEY = "td3_state", V3_BTKEY = "td3_bt2", V3_VER = 3, V3_BTVER = 4; // 過去検証だけ作り直すため、検証用の版を別にしている（売買の記録は消えない）
-const TFMS = {m15:900000, h1:3600000, d1:86400000, w1:604800000};
+const TFMS = {m15:900000, h1:3600000, h4:14400000, d1:86400000, w1:604800000};
 
 function emaSeries(cs, n){ const k = 2/(n+1), out = new Array(cs.length); let e = null;
   for (let i=0;i<cs.length;i++){ const c = cs[i].c; e = e == null ? c : c*k + e*(1-k); out[i] = e; } return out; }
@@ -392,8 +409,8 @@ function shapeOf(P, L){
 function parseK(j, tfMs, now){
   const raw = (j && j.result && j.result.data) || (j && j.data) || [];
   return (Array.isArray(raw) ? raw : []).map(x => Array.isArray(x)
-    ? {t:+x[0], o:+x[1], h:+x[2], l:+x[3], c:+x[4]}
-    : {t:+(x.time!=null?x.time:x.openTime), o:+x.open, h:+x.high, l:+x.low, c:+x.close}
+    ? {t:+x[0], o:+x[1], h:+x[2], l:+x[3], c:+x[4], v:+x[5]||0}
+    : {t:+(x.time!=null?x.time:x.openTime), o:+x.open, h:+x.high, l:+x.low, c:+x.close, v:+x.volume||0}
   ).filter(c => c.t > 0 && c.c > 0 && c.t + tfMs <= now).sort((a,b) => a.t - b.t); // 確定した足だけ
 }
 async function fetchK(base, iv, tfMs, limit, now){
@@ -420,10 +437,11 @@ function makePerp(){
 
   function fresh(){ return {ver:V3_VER, startedAt:Date.now(), running:true, cash:START_USD, positions:[], trades:[], log:[], seq:0, W:{}, pend:[], legacy:null, day:{}}; }
   function load(){ try{ const j = JSON.parse(store.get(V3_KEY) || "null"); S = j && j.ver === V3_VER ? Object.assign(fresh(), j) : fresh(); }catch(_){ S = fresh(); } }
-  function persist(){ store.set(V3_KEY, JSON.stringify(S)); }
+  function persist(){ store.set(V3_KEY, JSON.stringify(S)); if (manDirty && MAN) manSave(); if (ledDirty && LED && Date.now() - ledSavedAt > 30000) ledSave(); }
   function log(tag, msg){ S.log.unshift({id:++S.seq, t:Date.now(), tag, msg}); if (S.log.length > 120) S.log.length = 120; }
   function unreal(p){ const t = tokens.get(p.sym); const px = t && t.px > 0 ? t.px : p.entry; return p.dir*(px - p.entry)*p.qty; }
-  function equity(){ let v = S.cash; for (const p of S.positions) v += p.margin + unreal(p); return v; }
+  function equityInternal(){ let v = S.cash; for (const p of S.positions) v += p.margin + unreal(p); return v; } // アプリ内の独自計算（BingXが取得できないときの代わり）
+  function equity(){ const L = LED ? ledGet() : null; return L && L.ok ? L.eq : equityInternal(); } // 総資産＝500＋BingXの実現損益＋含み損益
 
   // ---- 価格と売買代金 ----
   async function pollTickers(){
@@ -510,6 +528,7 @@ function makePerp(){
     if (!S.running) return "新規エントリー停止中";
     if (S.positions.some(p => p.sym === sym)) return "同じ銘柄を保有中";
     if (S.legacy && S.legacy.positions.some(x => x.sym === baseOf(sym))) return "取引所に、この銘柄の管理外のポジションが残っている";
+    if (MAN && (Object.values(MAN.active).some(r => baseOf(r.sym) === baseOf(sym)) || manOrdSyms.includes(baseOf(sym)))) return "この銘柄は手動でポジションまたは注文がある（手動の注文を取り消さないため）";
     if (S.positions.length >= RULE.maxPos) return "最大"+RULE.maxPos+"件に達している";
     if (S.positions.filter(p => p.dir === dir).length >= RULE.maxSameDir) return "同じ方向が最大"+RULE.maxSameDir+"件に達している";
     const b = baseOf(sym), other = b === "BTC" ? "ETH" : b === "ETH" ? "BTC" : null;
@@ -549,15 +568,22 @@ function makePerp(){
     S.cash += m + pnl; p.realized += pnl; p.qty -= q; p.margin -= m;
     if (frac >= 1 || p.qty <= p.qty0*1e-6){
       S.positions = S.positions.filter(x => x !== p);
-      const net = p.realized - p.fee, eqPct = net/(p.margin0/RULE.marginPct)*100;
+      const booked = p.booked || 0, net = p.realized - p.fee - booked, eqPct = net/(p.margin0/RULE.marginPct)*100; // 一部決済で計上済みの分は、ここでは含めない
       const dk = new Date(Date.now()+9*3600e3).toISOString().slice(0,10);
-      const rec = {sym:p.sym, dir:p.dir, pat:p.pat, entry:p.entry, exit:px, ts:p.ts, exitTs:Date.now(), net:+net.toFixed(2), eqPct:+eqPct.toFixed(2), reason, half:p.half, est:!fillKnown && !!(p.live && p.live.status === "open"), eq0:p.margin0/RULE.marginPct, dayKey:dk, entryEst:!p.fillEntry};
+      const rec = {sym:p.sym, dir:p.dir, pat:p.pat, entry:p.entry, exit:px, ts:p.ts, exitTs:Date.now(), net:+net.toFixed(2), eqPct:+eqPct.toFixed(2), reason, half:p.half, est:!fillKnown && !!(p.live && p.live.status === "open"), eq0:p.margin0/RULE.marginPct, dayKey:dk, entryEst:!p.fillEntry, booked:+booked.toFixed(2), total:+(net + booked).toFixed(2)};
       S.trades.unshift(rec);
       if (S.trades.length > 300) S.trades.length = 300;
       S.day[dk] = +((S.day[dk]||0) + net).toFixed(2);
       log("決済", baseOf(p.sym)+" "+reason+" ／ 損益 "+(net >= 0 ? "+" : "")+net.toFixed(2)+"$（総資産の"+(eqPct >= 0 ? "+" : "")+eqPct.toFixed(2)+"%）");
       liveClose(p, 1, {rec, px, q});
-    } else { log("半分利確", baseOf(p.sym)+" "+reason+" ／ 実現 "+(pnl >= 0 ? "+" : "")+pnl.toFixed(2)+"$"); liveClose(p, frac, {rec:null, px, q}); }
+    } else { // 一部決済：履歴にも1行として記録し、今日の損益にも入れる（建てた時の手数料は、決済した割合ぶんを引く）
+      const net = pnl - p.fee*(q/p.qty0), eq0 = p.margin0/RULE.marginPct, dk = new Date(Date.now()+9*3600e3).toISOString().slice(0,10);
+      p.booked = (p.booked || 0) + net;
+      const rec = {sym:p.sym, dir:p.dir, pat:p.pat, entry:p.entry, exit:px, ts:p.ts, exitTs:Date.now(), net:+net.toFixed(2), eqPct:+(net/eq0*100).toFixed(2), reason, half:true, part:true, est:!fillKnown && !!(p.live && p.live.status === "open"), eq0, dayKey:dk, entryEst:!p.fillEntry};
+      S.trades.unshift(rec); if (S.trades.length > 300) S.trades.length = 300;
+      S.day[dk] = +((S.day[dk]||0) + net).toFixed(2);
+      log("半分利確", baseOf(p.sym)+" "+reason+" ／ 損益 "+(net >= 0 ? "+" : "")+net.toFixed(2)+"$（総資産の"+(net >= 0 ? "+" : "")+(net/eq0*100).toFixed(2)+"%）");
+      liveClose(p, frac, {rec, px, q}); }
   }
   function managePrice(p){ // 毎回の価格で：損切り・半分利確
     const t = tokens.get(p.sym); if (!t || !(t.px > 0)) return;
@@ -581,7 +607,7 @@ function makePerp(){
   async function placeStop(p, qty, prec){ // 損切り注文を置き、その注文番号を返す（失敗したら例外）
     const j = await relay("/bracket-only", "POST", {symbol:baseOf(p.sym)+"USDT", positionSide:side(p), quantity:qty, slPrice:Number(p.stop.toFixed(prec.price))});
     if (j && j.errors && j.errors.length) throw new Error("損切り注文が通りませんでした: "+JSON.stringify(j.errors).slice(0,160));
-    return j && j.ids ? j.ids.sl : null;
+    const id = j && j.ids ? j.ids.sl : null; addBot(id); return id;
   }
   async function fillOf(sym, orderId){ // 取引所の注文の、実際の平均約定価格（最大4回、0.8秒おきに確認）
     if (!orderId) return null;
@@ -604,7 +630,7 @@ function makePerp(){
         if (!(qty > 0)) throw new Error("数量が最小単位未満");
         await relay("/cancel-all", "POST", {symbol:b+"USDT"}).catch(()=>{});
         const lk = b+"|"+side(p); if (!levSet.has(lk)){ await relay("/leverage", "POST", {symbol:b+"USDT", side:side(p), leverage:RULE.lev}); levSet.add(lk); }
-        const r = await relay("/order", "POST", {symbol:b+"USDT", side:p.dir > 0 ? "BUY" : "SELL", positionSide:side(p), quantity:qty}), oid = r && r.result && r.result._orderId;
+        const r = await relay("/order", "POST", {symbol:b+"USDT", side:p.dir > 0 ? "BUY" : "SELL", positionSide:side(p), quantity:qty}), oid = r && r.result && r.result._orderId; addBot(oid);
         p.live = {status:"open", qty, at:Date.now()};
         p.live.slId = await placeStop(p, qty, prec); // まず、想定価格の損切りを置く（無防備な時間を作らない）
         log("取引所", b+"：成行で建てて、損切り注文 "+fmtPx(p.stop)+" を置きました");
@@ -630,7 +656,7 @@ function makePerp(){
       try{
         const q = frac >= 1 ? p.live.qty : floorTo(p.live.qty*frac, prec.qty);
         let oid = null;
-        if (q > 0){ const r = await relay("/close", "POST", {symbol:b+"USDT", positionSide:side(p), quantity:q}).catch(err => { if (frac < 1) throw err; return null; }); oid = r && r.result && r.result._orderId; }
+        if (q > 0){ const r = await relay("/close", "POST", {symbol:b+"USDT", positionSide:side(p), quantity:q}).catch(err => { if (frac < 1) throw err; return null; }); oid = r && r.result && r.result._orderId; addBot(oid); }
         await relay("/cancel-all", "POST", {symbol:b+"USDT"}).catch(()=>{});
         if (frac >= 1){ p.live.status = "closed"; }
         else { p.live.qty = floorTo(p.live.qty - q, prec.qty); if (p.live.qty > 0) p.live.slId = await placeStop(p, p.live.qty, prec); }
@@ -639,7 +665,8 @@ function makePerp(){
         if (f){
           const delta = p.dir*(f.px - ctx.px)*ctx.q, slip = p.dir*(ctx.px - f.px)/ctx.px*100; noteSlip("ex", slip);
           S.cash += delta;
-          if (ctx.rec){ const r = ctx.rec; r.net = +(r.net + delta).toFixed(2); r.eqPct = +(r.net/r.eq0*100).toFixed(2); r.exit = f.px; r.est = false; if (r.dayKey) S.day[r.dayKey] = +((S.day[r.dayKey]||0) + delta).toFixed(2); }
+          if (ctx.rec){ const r = ctx.rec; r.net = +(r.net + delta).toFixed(2); r.eqPct = +(r.net/r.eq0*100).toFixed(2); r.exit = f.px; r.est = false; if (r.dayKey) S.day[r.dayKey] = +((S.day[r.dayKey]||0) + delta).toFixed(2);
+            if (r.part){ p.realized += delta; p.booked = (p.booked||0) + delta; } } // 残りの損益の計算と、二重に数えないための計上済み額の両方に反映
           else p.realized += delta;
           log("約定", b+"：決済の実際の約定価格 "+fmtPx(f.px)+"（想定 "+fmtPx(ctx.px)+"、不利側に "+(slip >= 0 ? "+" : "")+slip.toFixed(2)+"%）。損益を "+(delta >= 0 ? "+" : "")+delta.toFixed(2)+"$ 補正");
         } else if (ctx && ctx.rec) log("約定", b+"：決済の実際の約定価格を取得できなかったため、推定のままです");
@@ -663,8 +690,8 @@ function makePerp(){
       const mineSym = new Set(S.positions.map(p => baseOf(p.sym)));
       orderSyms = [...new Set((Array.isArray(orders) ? orders : []).map(x => baseOf(String(x.symbol||""))).filter(v => v && !mineSym.has(v)))]; }
     const prevN = S.legacy ? S.legacy.positions.length : -1;
-    S.legacy = (others.length || orderSyms.length) ? {at:now, positions:others, orderSyms} : null;
-    if (others.length && prevN !== others.length) log("SYS", "取引所に、このアプリが管理していないポジションが"+others.length+"件あります（"+others.map(x => x.sym+" "+(x.side === "LONG" ? "ロング" : "ショート")).join("、")+"）。自動では決済しません。画面で確認してください");
+    S.legacy = (others.length || orderSyms.length) && !S.manualOn ? {at:now, positions:others, orderSyms} : null; // 手動記録モードでは、管理外のポジションは「手動トレード」として扱う
+    if (others.length && prevN !== others.length && !S.manualOn) log("SYS", "取引所に、このアプリが管理していないポジションが"+others.length+"件あります（"+others.map(x => x.sym+" "+(x.side === "LONG" ? "ロング" : "ショート")).join("、")+"）。自動では決済しません。画面で確認してください");
     const opens = S.positions.filter(p => p.live && p.live.status === "open" && now - (p.live.at||0) > 30000); if (!opens.length) return;
     for (const p of opens) if (!has.has(baseOf(p.sym)+"|"+side(p))){
       p.live.status = "closed"; const f = p.live.slId ? await fillOf(p.sym, p.live.slId) : null, t = tokens.get(p.sym);
@@ -692,6 +719,8 @@ function makePerp(){
       if (S.pend.length) openFromPending(now);
       await reconcile(now).catch(err => { lastErr = "照合: "+err.message; });
       btStep(now).catch(err => { lastErr = "検証: "+err.message; });
+      manualStep(now).catch(err => { lastErr = "手動記録: "+err.message; }); manWork().catch(()=>{});
+      ledStep(now).catch(err => { lastErr = "BingXの収支の取得: "+err.message; });
     }catch(err){ lastErr = err.message; log("SYS", "処理エラー: "+err.message); }
     finally{ busy = false; persist(); }
   }
@@ -832,6 +861,341 @@ function makePerp(){
       from:BT.from, to:BT.to, days:+days.toFixed(1), rows}; btCacheAt = Date.now(); return btCache;
   }
 
+  // ============================================================
+  // 手動トレードの記録と分析
+  // 取引所（BingXデモ）で手動で建てたポジションを検知し、①その時の相場の状況 ②損切り・利確の置き方 ③値動きと結果 を記録する。
+  // 「ランダムに入った場合」の分布と比べて、入りの特徴（何が普通より偏っているか）と、入り後の値動き・決済の良し悪しを統計で確かめる。
+  // ボットの新規エントリーは止め、ボットが管理していないポジションはすべて手動として扱う（自動では触らない）
+  // ============================================================
+  const MAN_KEY = "td3_man", MAN_VER = 1, MAN_POLL = 10000, MAN_DAYS = 14;
+  let MAN = null, manAt = 0, manBusy = false, manQBusy = false, manDirty = false, manOrdSyms = [], manCache = null, manCacheAt = 0, btcCache = null;
+  const manQ = [];
+  function manFresh(){ return {ver:MAN_VER, seq:0, active:{}, done:[], diag:{}}; }
+  function manLoad(){
+    try{ const j = JSON.parse(store.get(MAN_KEY) || "null");
+      if (j && j.ver === MAN_VER){ MAN = j; MAN.done = []; for (let c=0;c<(j.chunks||0);c++) MAN.done.push(...JSON.parse(store.get(MAN_KEY+"_d"+c) || "[]")); delete MAN.chunks; }
+      else MAN = manFresh();
+    }catch(_){ MAN = manFresh(); }
+  }
+  function manSave(){ // 20件ごとに別のキーへ分けて保存（1つのキーの保存上限を超えないため）
+    const chunks = Math.ceil(MAN.done.length/20), meta = Object.assign({}, MAN, {done:undefined, chunks});
+    for (let c=0;c<chunks;c++) store.set(MAN_KEY+"_d"+c, JSON.stringify(MAN.done.slice(c*20,(c+1)*20)));
+    store.set(MAN_KEY, JSON.stringify(meta)); manDirty = false;
+  }
+  const num = v => { const x = parseFloat(v); return isFinite(x) ? x : 0; };
+
+  // ---- 相場の状況（特徴量）：バケットに分けて、ランダムな時点の分布と比べられるようにする ----
+  const FEATS = [
+    ["tW", "週足の向き"], ["tD", "日足の向き"], ["t4", "4時間足の向き"], ["t1", "1時間足の向き"], ["tB", "BTC(1時間足)の向き"],
+    ["loc50", "15分足の終値とEMA50の位置（ATR比）"], ["loc20", "15分足の終値とEMA20の位置（ATR比）"], ["stack", "15分足EMA20とEMA50の並び"],
+    ["body", "直近の15分足の実体（ATR比）"], ["rev", "直近の反転足"], ["mom1", "直近1時間の値動き"], ["mom24", "直近24時間の値動き"],
+    ["rng24", "24時間レンジ内の位置"], ["d20", "20日高値/安値までの距離（日足ATR比）"], ["vol", "出来高（直近20本平均比）"], ["atrP", "値動きの大きさ（15分足ATR%）"], ["hour", "時間帯（日本時間）"]
+  ];
+  const FLAB = Object.fromEntries(FEATS);
+  const bk = (v, edges, labels) => { let i = 0; while (i < edges.length && v >= edges[i]) i++; return labels[i]; };
+  const L6 = ["<−2", "−2〜−0.7", "−0.7〜0", "0〜0.7", "0.7〜2", "2以上"];
+  function ctxBuild(x){ // ろうそく一式 → 各時点で参照できる系列
+    const m = x.m, n = m.length, C = {m, n, e20:emaSeries(m,20), e50:emaSeries(m,50), atr:atrSeries(m,14)};
+    C.vavg = m.map((_,i) => { if (i < 20) return null; let s = 0; for (let k=i-20;k<i;k++) s += m[k].v||0; return s/20; });
+    const tser = arr => { const a = emaSeries(arr,20), b = emaSeries(arr,50); return arr.map((_,i) => trendAt(arr, a, b, i)); };
+    C.tw = tser(x.w); C.td = tser(x.d); C.t4 = tser(x.h4); C.t1 = tser(x.h1); C.tb = tser(x.btc);
+    C.atrD = atrSeries(x.d,14);
+    C.dH = x.d.map((_,k) => k >= 19 ? Math.max(...x.d.slice(k-19,k+1).map(z => z.h)) : null); C.dL = x.d.map((_,k) => k >= 19 ? Math.min(...x.d.slice(k-19,k+1).map(z => z.l)) : null);
+    const ptr = (arr, tf) => { const out = new Array(n); let k = -1; for (let i=0;i<n;i++){ const T = m[i].t + TFMS.m15; while (k+1 < arr.length && arr[k+1].t + tf <= T) k++; out[i] = k; } return out; };
+    C.kw = ptr(x.w, TFMS.w1); C.kd = ptr(x.d, TFMS.d1); C.k4 = ptr(x.h4, TFMS.h4); C.k1 = ptr(x.h1, TFMS.h1); C.kb = ptr(x.btc, TFMS.h1);
+    return C;
+  }
+  function featOf(C, i, dir){ // i番目の15分足が確定した時点の特徴。値は「自分の方向が＋」になるよう符号をそろえる
+    const m = C.m, a = C.atr[i]; if (i < 100 || !(a > 0)) return null;
+    const L = m[i], P = m[i-1], c = L.c, F = {};
+    const sg = t => t === 0 ? "レンジ" : (t === dir ? "一致" : "逆"), tv = (arr, k) => k >= 0 ? arr[k] : 0;
+    F.tW = sg(tv(C.tw, C.kw[i])); F.tD = sg(tv(C.td, C.kd[i])); F.t4 = sg(tv(C.t4, C.k4[i])); F.t1 = sg(tv(C.t1, C.k1[i])); F.tB = sg(tv(C.tb, C.kb[i]));
+    F.loc50 = bk(dir*(c - C.e50[i])/a, [-2,-0.7,0,0.7,2], L6); F.loc20 = bk(dir*(c - C.e20[i])/a, [-2,-0.7,0,0.7,2], L6);
+    F.stack = dir*(C.e20[i] - C.e50[i]) > 0 ? "自分の方向に並ぶ" : "逆に並ぶ";
+    F.body = bk(dir*(L.c - L.o)/a, [-0.8,-0.2,0.2,0.8], ["逆に強い", "逆に小さい", "ほぼ無し", "順に小さい", "順に強い"]);
+    F.rev = reversalOf(P, L, dir) ? PATNAME[reversalOf(P, L, dir)] : "なし";
+    F.mom1 = bk(dir*(c/m[i-4].c - 1)*100, [-1,-0.3,0.3,1], ["<−1%", "−1〜−0.3%", "±0.3%", "0.3〜1%", "1%以上"]);
+    F.mom24 = bk(dir*(c/m[i-96].c - 1)*100, [-5,-1.5,1.5,5], ["<−5%", "−5〜−1.5%", "±1.5%", "1.5〜5%", "5%以上"]);
+    let hi = -Infinity, lo = Infinity; for (let k=i-95;k<=i;k++){ if (m[k].h > hi) hi = m[k].h; if (m[k].l < lo) lo = m[k].l; }
+    const r = hi > lo ? (c - lo)/(hi - lo) : 0.5, pr = dir > 0 ? r : 1 - r; // 0＝自分の方向と逆の端（押し目側）、1＝自分の方向の端（高値/安値圏）
+    F.rng24 = bk(pr, [0.2,0.4,0.6,0.8], ["逆の端(下位20%)", "20〜40%", "中央", "60〜80%", "順の端(上位20%)"]);
+    const kd = C.kd[i], aD = kd >= 0 ? C.atrD[kd] : null;
+    if (kd >= 19 && aD > 0){ const dd = dir > 0 ? (C.dH[kd] - c)/aD : (c - C.dL[kd])/aD; F.d20 = bk(dd, [0,1,3], ["更新", "0〜1", "1〜3", "3以上"]); } else F.d20 = "データなし";
+    const va = C.vavg[i]; F.vol = va > 0 ? bk((L.v||0)/va, [0.7,1.3,2.5], ["<0.7倍", "0.7〜1.3倍", "1.3〜2.5倍", "2.5倍以上"]) : "データなし";
+    F.atrP = bk(a/c*100, [0.3,0.6,1.0], ["<0.3%", "0.3〜0.6%", "0.6〜1.0%", "1.0%以上"]);
+    const h = new Date(L.t + TFMS.m15 + 9*3600e3).getUTCHours(); F.hour = h < 6 ? "0〜6時" : h < 12 ? "6〜12時" : h < 18 ? "12〜18時" : "18〜24時";
+    return F;
+  }
+  function baseStats(C, dir){ // ランダムな時点（この銘柄の直近の全ての15分足）の特徴の分布と、その後の平均的な値動き
+    const freq = {}, fs = {m15:[0,0], h1:[0,0], h4:[0,0], h24:[0,0]}; let nb = 0;
+    for (const [k] of FEATS) freq[k] = {};
+    for (let i=200;i<C.n;i++){
+      const F = featOf(C, i, dir); if (!F) continue; nb++;
+      for (const [k] of FEATS) freq[k][F[k]] = (freq[k][F[k]]||0) + 1;
+      for (const [nm, kb] of [["m15",1],["h1",4],["h4",16],["h24",96]]) if (i + kb < C.n){ fs[nm][0]++; fs[nm][1] += dir*(C.m[i+kb].c/C.m[i].c - 1)*100; }
+    }
+    const fwd = {}; for (const nm in fs) fwd[nm] = fs[nm][0] > 20 ? +(fs[nm][1]/fs[nm][0]).toFixed(4) : null;
+    return {n:nb, freq, fwd};
+  }
+  function replayBot(C, i0, dir, entry, iEnd){ // 今のボットの決済ルール（損切り・逆行加速・トレーリング）を、手動の入りに当てはめたらどうなったか（価格の%・コスト前）
+    let armed = false; const stop = entry*(1 - dir*RULE.slPct/100);
+    for (let i=Math.max(i0,1); i<=iEnd && i<C.n; i++){
+      const L = C.m[i], P = C.m[i-1];
+      if (dir > 0 ? L.l <= stop : L.h >= stop) return {pct:dir*(stop/entry - 1)*100, why:"損切り", bars:i-i0+1};
+      if (accelOf(L, P, C.e50[i], C.atr[i], dir, RULE.accK)) return {pct:dir*(L.c/entry - 1)*100, why:"逆行の加速", bars:i-i0+1};
+      const bf = RULE.trailBuf*C.atr[i], dv = dir*(L.c - C.e20[i]);
+      if (!armed && dv > bf) armed = true;
+      if (armed && dv < -bf) return {pct:dir*(L.c/entry - 1)*100, why:"トレーリング", bars:i-i0+1};
+    }
+    const j = Math.min(iEnd, C.n-1); return {pct:dir*(C.m[j].c/entry - 1)*100, why:"未決済(手動の決済時点)", bars:j-i0+1};
+  }
+
+  // ---- ろうそくの取得 ----
+  async function btcH1(days, now){
+    if (btcCache && now - btcCache.at < 30*60000 && btcCache.days >= days) return btcCache.arr;
+    const arr = await fetchKBack("BTC", "1h", TFMS.h1, days*24 + 220, now); btcCache = {at:now, days, arr}; return arr;
+  }
+  async function ctxLoad(sym, days){
+    const b = baseOf(sym), now = Date.now();
+    const w = await fetchK(b, "1w", TFMS.w1, 300, now), d = await fetchK(b, "1d", TFMS.d1, 300, now), h4 = await fetchK(b, "4h", TFMS.h4, 300, now);
+    const h1 = await fetchKBack(b, "1h", TFMS.h1, days*24 + 220, now), m = await fetchKBack(b, "15m", TFMS.m15, days*96 + 260, now);
+    const btc = b === "BTC" ? h1 : await btcH1(days, now);
+    if (m.length < 300) throw new Error("15分足が足りません（"+m.length+"本）");
+    return ctxBuild({w, d, h4, h1, m, btc});
+  }
+  const lastClosedIdx = (C, t) => { let i = C.n - 1; while (i > 0 && C.m[i].t + TFMS.m15 > t) i--; return i; }; // 時刻tの直前に確定した15分足
+
+  // ---- 検知と追跡（10秒ごと） ----
+  async function manualStep(now){
+    if (!S.manualOn || manBusy || now - manAt < MAN_POLL) return;
+    manAt = now; manBusy = true;
+    try{
+      const j = await relay("/positions"), raw = (j.result && j.result.data) || [], all = (Array.isArray(raw) ? raw : [raw]).filter(x => x && Math.abs(num(x.positionAmt)) > 0);
+      const o = await relay("/open-orders").catch(() => null), od = o && o.result && o.result.data, ords = (od && (od.orders || od)) || [];
+      const orders = Array.isArray(ords) ? ords : [];
+      MAN.diag = {at:now, pos:all.slice(0,2), ord:orders.slice(0,3)}; // 取引所の応答の生データの見本（項目名の確認用）
+      const mine = new Set([...S.positions.map(p => baseOf(p.sym)+"|"+side(p)), ...closing.keys()]), botSyms = new Set(S.positions.map(p => baseOf(p.sym))), seen = new Set();
+      manOrdSyms = [...new Set(orders.map(od => baseOf(String(od.symbol||""))).filter(v => v && !botSyms.has(v)))];
+      for (const x of all){
+        const b = baseOf(String(x.symbol)), amt = Math.abs(num(x.positionAmt)), ps = String(x.positionSide || (num(x.positionAmt) > 0 ? "LONG" : "SHORT")).toUpperCase(), k = b+"|"+ps;
+        if (mine.has(k)) continue;
+        seen.add(k);
+        const dir = ps === "LONG" ? 1 : -1, avg = num(x.avgPrice || x.entryPrice), t = tokens.get(b+"-USDT"), px = t ? t.px : avg;
+        let r = MAN.active[k];
+        if (!r){
+          r = MAN.active[k] = {id:++MAN.seq, sym:b+"-USDT", dir, t0:now, entry:avg, qty:amt, qtyMax:amt, lev:num(x.leverage) || null, margin:num(x.initialMargin || x.margin) || null,
+            miss:0, mfe:0, mae:0, snaps:{}, ev:[], lv:[], last:px, F:null};
+          log("手動", b+" "+(dir > 0 ? "ロング" : "ショート")+"を検知（建値 "+fmtPx(avg)+"／数量 "+amt+"）。相場の状況を記録します");
+          manQ.push(() => manCtx(r));
+        } else {
+          r.miss = 0;
+          if (amt > r.qty*1.001){ r.ev.push({t:now, k:"add", q:+(amt - r.qty).toFixed(6), px}); r.qtyMax = Math.max(r.qtyMax, amt); }
+          else if (amt < r.qty*0.999) r.ev.push({t:now, k:"reduce", q:+(r.qty - amt).toFixed(6), px});
+          if (r.ev.length > 30) r.ev.length = 30;
+          r.qty = amt; if (avg > 0) r.entry = avg;
+        }
+        r.last = px; r.upnl = num(x.unrealizedProfit);
+        if (r.entry > 0){
+          const g = dir*(px/r.entry - 1)*100; r.mfe = Math.max(r.mfe, g); r.mae = Math.min(r.mae, g);
+          const el = now - r.t0; for (const [nm, ms] of [["m5",300000], ["m15",900000], ["h1",3600000], ["h4",14400000], ["h24",86400000]]) if (el >= ms && r.snaps[nm] == null) r.snaps[nm] = +g.toFixed(3);
+        }
+        for (const od of orders){ // 損切り・利確の注文（置いた価格と、置き直した履歴）
+          if (baseOf(String(od.symbol||"")) !== b || String(od.positionSide||"").toUpperCase() !== ps || String(od.side||"").toUpperCase() !== (dir > 0 ? "SELL" : "BUY")) continue;
+          const ty = String(od.type||"").toUpperCase(), sp = num(od.stopPrice), pr = num(od.price); let kind = null, lvl = 0;
+          if (/^STOP/.test(ty)){ kind = "SL"; lvl = sp || pr; } else if (/^TAKE_PROFIT/.test(ty)){ kind = "TP"; lvl = sp || pr; }
+          else if (ty === "LIMIT" && pr > 0){ kind = dir*(pr - r.entry) > 0 ? "TP" : "SL"; lvl = pr; }
+          if (!kind || !(lvl > 0) || !(r.entry > 0)) continue;
+          const prev = [...r.lv].reverse().find(z => z.kind === kind);
+          if (!prev || Math.abs(prev.px/lvl - 1) > 0.0002){ r.lv.push({t:now, kind, px:lvl, pct:+(dir*(lvl/r.entry - 1)*100).toFixed(3)}); if (r.lv.length > 14) r.lv.shift(); }
+        }
+      }
+      for (const k of Object.keys(MAN.active)) if (!seen.has(k)){ const r = MAN.active[k]; r.miss++; if (r.miss >= 2){ delete MAN.active[k]; manQ.push(() => manFinalize(r)); } }
+      manDirty = true; manCache = null;
+    }catch(err){ lastErr = "手動記録: "+err.message; }
+    finally{ manBusy = false; }
+  }
+  async function manWork(){ // 重い取得は、1回の処理につき1件ずつ
+    if (manQBusy || !manQ.length) return; manQBusy = true;
+    try{ await manQ.shift()(); manDirty = true; manCache = null; }catch(err){ lastErr = "手動記録: "+err.message; }
+    finally{ manQBusy = false; }
+  }
+  async function manCtx(r){ // 入った時点の相場の状況
+    const C = await ctxLoad(r.sym, MAN_DAYS), i = lastClosedIdx(C, r.t0), F = featOf(C, i, r.dir);
+    if (!F) throw new Error(baseOf(r.sym)+"：特徴を計算できませんでした");
+    r.F = F; r.i0t = C.m[i].t;
+    const t = tokens.get(r.sym); r.raw = {atr:+C.atr[i].toFixed(8), atrP:+(C.atr[i]/C.m[i].c*100).toFixed(3), turn:t ? Math.round(t.turn) : null, px:C.m[i].c};
+    log("手動", baseOf(r.sym)+"：入りの状況を記録（週足 "+F.tW+"／日足 "+F.tD+"／15分足EMA50との位置 "+F.loc50+"ATR／反転足 "+F.rev+"）");
+  }
+  async function histFills(r){ // 取引所の注文履歴から、実際の入り・出の約定を取る
+    const j = await relay("/order-history?symbol="+baseOf(r.sym)+"USDT&startTime="+Math.max(0, r.t0 - 10*60000)+"&limit=100"), d = j && j.result && j.result.data, arr = (d && (d.orders || d)) || [];
+    const opS = r.dir > 0 ? "BUY" : "SELL", ps = r.dir > 0 ? "LONG" : "SHORT";
+    const fl = (Array.isArray(arr) ? arr : []).filter(z => String(z.positionSide||"").toUpperCase() === ps && num(z.executedQty) > 0 && num(z.avgPrice) > 0 && (!z.status || /FILLED/i.test(String(z.status))));
+    const op = fl.filter(z => String(z.side).toUpperCase() === opS && num(z.updateTime || z.time) >= r.t0 - 10*60000), cl = fl.filter(z => String(z.side).toUpperCase() !== opS && num(z.updateTime || z.time) >= r.t0 - 60000);
+    const vw = a => { const q = a.reduce((s,z) => s + num(z.executedQty), 0); return q > 0 ? a.reduce((s,z) => s + num(z.avgPrice)*num(z.executedQty), 0)/q : 0; };
+    if (!cl.length) return null;
+    const last = cl.slice().sort((a,b) => num(a.updateTime||a.time) - num(b.updateTime||b.time)).pop(), ty = String(last.type||"").toUpperCase();
+    return {entryPx:vw(op), exitPx:vw(cl), entryT:op.length ? Math.min(...op.map(z => num(z.time || z.updateTime))) : 0, exitT:num(last.updateTime || last.time),
+      profit:[...op, ...cl].reduce((s,z) => s + num(z.profit), 0), fee:[...op, ...cl].reduce((s,z) => s + Math.abs(num(z.commission)), 0),
+      how:/^STOP/.test(ty) ? "損切り注文が約定" : /^TAKE_PROFIT/.test(ty) ? "利確注文が約定" : ty === "LIMIT" ? "指値で決済" : ty === "MARKET" ? "成行で決済" : (ty || "不明"), nCl:cl.length};
+  }
+  async function manFinalize(r){ // ポジションが無くなった：結果を確定し、後から分析するための取得を予約
+    let h = null; try{ h = await histFills(r); }catch(_){}
+    const dir = r.dir, ex = h && h.exitPx > 0 ? h.exitPx : r.last, en = h && h.entryPx > 0 ? h.entryPx : r.entry;
+    r.entryFill = en; r.exit = ex; r.exitEst = !(h && h.exitPx > 0); r.how = h ? h.how : "不明（注文履歴を取得できず、最後の価格で推定）";
+    r.t0 = h && h.entryT > 0 ? h.entryT : r.t0; r.t1 = h && h.exitT > 0 ? h.exitT : Date.now();
+    r.pct = +(dir*(ex/en - 1)*100).toFixed(3);
+    r.pnl = h && (h.profit || h.fee) ? +(h.profit - h.fee).toFixed(2) : +(dir*(ex - en)*r.qtyMax).toFixed(2); r.pnlEst = !(h && (h.profit || h.fee));
+    r.notional = +(en*r.qtyMax).toFixed(2); r.hold = r.t1 - r.t0;
+    MAN.done.push(r);
+    log("手動", baseOf(r.sym)+" "+(dir > 0 ? "ロング" : "ショート")+"の決済を記録：価格 "+(r.pct >= 0 ? "+" : "")+r.pct+"%／損益 "+(r.pnl >= 0 ? "+" : "")+r.pnl+"$（"+r.how+"）");
+    manQ.push(() => manPost(r));
+  }
+  async function manPost(r){ // 入り後の値動き・ランダム入りとの比較・ボットの決済ルールを当てはめた場合
+    const days = Math.min(40, MAN_DAYS + Math.ceil((Date.now() - r.t0)/86400e3)), C = await ctxLoad(r.sym, days), iE = lastClosedIdx(C, r.t0);
+    if (!r.F){ r.F = featOf(C, iE, r.dir); r.i0t = C.m[iE].t; }
+    const en = r.entryFill || r.entry; r.fwd = {};
+    for (const [nm, kb] of [["m15",1], ["h1",4], ["h4",16], ["h24",96]]) r.fwd[nm] = iE + kb < C.n ? +(r.dir*(C.m[iE+kb].c/en - 1)*100).toFixed(3) : null;
+    r.base = baseStats(C, r.dir);
+    const iX = lastClosedIdx(C, r.t1); r.bot = iX > iE ? replayBot(C, iE+1, r.dir, en, iX) : null;
+    if (r.bot) r.bot.pct = +r.bot.pct.toFixed(3);
+    r.post = true;
+  }
+
+  // ---- 集計（画面・報告用） ----
+  function manSummary(force){
+    if (!force && manCache && Date.now() - manCacheAt < 20000) return manCache;
+    const done = MAN.done, act = Object.values(MAN.active), N = done.length, mean = a => a.length ? a.reduce((s,v) => s + v, 0)/a.length : null;
+    const sd = a => { if (a.length < 2) return null; const m = mean(a); return Math.sqrt(a.reduce((s,v) => s + (v-m)*(v-m), 0)/(a.length-1)); };
+    const lvOf = (r, kind) => { const z = r.lv.find(v => v.kind === kind); return z ? z.pct : null; };
+    const trades = done.slice().reverse().map(r => ({id:r.id, sym:r.sym, dir:r.dir, t0:r.t0, t1:r.t1, hold:r.hold, entry:r.entryFill||r.entry, exit:r.exit, pct:r.pct, pnl:r.pnl, pnlEst:!!r.pnlEst, exitEst:!!r.exitEst, how:r.how,
+      mfe:+r.mfe.toFixed(2), mae:+r.mae.toFixed(2), cap:r.mfe > 0.05 ? Math.round(r.pct/r.mfe*100) : null, sl:lvOf(r,"SL"), tp:lvOf(r,"TP"), adds:r.ev.filter(e => e.k === "add").length, reduces:r.ev.filter(e => e.k === "reduce").length,
+      F:r.F, bot:r.bot ? {pct:r.bot.pct, why:r.bot.why} : null, snaps:r.snaps}));
+    const pcts = done.map(r => r.pct), wins = done.filter(r => r.pnl > 0).length;
+    const caps = trades.filter(t => t.cap != null).map(t => t.cap);
+    const stat = {n:N, win:N ? Math.round(wins/N*100) : null, pnl:+done.reduce((s,r) => s + (r.pnl||0), 0).toFixed(2), avgPct:mean(pcts), avgPnl:mean(done.map(r => r.pnl||0)), hold:mean(done.map(r => r.hold||0)),
+      mfe:mean(done.map(r => r.mfe)), mae:mean(done.map(r => r.mae)), cap:mean(caps), sl:mean(trades.map(t => t.sl).filter(v => v != null)), tp:mean(trades.map(t => t.tp).filter(v => v != null)), slN:trades.filter(t => t.sl != null).length, tpN:trades.filter(t => t.tp != null).length,
+      noSl:trades.filter(t => t.sl == null).length, adds:trades.reduce((s,t) => s + t.adds, 0), estN:done.filter(r => r.pnlEst || r.exitEst).length};
+    // 入りの特徴：ランダムな時点と比べた偏り（Poisson二項の期待値と分散）
+    const wf = done.filter(r => r.F && r.base && r.base.n > 100), rows = [];
+    for (const [f, label] of FEATS){
+      const bs = new Set(); for (const r of wf){ bs.add(r.F[f]); for (const b in r.base.freq[f]) bs.add(b); }
+      for (const b of bs){
+        let c = 0, E = 0, V = 0;
+        for (const r of wf){ if (r.F[f] === b) c++; const q = (r.base.freq[f][b]||0)/r.base.n; E += q; V += q*(1-q); }
+        if (c === 0 && E < 1) continue;
+        rows.push({f, label, b, c, n:wf.length, share:c/wf.length, exp:E/wf.length, lift:E > 0 ? c/E : null, z:V > 0 ? (c - E)/Math.sqrt(V) : 0});
+      }
+    }
+    rows.sort((a,b) => Math.abs(b.z) - Math.abs(a.z));
+    const cand = wf.length >= 8 ? rows.filter(x => x.z >= 3 && x.share >= 0.5 && x.c >= 3).slice(0, 8) : []; // 約85通りを同時に見るので、偶然を除くためにz≥3・8件以上を「候補」の条件にする
+    // 入り後の値動き：同じ銘柄・同じ方向でランダムに入った場合との差
+    const fw = ["m15","h1","h4","h24"].map(nm => { const d = wf.filter(r => r.fwd && r.fwd[nm] != null && r.base.fwd[nm] != null).map(r => r.fwd[nm] - r.base.fwd[nm]); const m = mean(d), s = sd(d);
+      return {nm, n:d.length, man:mean(wf.filter(r => r.fwd && r.fwd[nm] != null && r.base.fwd[nm] != null).map(r => r.fwd[nm])), base:mean(wf.filter(r => r.fwd && r.fwd[nm] != null && r.base.fwd[nm] != null).map(r => r.base.fwd[nm])), diff:m, se:s != null && d.length ? s/Math.sqrt(d.length) : null}; });
+    const wb = done.filter(r => r.bot), bot = {n:wb.length, man:mean(wb.map(r => r.pct)), bot:mean(wb.map(r => r.bot.pct)),
+      better:wb.filter(r => r.pct > r.bot.pct).length};
+    const active = act.map(r => { const t = tokens.get(r.sym); return {id:r.id, sym:r.sym, dir:r.dir, t0:r.t0, entry:r.entry, px:t ? t.px : r.last, g:r.entry > 0 ? r.dir*((t ? t.px : r.last)/r.entry - 1)*100 : null, upnl:r.upnl, mfe:+r.mfe.toFixed(2), mae:+r.mae.toFixed(2),
+      sl:lvOf(r,"SL"), tp:lvOf(r,"TP"), lv:r.lv.slice(-4), F:r.F, qty:r.qty, pending:!r.F}; });
+    manCache = {on:true, stat, trades, active, rows:rows.slice(0, 40), cand, fw, bot, nF:wf.length, queue:manQ.length, diag:MAN.diag}; manCacheAt = Date.now();
+    return manCache;
+  }
+
+  // ============================================================
+  // BingXの収支と約定履歴（正とする数字）
+  //   実現損益 ＝ BingXの収支明細（確定損益 ＋ 取引手数料 ＋ 資金調達）の、最初のボットの売買以降の合計
+  //   含み損益 ＝ BingXの保有ポジションの含み損益の合計
+  //   総資産   ＝ 500 ＋ 実現損益 ＋ 含み損益
+  // 約定履歴は、BingXの注文履歴（半分利確・損切り・手動の約定を含む）をそのまま表示する
+  // ============================================================
+  const LED_KEY = "td3_led", LED_VER = 1, LED_MAXROWS = 320;
+  let LED = null, ledAt = 0, ledBusy = false, ledIncAt = 0, ledPosAt = 0, ledDirty = false, ledSavedAt = 0, ledSymAt = {}, ledCache = null, ledCacheAt = 0, posC = null;
+  function ledFresh(){ return {ver:LED_VER, since:null, rows:{}, inc:null, upnl:null, diag:{}}; }
+  function ledLoad(){ try{ const j = JSON.parse(store.get(LED_KEY) || "null"); LED = j && j.ver === LED_VER ? j : ledFresh(); }catch(_){ LED = ledFresh(); } }
+  function ledSave(){ store.set(LED_KEY, JSON.stringify(LED)); ledDirty = false; ledSavedAt = Date.now(); }
+  function addBot(id){ if (!id) return; id = String(id); S.botOids = S.botOids || []; if (!S.botOids.includes(id)){ S.botOids.push(id); if (S.botOids.length > 500) S.botOids.shift(); } } // ボットが出した注文の番号（履歴で「ボット」と区別する）
+  async function positionsRaw(maxAge){
+    const now = Date.now(); if (posC && now - posC.at <= maxAge) return posC.list;
+    const j = await relay("/positions"), raw = (j.result && j.result.data) || [], list = (Array.isArray(raw) ? raw : [raw]).filter(x => x && Math.abs(num(x.positionAmt)) > 0);
+    posC = {at:now, list}; return list;
+  }
+  function ledSince(){ // 最初のボットの売買の1分前から数える（それ以前の、以前のルールのポジションの損益を混ぜない）
+    if (LED.since) return LED.since;
+    const ts = [...S.trades.map(x => x.ts), ...S.positions.map(p => p.ts)].filter(v => v > 0);
+    if (!ts.length) return null;
+    LED.since = Math.min(...ts) - 60000; ledDirty = true; return LED.since;
+  }
+  async function ledIncome(now){ // 収支明細（確定損益・取引手数料・資金調達）
+    const since = ledSince(); if (!since) return;
+    const j = await relay("/income?startTime="+since+"&limit=1000"), d = j.result && j.result.data;
+    const arr = Array.isArray(d) ? d : (d && (d.income || d.list || d.rows || d.data)) || [], list = Array.isArray(arr) ? arr : [];
+    LED.diag.inc = list.slice(0,3);
+    const sum = {pnl:0, fee:0, fund:0, oth:0}, types = {}, byDay = {}, syms = {};
+    for (const x of list){
+      const t = num(x.time || x.createTime); if (t && t < since) continue;
+      const ty = String(x.incomeType || x.type || "").toUpperCase(); types[ty] = (types[ty]||0) + 1;
+      if (/TRANSFER|TRIAL|DEPOSIT|WITHDRAW|GTD|AIRDROP|REBATE/.test(ty)) continue; // 入出金・付与などは損益に含めない
+      let v = num(x.income != null ? x.income : x.amount), k;
+      if (ty === "REALIZED_PNL") k = "pnl"; else if (/FUND/.test(ty)) k = "fund"; else if (/FEE|COMMISSION/.test(ty)){ k = "fee"; v = -Math.abs(v); } else k = "oth"; // 手数料は必ず支払い（マイナス）
+      sum[k] += v;
+      const dk = new Date((t || now) + 9*3600e3).toISOString().slice(0,10); byDay[dk] = (byDay[dk]||0) + v;
+      if (x.symbol) syms[baseOf(String(x.symbol))] = 1;
+    }
+    LED.inc = {at:now, n:list.length, cap:list.length >= 1000, pnl:+sum.pnl.toFixed(4), fee:+sum.fee.toFixed(4), fund:+sum.fund.toFixed(4), oth:+sum.oth.toFixed(4), types, byDay, syms:Object.keys(syms)};
+    ledDirty = true;
+  }
+  async function ledPositions(now){ // 保有ポジションの含み損益
+    const list = await positionsRaw(0);
+    LED.upnl = {at:now, n:list.length, sum:+list.reduce((s,x) => s + num(x.unrealizedProfit), 0).toFixed(4), list:list.slice(0,30).map(x => ({sym:baseOf(String(x.symbol)), ps:String(x.positionSide||"").toUpperCase(), amt:num(x.positionAmt), upnl:num(x.unrealizedProfit)}))};
+    ledDirty = true;
+  }
+  async function ledOrders(now){ // 注文履歴（約定した注文）。1回に1銘柄ずつ
+    const since = ledSince(); if (!since) return;
+    const open = new Set((LED.upnl ? LED.upnl.list : []).map(x => x.sym));
+    const cand = new Set([...open, ...(LED.inc ? LED.inc.syms : []), ...S.positions.map(p => baseOf(p.sym)), ...S.trades.slice(0,60).map(t => baseOf(t.sym)), ...Object.values(MAN.active).map(r => baseOf(r.sym)), ...MAN.done.slice(-30).map(r => baseOf(r.sym))]);
+    const due = [...cand].filter(b => now - (ledSymAt[b]||0) >= (open.has(b) ? 20000 : 180000)).sort((a,b) => (ledSymAt[a]||0) - (ledSymAt[b]||0));
+    if (!due.length) return;
+    const b = due[0]; ledSymAt[b] = now;
+    const j = await relay("/order-history?symbol="+b+"USDT&startTime="+since+"&limit=100"), d = j.result && j.result.data, arr = (d && (d.orders || d)) || [], list = Array.isArray(arr) ? arr : [];
+    if (list.length && !LED.diag.ord) LED.diag.ord = list.slice(0,2);
+    for (const o of list){
+      const q = num(o.executedQty), p = num(o.avgPrice), st = String(o.status||"").toUpperCase();
+      if (!(q > 0) || !(p > 0) || /CANCEL|EXPIRED|REJECT|^NEW$/.test(st)) continue;
+      LED.rows[String(o.orderId)] = {t:num(o.updateTime || o.time), sym:b, s:String(o.side||"").toUpperCase(), ps:String(o.positionSide||"").toUpperCase(), ty:String(o.type||"").toUpperCase(), q, p, f:Math.abs(num(o.commission)), g:num(o.profit)};
+    }
+    const ids = Object.keys(LED.rows);
+    if (ids.length > LED_MAXROWS){ ids.sort((a,b) => LED.rows[a].t - LED.rows[b].t); for (const id of ids.slice(0, ids.length - LED_MAXROWS)) delete LED.rows[id]; }
+    ledDirty = true;
+  }
+  async function ledStep(now){
+    if (!LED || ledBusy || now - ledAt < 5000) return; ledAt = now; ledBusy = true;
+    try{
+      if (now - ledIncAt >= 30000){ ledIncAt = now; await ledIncome(now); }
+      else if (now - ledPosAt >= 15000){ ledPosAt = now; await ledPositions(now); }
+      else await ledOrders(now);
+      ledCache = null;
+    }catch(err){ lastErr = "BingXの収支の取得: "+err.message; }
+    finally{ ledBusy = false; }
+  }
+  function ledGet(){ // 集計（3秒キャッシュ）
+    const now = Date.now(); if (ledCache && now - ledCacheAt < 3000) return ledCache;
+    ledCache = ledSummary(now); ledCacheAt = now; return ledCache;
+  }
+  function ledSummary(now){
+    if (!LED || !LED.since) return {ok:false, why:"まだ売買がありません"};
+    const since = LED.since, rows = Object.entries(LED.rows).map(([id, r]) => Object.assign({id}, r)).filter(r => r.t >= since).sort((a,b) => b.t - a.t);
+    const ordS = rows.reduce((s,r) => s + r.g - r.f, 0), inc = LED.inc, up = LED.upnl, fr = x => x && now - x.at < 180000;
+    const incOk = fr(inc) && !(inc.n === 0 && rows.length > 0); // 収支明細が空なのに約定がある場合は、収支明細を信用せず、注文履歴の合計を使う
+    const R = incOk ? inc.pnl + inc.fee + inc.fund + inc.oth : (rows.length ? ordS : null), U = fr(up) ? up.sum : null;
+    const ok = R != null && U != null, dk = new Date(now + 9*3600e3).toISOString().slice(0,10);
+    const bot = new Set(S.botOids || []), mans = [...Object.values(MAN ? MAN.active : {}), ...(MAN ? MAN.done : [])];
+    const out = rows.slice(0, 150).map(r => ({id:r.id, t:r.t, sym:r.sym, s:r.s, ps:r.ps, ty:r.ty, q:r.q, p:r.p, f:r.f, g:r.g, net:+(r.g - r.f).toFixed(4),
+      open:(r.ps === "LONG" && r.s === "BUY") || (r.ps === "SHORT" && r.s === "SELL"),
+      by:bot.has(r.id) ? "ボット" : mans.some(m => baseOf(m.sym) === r.sym && (m.dir > 0) === (r.ps === "LONG")) ? "手動" : "その他"}));
+    return {ok, src:incOk ? "収支明細" : (rows.length ? "注文履歴（収支明細を取得できないため）" : null), since, R, U, eq:ok ? START_USD + R + U : null, pnl:ok ? R + U : null,
+      inc:inc ? {pnl:inc.pnl, fee:inc.fee, fund:inc.fund, oth:inc.oth, n:inc.n, cap:inc.cap, types:inc.types, stale:!fr(inc)} : null,
+      ordS:+ordS.toFixed(4), diff:inc ? +(ordS - (inc.pnl + inc.fee)).toFixed(4) : null, today:inc && inc.byDay ? +(inc.byDay[dk]||0).toFixed(4) : null,
+      nRows:rows.length, rows:out, upn:up ? {n:up.n, sum:up.sum, stale:!fr(up), list:up.list} : null, diag:LED.diag};
+  }
+
   // ---- 画面用：候補銘柄ごとの分析（6項目） ----
   function analysis(){
     const out = [], longN = S.positions.filter(p => p.dir > 0).length, shortN = S.positions.filter(p => p.dir < 0).length;
@@ -861,29 +1225,34 @@ function makePerp(){
   function publicState(){
     const u = universe(); let young = 0, up = 0, dn = 0, rng = 0, noData = 0;
     for (const t of u){ const tr = trendsOf(t.sym); if (!tr) noData++; else if (tr.young) young++; else if (tr.dir > 0) up++; else if (tr.dir < 0) dn++; else rng++; }
-    const eq = equity(), tr = S.trades, wins = tr.filter(x => x.net > 0).length;
+    const eq = equity(), tr = S.trades, full = tr.filter(x => !x.part), wins = full.filter(x => x.net + (x.booked||0) > 0).length; // 一部決済で先に計上した分も含めた、1回の取引の合計損益で判定
     return { ver:V3_VER, rule:RULE, running:S.running, startedAt:S.startedAt, startUsd:START_USD, equity:+eq.toFixed(2), cash:+S.cash.toFixed(2), lastErr, lastTickerAt,
       universe:{total:u.length, up, dn, range:rng, young, noData},
       positions:S.positions.map(p => { const t = tokens.get(p.sym), px = t ? t.px : p.entry, c = CDL[p.sym], cs = c && c.m15;
-        return {sym:p.sym, dir:p.dir, pat:PATNAME[p.pat], entry:p.entry, px, qty:p.qty, margin:+p.margin.toFixed(2), stop:p.stop, be:!!p.be, fillEntry:!!p.fillEntry, target:p.target, targetName:p.targetName, half:p.half, armed:p.armed,
+        return {sym:p.sym, dir:p.dir, pat:PATNAME[p.pat], entry:p.entry, px, qty:p.qty, margin:+p.margin.toFixed(2), stop:p.stop, be:!!p.be, fillEntry:!!p.fillEntry, booked:+(p.booked||0).toFixed(2), target:p.target, targetName:p.targetName, half:p.half, armed:p.armed,
           e20:cs && cs.length > 20 ? emaSeries(cs,20)[cs.length-1] : null, upnl:+unreal(p).toFixed(2), upnlEq:+(unreal(p)/eq*100).toFixed(2), ts:p.ts, live:p.live}; }),
-      trades:tr.slice(0,100), stats:{n:tr.length, win:tr.length ? Math.round(wins/tr.length*100) : null, net:+tr.reduce((s,x) => s + x.net, 0).toFixed(2)}, day:S.day,
+      trades:tr.slice(0,100), stats:{n:full.length, win:full.length ? Math.round(wins/full.length*100) : null, net:+tr.reduce((s,x) => s + x.net, 0).toFixed(2), parts:tr.length - full.length}, day:S.day,
+      led:ledGet(), eqInternal:+equityInternal().toFixed(2),
       fills:S.fills ? {enN:S.fills.en[0], en:S.fills.en[0] ? S.fills.en[1]/S.fills.en[0] : null, exN:S.fills.ex[0], ex:S.fills.ex[0] ? S.fills.ex[1]/S.fills.ex[0] : null} : null,
-      analysis:analysis(), bt:btSummary(), legacy:S.legacy, log:S.log.slice(0,80) };
+      analysis:analysis(), bt:btSummary(), legacy:S.legacy, manualOn:!!S.manualOn, manual:S.manualOn && MAN ? manSummary() : null, log:S.log.slice(0,80) };
   }
   function handleCmd(b){
     const c = b && b.cmd;
     if (c === "pause"){ S.running = false; log("SYS", "新規エントリーを停止しました（保有中は決済ルールが続きます）"); }
     else if (c === "resume"){ S.running = true; log("SYS", "新規エントリーを再開しました"); }
     else if (c === "closeAll"){ for (const p of [...S.positions]){ const t = tokens.get(p.sym); closePart(p, 1, t ? t.px : p.entry, "手動で全決済"); } }
+    else if (c === "manualOn"){ S.manualOn = true; log("SYS", "手動記録モードを開始しました"); }
+    else if (c === "manualOff"){ S.manualOn = false; log("SYS", "手動記録モードを止めました（記録は残ります）"); }
+    else if (c === "manClear"){ MAN = manFresh(); for (let i=0;i<50;i++) store.set(MAN_KEY+"_d"+i, "[]"); manDirty = true; manCache = null; log("SYS", "手動トレードの記録を消しました"); }
     else if (c === "legacyClose"){ closeLegacy().then(persist); }
     else if (c === "legacyScan"){ reconcile(Date.now(), true).then(persist).catch(err => { lastErr = "照合: "+err.message; }); }
     else if (c === "btRestart"){ BT = btFresh(); for (const k in btSaved) btSaved[k] = 0; btSave(); btCache = null; log("SYS", "過去検証をやり直します"); }
     persist();
   }
   return { publicState, handleCmd,
-    start(){ load(); btLoad(); if (!S.log.length) log("SYS", "新しい戦略（週足・日足トレンド＋15分足EMA50押し目）で開始しました。総資産 $"+START_USD); persist(); },
-    tick, pollMs(){ return POLL; }, equity, note(tag,msg){ log(tag,msg); persist(); } };
+    start(){ load(); btLoad(); manLoad(); ledLoad();
+      if (S.manualInit === undefined){ S.manualInit = true; S.manualOn = true; S.running = false; log("SYS", "手動記録モードを開始しました。ボットの新規エントリーは止めました（保有中の分は決済ルールが続きます）。取引所で手動で建てたポジションを検知して、記録・分析します"); } if (!S.log.length) log("SYS", "新しい戦略（週足・日足トレンド＋15分足EMA50押し目）で開始しました。総資産 $"+START_USD); persist(); },
+    tick, pollMs(){ return POLL; }, equity, _t:{ledGet, ledStep, ledSummary, get LED(){ return LED; }, ctxBuild, featOf, baseStats, replayBot, manSummary, get MAN(){ return MAN; }, manFinalize, manPost, manCtx, histFills, ctxLoad}, note(tag,msg){ log(tag,msg); persist(); } };
 }
 let ENGINE = null, SRV = null;
 function jstDay(){ return new Date(Date.now()+9*3600e3).toISOString().slice(0,10); }
