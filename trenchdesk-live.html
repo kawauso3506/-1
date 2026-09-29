@@ -102,7 +102,7 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
   const tm = t => { const d = new Date(t); return (d.getMonth()+1)+"/"+d.getDate()+" "+String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); };
   const today = () => new Date(Date.now()+9*3600e3).toISOString().slice(0,10);
   const TABS = [["an","分析"],["pos","保有"],["hist","履歴"],["bt","過去検証"],["rule","ルール"],["log","ログ"]];
-  const varLabel = r => "逆行判定 "+(r.acc === "S" ? "安値更新" : "ATR"+r.acc+"本")+"／トレーリング "+(r.trail === "h1" ? "1時間足" : "15分足")+"EMA20／半分利確"+(r.half ? "あり" : "なし");
+  const varLabel = r => "逆行判定 "+(r.acc === "S" ? "安値更新" : "ATR"+r.acc+"本")+"／トレーリング "+(r.trail === "h1" ? "1時間足" : "15分足")+"EMA20 余裕"+r.buf+"ATR";
 
   // ---- 分析：指定の6項目 ----
   function sixItems(a){
@@ -126,7 +126,7 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
   function vPositions(){
     const ps = st.positions; if (!ps.length) return '<div class="empty">保有中のポジションはありません。</div>';
     return ps.map(p => '<div class="card '+(p.dir > 0 ? "L" : "S")+'"><h3>'+esc(b(p.sym))+' '+DIR(p.dir)+'（'+esc(p.pat)+'）<em class="num">'+usd(p.upnl,1)+'（総資産の'+pc(p.upnlEq)+'）</em></h3><ol class="six" style="list-style:none;padding:0">'+
-      '<li><span>建値 </span>'+px(p.entry)+'<span>／現在 </span>'+px(p.px)+'<span>／証拠金 </span>'+usd(p.margin)+'</li>'+
+      '<li><span>建値 </span>'+px(p.entry)+(p.fillEntry ? '（実約定）' : '（想定）')+'<span>／現在 </span>'+px(p.px)+'<span>／証拠金 </span>'+usd(p.margin)+'</li>'+
       '<li><span>損切り </span>'+px(p.stop)+(p.be ? '（半分利確後、建値＋手数料分へ引き上げ済み）' : '（取引所にも注文済み）')+'</li>'+
       '<li><span>トレーリング </span>15分足EMA20 '+px(p.e20)+'：'+(p.armed ? "有効（終値が抜けたら決済）" : "まだ無効（終値がEMA20の"+(p.dir > 0 ? "上" : "下")+"で確定したら有効）")+'</li>'+
       '<li><span>半分利確 </span>'+(p.target != null ? px(p.target)+'（'+esc(p.targetName)+'）'+(p.half ? "：実行済み" : "") : "目標なし")+'</li>'+
@@ -134,10 +134,12 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
   }
   function vHistory(){
     const s = st.stats, tr = st.trades;
-    const h = '<p class="sub num">決済 '+s.n+'件／勝率 '+(s.win == null ? "–" : s.win+"%")+'／合計 '+usd(s.net,1)+'</p>';
+    const f = st.fills, fs = (v, n) => n ? (v >= 0 ? "+" : "−")+Math.abs(v).toFixed(2)+"%（"+n+"件）" : "まだ取得なし";
+    const h = '<p class="sub num">決済 '+s.n+'件／勝率 '+(s.win == null ? "–" : s.win+"%")+'／合計 '+usd(s.net,1)+'</p>'+
+      '<p class="sub">損益は、取引所の実際の約定価格で計算します（取得できなかったものは「推定」。ティッカー価格と手数料0.05%×2で見積もり）。想定価格との差（不利側が＋）：入り '+(f ? fs(f.en, f.enN) : "まだ取得なし")+'／出 '+(f ? fs(f.ex, f.exN) : "まだ取得なし")+'。バックテストが想定している差は、往復で0.1%です。</p>';
     if (!tr.length) return h + '<div class="empty">まだ決済された取引はありません。</div>';
     return h + '<div class="scroll"><table class="num"><tr><th>銘柄</th><th>方向</th><th>決済</th><th>損益</th><th>総資産比</th><th>理由</th></tr>'+
-      tr.map(t => '<tr><td>'+esc(b(t.sym))+'</td><td class="'+(t.dir > 0 ? "L-t" : "S-t")+'">'+DIR(t.dir)+'</td><td>'+tm(t.exitTs)+'</td><td>'+usd(t.net,1)+'</td><td>'+pc(t.eqPct)+'</td><td style="text-align:left">'+esc(t.reason)+'</td></tr>').join("")+'</table></div>';
+      tr.map(t => '<tr><td>'+esc(b(t.sym))+'</td><td class="'+(t.dir > 0 ? "L-t" : "S-t")+'">'+DIR(t.dir)+'</td><td>'+tm(t.exitTs)+'</td><td>'+usd(t.net,1)+'</td><td>'+pc(t.eqPct)+'</td><td style="text-align:left">'+esc(t.reason)+(t.est ? "（推定）" : "")+'</td></tr>').join("")+'</table></div>';
   }
   function vBacktest(){
     const t = st.bt; if (!t) return '<div class="empty">データ待ち</div>';
@@ -162,7 +164,7 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
       row("待つ時間", "接触した足の後、"+R.watchBars+"本（2時間）以内に反転足が確定したら、次の足で入る")+
       row("逆行の加速", "15分足の終値がEMA50からATR(14)の"+R.accK+"本分以上逆側：エントリー前は取り消し、後は損切り")+
       row("損切り", "建値から"+R.slPct+"%（手数料・スリッページ込みで総資産の約2.0%）。取引所にも注文を置く")+
-      row("トレーリング", "終値が15分足EMA20を抜けたら全決済（エントリー後、終値が一度EMA20のトレンド側で確定してから有効）")+
+      row("トレーリング", "終値が15分足EMA20から、ATRの"+R.trailBuf+"本分以上逆側で確定したら全決済。有効になるのは、終値がEMA20から同じ幅だけ順行側で確定してから（余裕を持たせて、小さな往復で決済されにくくしてある）")+
       row("半分利確", "日足EMA20・EMA50・20日高値（ショートは安値）のうち、損切り幅以上離れていて一番近いものに到達したら半分。その後、残りの損切りを建値＋"+(R.beCost*100).toFixed(1)+"%（手数料分）へ引き上げ")+
       row("1日の上限", "当日の損失が$"+(srv ? srv.dailyStop : "–")+"を超えたら新規エントリーを停止")+
       '</dl></div>';
@@ -173,9 +175,10 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
     if (!st) return "データがありません";
     const L = ["=== TrenchDesk v3（"+new Date().toLocaleString("ja-JP")+"）===", "総資産 "+usd(st.equity)+"／開始 $"+st.startUsd+"／決済 "+st.stats.n+"件・勝率 "+(st.stats.win==null?"–":st.stats.win+"%")+"・合計 "+usd(st.stats.net,1), ""];
     if (st.legacy){ L.push("--- 管理外（以前のルールの残りなど） ---"); (st.legacy.positions||[]).forEach(x => L.push(x.sym+" "+(x.side==="LONG"?"ロング":"ショート")+" 数量 "+x.amt+" 建値 "+px(x.entry)+" 含み "+usd(x.pnl,1))); if ((st.legacy.orderSyms||[]).length) L.push("注文のみ："+st.legacy.orderSyms.join("、")); L.push(""); }
+    if (st.fills) L.push("約定のずれ（不利側が＋）：入り "+(st.fills.en==null?"–":st.fills.en.toFixed(2)+"%（"+st.fills.enN+"件）")+"／出 "+(st.fills.ex==null?"–":st.fills.ex.toFixed(2)+"%（"+st.fills.exN+"件）")+"　※バックテストの想定は往復0.1%");
     L.push("--- 保有 ---"); st.positions.forEach(p => L.push(b(p.sym)+" "+DIR(p.dir)+"（"+p.pat+"）建値 "+px(p.entry)+" 現在 "+px(p.px)+" 含み "+usd(p.upnl,1)+" 損切り "+px(p.stop)+(p.be?"（建値へ引き上げ済み）":"")+" トレーリング "+(p.armed?"有効":"未")+" 半分利確 "+(p.target!=null?px(p.target)+(p.half?"済":""):"なし"))); L.push("");
     L.push("--- 過去検証 ---"); const t = st.bt; if (t){ L.push((t.complete?"完了":"取得中 "+t.done+"/"+t.total)+" 期間 "+t.days+"日"); t.rows.forEach(r => L.push((r.live?"★ ":"")+varLabel(r)+"："+(r.n ? "採用 "+r.pf.n+"/"+r.n+"件・勝率 "+r.win+"%・1回平均 "+pc(r.avg)+"±"+r.ci.toFixed(2)+"・ランダム比 "+pc(r.diff)+"・年率 "+pc(r.pf.ann,0)+"（前半 "+pc(r.pf.annA,0)+"／後半 "+pc(r.pf.annB,0)+"）・最大DD "+pc(r.pf.dd,1)+"・決済内訳 損切り"+r.exits.sl+"/トレーリング"+r.exits.tr+"/逆行加速"+r.exits.ac+"・包み足"+r.pats.en+"/はらみ足"+r.pats.ha+(r.ok?" ✅":"") : "データなし"))); } L.push("");
-    L.push("--- 決済履歴 ---"); st.trades.slice(0,50).forEach(x => L.push(tm(x.exitTs)+" "+b(x.sym)+" "+DIR(x.dir)+" "+usd(x.net,1)+"（"+pc(x.eqPct)+"）"+x.reason)); L.push("");
+    L.push("--- 決済履歴 ---"); st.trades.slice(0,50).forEach(x => L.push(tm(x.exitTs)+" "+b(x.sym)+" "+DIR(x.dir)+" "+usd(x.net,1)+"（"+pc(x.eqPct)+"）"+x.reason+(x.est?"（推定）":""))); L.push("");
     L.push("--- 分析（上位） ---"); (st.analysis||[]).slice(0,15).forEach(a => L.push(b(a.sym)+"：週足"+a.w+"・日足"+a.d+"・EMA50との差 "+pc(a.dist)+"・"+a.shape+"・"+a.reason));
     L.push(""); L.push("--- ログ ---"); st.log.slice(0,40).forEach(l => L.push(tm(l.t)+" "+l.tag+" "+l.msg));
     return L.join("\n");
