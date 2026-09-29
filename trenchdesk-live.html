@@ -61,7 +61,7 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
 <div id="err"></div>
 <div class="top">
   <div class="stat"><span>総資産</span><b class="num" id="eq">–</b><span id="eqsub" class="num"></span></div>
-  <div class="stat"><span>今日の損益</span><b class="num" id="day">–</b><span id="daysub"></span></div>
+  <div class="stat"><span>累計損益</span><b class="num" id="day">–</b><span id="daysub"></span></div>
   <div class="stat"><span>保有</span><b class="num" id="pos">–</b><span id="possub"></span></div>
   <div class="stat"><span>サーバー</span><b id="srv">–</b><span id="srvsub"></span></div>
 </div>
@@ -85,7 +85,7 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
 (() => {
   const $ = id => document.getElementById(id);
   const LS = {get:k => { try{ return localStorage.getItem(k) || ""; }catch(_){ return ""; } }, set:(k,v) => { try{ localStorage.setItem(k,v); }catch(_){} }};
-  let URL_ = LS.get("trenchdesk_relay_url"), TOK = LS.get("trenchdesk_relay_token"), st = null, srv = null, err = null, tab = "an";
+  let URL_ = LS.get("trenchdesk_relay_url"), TOK = LS.get("trenchdesk_relay_token"), st = null, srv = null, err = null, tab = "man";
   async function api(path, body){
     if (!URL_ || !TOK) throw new Error("接続設定でリレーURLとACCESS_TOKENを入力してください");
     const r = await fetch(URL_.replace(/\/$/,"") + path, {method: body ? "POST" : "GET", headers: Object.assign({authorization:"Bearer "+TOK}, body ? {"content-type":"application/json"} : {}), body: body ? JSON.stringify(body) : undefined});
@@ -101,7 +101,7 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
   const DIR = d => d > 0 ? "ロング" : d < 0 ? "ショート" : "–";
   const tm = t => { const d = new Date(t); return (d.getMonth()+1)+"/"+d.getDate()+" "+String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); };
   const today = () => new Date(Date.now()+9*3600e3).toISOString().slice(0,10);
-  const TABS = [["an","分析"],["pos","保有"],["hist","履歴"],["bt","過去検証"],["rule","ルール"],["log","ログ"]];
+  const TABS = [["man","手動"],["fills","約定履歴"],["an","分析"],["pos","保有"],["hist","ボット取引"],["bt","過去検証"],["rule","ルール"],["log","ログ"]];
   const varLabel = r => "逆行判定 "+(r.acc === "S" ? "安値更新" : "ATR"+r.acc+"本")+"／トレーリング "+(r.trail === "h1" ? "1時間足" : "15分足")+"EMA20 余裕"+r.buf+"ATR";
 
   // ---- 分析：指定の6項目 ----
@@ -129,17 +129,17 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
       '<li><span>建値 </span>'+px(p.entry)+(p.fillEntry ? '（実約定）' : '（想定）')+'<span>／現在 </span>'+px(p.px)+'<span>／証拠金 </span>'+usd(p.margin)+'</li>'+
       '<li><span>損切り </span>'+px(p.stop)+(p.be ? '（半分利確後、建値＋手数料分へ引き上げ済み）' : '（取引所にも注文済み）')+'</li>'+
       '<li><span>トレーリング </span>15分足EMA20 '+px(p.e20)+'：'+(p.armed ? "有効（終値が抜けたら決済）" : "まだ無効（終値がEMA20の"+(p.dir > 0 ? "上" : "下")+"で確定したら有効）")+'</li>'+
-      '<li><span>半分利確 </span>'+(p.target != null ? px(p.target)+'（'+esc(p.targetName)+'）'+(p.half ? "：実行済み" : "") : "目標なし")+'</li>'+
+      '<li><span>半分利確 </span>'+(p.target != null ? px(p.target)+'（'+esc(p.targetName)+'）'+(p.half ? "：実行済み（実現 "+usd(p.booked,1)+"）" : "") : "目標なし")+'<span>／取引所の注文ではなく、ボットが価格を見て成行で決済します</span>'+'</li>'+
       '<li><span>取引所 </span>'+esc(p.live ? ({open:"発注済み", opening:"発注中", error:"失敗", skip:"見送り", closed:"決済済み"}[p.live.status]||p.live.status)+(p.live.msg ? "（"+p.live.msg+"）" : "") : "–")+'<span>／開始 </span>'+tm(p.ts)+'</li></ol></div>').join("");
   }
   function vHistory(){
     const s = st.stats, tr = st.trades;
     const f = st.fills, fs = (v, n) => n ? (v >= 0 ? "+" : "−")+Math.abs(v).toFixed(2)+"%（"+n+"件）" : "まだ取得なし";
-    const h = '<p class="sub num">決済 '+s.n+'件／勝率 '+(s.win == null ? "–" : s.win+"%")+'／合計 '+usd(s.net,1)+'</p>'+
+    const h = '<p class="sub num">決済 '+s.n+'件'+(s.parts ? '（別に一部決済 '+s.parts+'回）' : '')+'／勝率 '+(s.win == null ? "–" : s.win+"%")+'（一部決済を含めた合計損益で判定）／合計 '+usd(s.net,1)+'</p>'+
       '<p class="sub">損益は、取引所の実際の約定価格で計算します（取得できなかったものは「推定」。ティッカー価格と手数料0.05%×2で見積もり）。想定価格との差（不利側が＋）：入り '+(f ? fs(f.en, f.enN) : "まだ取得なし")+'／出 '+(f ? fs(f.ex, f.exN) : "まだ取得なし")+'。バックテストが想定している差は、往復で0.1%です。</p>';
     if (!tr.length) return h + '<div class="empty">まだ決済された取引はありません。</div>';
     return h + '<div class="scroll"><table class="num"><tr><th>銘柄</th><th>方向</th><th>決済</th><th>損益</th><th>総資産比</th><th>理由</th></tr>'+
-      tr.map(t => '<tr><td>'+esc(b(t.sym))+'</td><td class="'+(t.dir > 0 ? "L-t" : "S-t")+'">'+DIR(t.dir)+'</td><td>'+tm(t.exitTs)+'</td><td>'+usd(t.net,1)+'</td><td>'+pc(t.eqPct)+'</td><td style="text-align:left">'+esc(t.reason)+(t.est ? "（推定）" : "")+'</td></tr>').join("")+'</table></div>';
+      tr.map(t => '<tr><td>'+esc(b(t.sym))+'</td><td class="'+(t.dir > 0 ? "L-t" : "S-t")+'">'+DIR(t.dir)+'</td><td>'+tm(t.exitTs)+'</td><td>'+usd(t.net,1)+'</td><td>'+pc(t.eqPct)+'</td><td style="text-align:left">'+(t.part ? "【一部】" : (t.booked ? "【残り】" : ""))+esc(t.reason)+(t.est ? "（推定）" : "")+'</td></tr>').join("")+'</table></div>';
   }
   function vBacktest(){
     const t = st.bt; if (!t) return '<div class="empty">データ待ち</div>';
@@ -169,6 +169,79 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
       row("1日の上限", "当日の損失が$"+(srv ? srv.dailyStop : "–")+"を超えたら新規エントリーを停止")+
       '</dl></div>';
   }
+  // ---- 手動トレードの記録と分析 ----
+  const dur = ms => ms == null ? "–" : ms < 3600e3 ? Math.round(ms/60000)+"分" : (ms/3600e3).toFixed(1)+"時間";
+  const p1 = (v, d=2) => v == null ? "–" : (v >= 0 ? "+" : "−")+Math.abs(v).toFixed(d)+"%";
+  const fBrief = F => F ? "週足 "+F.tW+"／日足 "+F.tD+"／EMA50との位置 "+F.loc50+"ATR／反転足 "+F.rev : "状況を記録中…";
+  function vManual(){
+    const M = st.manual;
+    if (!st.manualOn || !M) return '<div class="empty">手動記録モードは止まっています。</div><div class="bar"><button id="bManOn">手動記録モードを開始</button></div>';
+    const held = (st.positions||[]).map(p => b(p.sym));
+    let h = '<p class="sub">取引所（BingXデモ）で手動で建てたポジションを自動で検知し、その時の相場の状況・損切りと利確の置き方・結果を記録します。ボットの新規エントリーは止めてあります。'+
+      (held.length ? '<b>ボットが保有中の銘柄（'+esc(held.join("、"))+'）は、手動で触らないでください。</b>ボットが注文を取り消すことがあります。' : '')+'</p>';
+    h += '<div class="bar"><button id="bManOff">手動記録モードを止める</button><button id="bManClr" class="warn">手動の記録を消す</button></div>';
+    // 保有中
+    h += '<h3 style="font-size:15px;margin:14px 0 6px">保有中の手動ポジション（'+M.active.length+'）</h3>';
+    h += M.active.length ? M.active.map(a => '<div class="card '+(a.dir > 0 ? "L" : "S")+'"><h3>'+esc(b(a.sym))+' '+DIR(a.dir)+' <em class="num">'+p1(a.g)+'（'+usd(a.upnl,1)+'）</em></h3><ol class="six" style="list-style:none;padding:0">'+
+      '<li><span>建値 </span>'+px(a.entry)+'<span>／現在 </span>'+px(a.px)+'<span>／開始 </span>'+tm(a.t0)+'</li>'+
+      '<li><span>損切り </span>'+(a.sl == null ? "未設定" : p1(a.sl))+'<span>／利確 </span>'+(a.tp == null ? "未設定" : p1(a.tp))+'<span>／最大含み益 </span>'+p1(a.mfe)+'<span>／最大含み損 </span>'+p1(a.mae)+'</li>'+
+      '<li><span>入りの状況 </span>'+esc(fBrief(a.F))+'</li></ol></div>').join("") : '<div class="empty">今は、手動のポジションはありません。取引所で建てると、10秒以内に検知します。</div>';
+    const S_ = M.stat;
+    h += '<h3 style="font-size:15px;margin:14px 0 6px">集計（決済済み '+S_.n+'件）</h3>';
+    if (!S_.n) h += '<div class="empty">決済された手動トレードはまだありません。</div>';
+    else h += '<div class="card"><dl class="rules">'+
+      '<dt>勝率・合計</dt><dd>'+(S_.win == null ? "–" : S_.win+"%")+'／'+usd(S_.pnl,1)+(S_.estN ? '（うち推定 '+S_.estN+'件）' : '')+'</dd>'+
+      '<dt>1回平均</dt><dd>価格 '+p1(S_.avgPct)+'／'+usd(S_.avgPnl,1)+'</dd>'+
+      '<dt>平均保有</dt><dd>'+dur(S_.hold)+'</dd>'+
+      '<dt>最大含み益・含み損</dt><dd>平均 '+p1(S_.mfe)+' ／ '+p1(S_.mae)+'（価格）</dd>'+
+      '<dt>利益の取り込み率</dt><dd>'+(S_.cap == null ? "–" : Math.round(S_.cap)+"%")+'（決済した価格変化 ÷ 最大含み益）</dd>'+
+      '<dt>損切りの置き方</dt><dd>'+(S_.slN ? "平均 "+p1(S_.sl)+"（"+S_.slN+"件で設定）" : "設定なし")+(S_.noSl ? '／未設定 '+S_.noSl+'件' : '')+'</dd>'+
+      '<dt>利確の置き方</dt><dd>'+(S_.tpN ? "平均 "+p1(S_.tp)+"（"+S_.tpN+"件で設定）" : "設定なし")+'</dd>'+
+      '<dt>追加・一部決済</dt><dd>'+S_.adds+'回／'+M.trades.reduce((s,t) => s + t.reduces, 0)+'回</dd></dl></div>';
+    // 入りの特徴
+    h += '<h3 style="font-size:15px;margin:14px 0 6px">入りの特徴（ランダムな時点との比較・'+M.nF+'件）</h3>';
+    if (M.nF < 1) h += '<div class="empty">決済後、約1分で分析します。</div>';
+    else {
+      h += '<p class="sub">「ランダム」は、同じ銘柄・同じ方向で、直近14日の全ての15分足に入った場合の割合です。z＝偏りの大きさ（偶然なら±2以内が普通）。約85通りを同時に見るので、偶然でも2〜4個は|z|≥2になります。<b>'+(M.nF < 20 ? "件数が20未満なので、参考です。" : "")+'</b>「候補」は、z≥3・あなたの入りの半分以上・8件以上のものだけです。</p>';
+      h += M.cand.length ? '<div class="card W"><h3>候補ルール（実装の元になりうるもの）</h3><ol class="six">'+M.cand.map(x => '<li>'+esc(x.label)+' ＝ <b>'+esc(x.b)+'</b>（あなた '+Math.round(x.share*100)+'%／ランダム '+Math.round(x.exp*100)+'%、z '+x.z.toFixed(1)+'）</li>').join("")+'</ol></div>' : '<div class="empty">今のところ、偶然を超えて偏っている特徴はありません（件数が少ないうちは、出ません）。</div>';
+      h += '<div class="scroll"><table class="num"><tr><th>特徴</th><th>区分</th><th>あなた</th><th>ランダム</th><th>倍率</th><th>z</th></tr>'+M.rows.slice(0,15).map(x => '<tr><td style="white-space:normal">'+esc(x.label)+'</td><td>'+esc(x.b)+'</td><td>'+Math.round(x.share*100)+'%（'+x.c+'）</td><td>'+Math.round(x.exp*100)+'%</td><td>'+(x.lift == null ? "–" : x.lift.toFixed(1))+'</td><td>'+x.z.toFixed(1)+'</td></tr>').join("")+'</table></div>';
+    }
+    // 入り後の値動き
+    if (M.nF >= 1){
+      const nm = {m15:"約15分後", h1:"約1時間後", h4:"約4時間後", h24:"約24時間後"};
+      h += '<h3 style="font-size:15px;margin:14px 0 6px">入りの後の値動き（価格の%・コスト前）</h3><div class="scroll"><table class="num"><tr><th>時点</th><th>件数</th><th>あなた</th><th>ランダム</th><th>差</th></tr>'+
+        M.fw.map(f => '<tr><td>'+nm[f.nm]+'</td><td>'+f.n+'</td><td>'+p1(f.man)+'</td><td>'+p1(f.base)+'</td><td>'+p1(f.diff)+(f.se == null ? "" : "±"+(1.96*f.se).toFixed(2))+'</td></tr>').join("")+'</table></div><p class="sub">差が±の幅より大きければ、あなたの入りは、ランダムより有利な位置だったことになります。</p>';
+    }
+    if (M.bot.n) h += '<div class="card"><h3>決済の比較</h3><p class="sub" style="margin:0">今のボットの決済ルール（損切り・逆行の加速・トレーリング）を、あなたの入りに当てはめた場合（'+M.bot.n+'件・価格の%・コスト前）：あなた '+p1(M.bot.man)+'／ボット '+p1(M.bot.bot)+'。あなたの方が良かったのは '+M.bot.better+'件です。</p></div>';
+    // 履歴
+    h += '<h3 style="font-size:15px;margin:14px 0 6px">手動トレードの履歴</h3>';
+    h += M.trades.length ? '<div class="scroll"><table class="num"><tr><th>銘柄</th><th>方向</th><th>入り</th><th>保有</th><th>価格</th><th>損益</th><th>最大益/損</th><th>取込</th><th>損切/利確</th><th>決済</th></tr>'+
+      M.trades.map(t => '<tr><td>'+esc(b(t.sym))+'</td><td class="'+(t.dir > 0 ? "L-t" : "S-t")+'">'+DIR(t.dir)+'</td><td>'+tm(t.t0)+'</td><td>'+dur(t.hold)+'</td><td>'+p1(t.pct)+'</td><td>'+usd(t.pnl,1)+(t.pnlEst ? "*" : "")+'</td><td>'+p1(t.mfe,1)+'/'+p1(t.mae,1)+'</td><td>'+(t.cap == null ? "–" : t.cap+"%")+'</td><td>'+(t.sl == null ? "–" : p1(t.sl,1))+'/'+(t.tp == null ? "–" : p1(t.tp,1))+'</td><td style="text-align:left">'+esc(t.how||"")+'</td></tr>').join("")+'</table></div><p class="sub">*＝注文履歴を取得できず、推定</p>' : '<div class="empty">まだありません。</div>';
+    h += '<details><summary>取引所の応答の見本（項目名の確認用）</summary><pre style="white-space:pre-wrap;font-size:11px;color:var(--sub)">'+esc(JSON.stringify(M.diag, null, 1).slice(0, 2600))+'</pre></details>';
+    return h;
+  }
+  // ---- BingXの収支と約定履歴（BingXの数字をそのまま表示） ----
+  const tyLabel = t => ({MARKET:"成行", STOP_MARKET:"損切り注文", STOP:"損切り注文", TAKE_PROFIT_MARKET:"利確注文", TAKE_PROFIT:"利確注文", LIMIT:"指値", TRIGGER_MARKET:"条件付き成行"}[t] || t);
+  function vFills(){
+    const L = st.led, fx = v => v == null ? "–" : usd(v,1);
+    if (!L || !L.since) return '<div class="empty">まだボットの売買がないため、BingXの収支を数えていません。最初のエントリーの後に、BingXの収支・約定履歴の取得を始めます。</div>';
+    const I = L.inc;
+    let h = '<div class="card '+(L.ok ? "" : "W")+'"><h3>BingXの収支<em>'+tm(L.since)+' 以降・'+(L.ok ? "取得済み" : "取得できていません")+'</em></h3><dl class="rules">'+
+      '<dt>確定損益</dt><dd>'+(I ? fx(I.pnl) : "–")+'</dd>'+
+      '<dt>取引手数料</dt><dd>'+(I ? fx(I.fee) : "–")+'</dd>'+
+      '<dt>資金調達</dt><dd>'+(I ? fx(I.fund) : "–")+(I && I.oth ? '／その他 '+fx(I.oth) : '')+'</dd>'+
+      '<dt>実現損益</dt><dd><b>'+fx(L.R)+'</b>（データ源：'+esc(L.src || "なし")+'）</dd>'+
+      '<dt>含み損益</dt><dd><b>'+fx(L.U)+'</b>（BingXの保有ポジション'+(L.upn ? L.upn.n+'件' : '')+'）</dd>'+
+      '<dt>総資産</dt><dd><b>'+(L.eq != null ? usd(L.eq) : "–")+'</b> ＝ '+st.startUsd+' ＋ '+fx(L.R)+' ＋ '+fx(L.U)+'</dd>'+
+      '<dt>照合</dt><dd>約定履歴の合計（確定損益−手数料）'+fx(L.ordS)+'／収支明細との差 '+(L.diff == null ? "–" : usd(L.diff))+(L.diff == null ? "" : Math.abs(L.diff) < 0.02 ? "（一致）" : "（不一致：履歴を取得できていない銘柄があります）")+'</dd>'+
+      '<dt>アプリ内の従来計算</dt><dd>総資産 '+usd(st.eqInternal)+(L.eq != null ? '（BingX基準との差 '+usd(st.eqInternal - L.eq, 1)+'）' : '')+'</dd></dl>'+
+      '<p class="sub">総資産・累計損益は、手動トレードや以前のポジションを含む、BingXの口座全体の増減です。</p></div>';
+    h += L.rows.length ? '<div class="scroll"><table class="num"><tr><th>日時</th><th>銘柄</th><th>売買</th><th>数量</th><th>約定価格</th><th>手数料</th><th>確定損益</th><th>種別</th><th>出所</th><th>番号</th></tr>'+
+      L.rows.map(r => '<tr><td>'+tm(r.t)+'</td><td>'+esc(r.sym)+'</td><td class="'+(r.ps === "LONG" ? "L-t" : "S-t")+'">'+(r.ps === "LONG" ? "ロング" : "ショート")+(r.open ? "建" : "決")+'</td><td>'+r.q+'</td><td>'+px(r.p)+'</td><td>−'+r.f.toFixed(4)+'</td><td>'+(r.open ? "–" : usd(r.g,1))+'</td><td style="text-align:left">'+esc(tyLabel(r.ty))+'</td><td>'+esc(r.by)+'</td><td>'+esc(String(r.id).slice(-6))+'</td></tr>').join("")+'</table></div><p class="sub">BingXの注文履歴そのままです（半分利確・損切り・手動を含む）。確定損益は手数料を引く前の値です。「出所」は、この注文をボットが出したかの判別です。</p>'
+      : '<div class="empty">約定履歴を取得中です（1銘柄ずつ取得するので、数分かかることがあります）。</div>';
+    h += '<details><summary>取引所の応答の見本（項目名の確認用）</summary><pre style="white-space:pre-wrap;font-size:11px;color:var(--sub)">'+esc(JSON.stringify(L.diag, null, 1).slice(0, 2600))+'</pre></details>';
+    return h;
+  }
   function vLog(){ return '<div class="log">'+st.log.map(l => '<div><i>'+tm(l.t)+'</i><b>'+esc(l.tag)+'</b> '+esc(l.msg)+'</div>').join("")+'</div>'; }
 
   function report(){
@@ -178,6 +251,20 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
     if (st.fills) L.push("約定のずれ（不利側が＋）：入り "+(st.fills.en==null?"–":st.fills.en.toFixed(2)+"%（"+st.fills.enN+"件）")+"／出 "+(st.fills.ex==null?"–":st.fills.ex.toFixed(2)+"%（"+st.fills.exN+"件）")+"　※バックテストの想定は往復0.1%");
     L.push("--- 保有 ---"); st.positions.forEach(p => L.push(b(p.sym)+" "+DIR(p.dir)+"（"+p.pat+"）建値 "+px(p.entry)+" 現在 "+px(p.px)+" 含み "+usd(p.upnl,1)+" 損切り "+px(p.stop)+(p.be?"（建値へ引き上げ済み）":"")+" トレーリング "+(p.armed?"有効":"未")+" 半分利確 "+(p.target!=null?px(p.target)+(p.half?"済":""):"なし"))); L.push("");
     L.push("--- 過去検証 ---"); const t = st.bt; if (t){ L.push((t.complete?"完了":"取得中 "+t.done+"/"+t.total)+" 期間 "+t.days+"日"); t.rows.forEach(r => L.push((r.live?"★ ":"")+varLabel(r)+"："+(r.n ? "採用 "+r.pf.n+"/"+r.n+"件・勝率 "+r.win+"%・1回平均 "+pc(r.avg)+"±"+r.ci.toFixed(2)+"・ランダム比 "+pc(r.diff)+"・年率 "+pc(r.pf.ann,0)+"（前半 "+pc(r.pf.annA,0)+"／後半 "+pc(r.pf.annB,0)+"）・最大DD "+pc(r.pf.dd,1)+"・決済内訳 損切り"+r.exits.sl+"/トレーリング"+r.exits.tr+"/逆行加速"+r.exits.ac+"・包み足"+r.pats.en+"/はらみ足"+r.pats.ha+(r.ok?" ✅":"") : "データなし"))); } L.push("");
+    if (st.manual){ const M = st.manual, S_ = M.stat;
+      L.push("--- 手動トレード（決済 "+S_.n+"件） ---");
+      if (S_.n) L.push("勝率 "+S_.win+"%／合計 "+usd(S_.pnl,1)+"／1回平均 価格 "+p1(S_.avgPct)+"／平均保有 "+dur(S_.hold)+"／最大含み益 "+p1(S_.mfe)+"・含み損 "+p1(S_.mae)+"／取り込み率 "+(S_.cap==null?"–":Math.round(S_.cap)+"%")+"／損切り平均 "+(S_.slN?p1(S_.sl):"設定なし")+"／利確平均 "+(S_.tpN?p1(S_.tp):"設定なし")+"／損切り未設定 "+S_.noSl+"件");
+      M.active.forEach(a => L.push("保有中："+b(a.sym)+" "+DIR(a.dir)+" 建値 "+px(a.entry)+" 現在 "+p1(a.g)+" 損切り "+(a.sl==null?"–":p1(a.sl))+" 利確 "+(a.tp==null?"–":p1(a.tp))+" ／ "+fBrief(a.F)));
+      M.trades.slice(0,40).forEach(t => L.push(tm(t.t0)+" "+b(t.sym)+" "+DIR(t.dir)+" 保有 "+dur(t.hold)+" 価格 "+p1(t.pct)+" 損益 "+usd(t.pnl,1)+(t.pnlEst?"*":"")+" 最大益/損 "+p1(t.mfe,1)+"/"+p1(t.mae,1)+" 損切 "+(t.sl==null?"–":p1(t.sl,1))+" 利確 "+(t.tp==null?"–":p1(t.tp,1))+" 追加"+t.adds+"回 一部決済"+t.reduces+"回 ["+(t.how||"")+"] ／ "+(t.F?Object.keys(t.F).map(k => k+"="+t.F[k]).join(" "):"状況未記録")+(t.bot?" ／ ボット決済なら "+p1(t.bot.pct)+"（"+t.bot.why+"）":"")));
+      if (M.nF) { L.push("入りの特徴（ランダムとの比較・"+M.nF+"件）："); M.rows.slice(0,15).forEach(x => L.push("  "+x.label+"＝"+x.b+" あなた "+Math.round(x.share*100)+"%（"+x.c+"）／ランダム "+Math.round(x.exp*100)+"%／z "+x.z.toFixed(1))); L.push("候補："+(M.cand.length ? M.cand.map(x => x.label+"＝"+x.b).join(" ／ ") : "なし"));
+        L.push("入り後の値動き："+M.fw.map(f => f.nm+" あなた "+p1(f.man)+" ランダム "+p1(f.base)+" 差 "+p1(f.diff)+(f.se==null?"":"±"+(1.96*f.se).toFixed(2))+"（"+f.n+"件）").join(" ／ ")); }
+      if (M.bot.n) L.push("ボット決済との比較（"+M.bot.n+"件）：あなた "+p1(M.bot.man)+" ／ ボット "+p1(M.bot.bot)+" ／ あなたが上回った "+M.bot.better+"件");
+      L.push("取引所の応答の見本："+JSON.stringify(M.diag).slice(0,1500)); L.push(""); }
+    if (st.led && st.led.since){ const Q = st.led, fx = v => v == null ? "–" : usd(v,1);
+      L.push("--- BingXの収支（"+tm(Q.since)+" 以降） ---");
+      L.push("総資産 "+(Q.eq != null ? usd(Q.eq) : "–")+" ＝ "+st.startUsd+" ＋ 実現 "+fx(Q.R)+" ＋ 含み "+fx(Q.U)+"／確定損益 "+(Q.inc ? fx(Q.inc.pnl) : "–")+"・手数料 "+(Q.inc ? fx(Q.inc.fee) : "–")+"・資金調達 "+(Q.inc ? fx(Q.inc.fund) : "–")+"／データ源 "+(Q.src||"なし")+"／約定履歴の合計との差 "+(Q.diff == null ? "–" : usd(Q.diff))+"／アプリ内の従来計算 "+usd(st.eqInternal));
+      Q.rows.slice(0,60).forEach(r => L.push(tm(r.t)+" "+r.sym+" "+(r.ps === "LONG" ? "ロング" : "ショート")+(r.open ? "建" : "決")+" 数量 "+r.q+" 価格 "+px(r.p)+" 手数料 −"+r.f.toFixed(4)+(r.open ? "" : " 確定損益 "+usd(r.g,1))+" "+tyLabel(r.ty)+" ["+r.by+"] #"+String(r.id).slice(-6)));
+      L.push(""); }
     L.push("--- 決済履歴 ---"); st.trades.slice(0,50).forEach(x => L.push(tm(x.exitTs)+" "+b(x.sym)+" "+DIR(x.dir)+" "+usd(x.net,1)+"（"+pc(x.eqPct)+"）"+x.reason+(x.est?"（推定）":""))); L.push("");
     L.push("--- 分析（上位） ---"); (st.analysis||[]).slice(0,15).forEach(a => L.push(b(a.sym)+"：週足"+a.w+"・日足"+a.d+"・EMA50との差 "+pc(a.dist)+"・"+a.shape+"・"+a.reason));
     L.push(""); L.push("--- ログ ---"); st.log.slice(0,40).forEach(l => L.push(tm(l.t)+" "+l.tag+" "+l.msg));
@@ -201,14 +288,21 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
     $("tabs").innerHTML = TABS.map(([k,l]) => '<button data-t="'+k+'" class="'+(k === tab ? "on" : "")+'">'+l+(k === "pos" && st ? "（"+st.positions.length+"）" : "")+'</button>').join("");
     if (!st){ $("view").innerHTML = '<div class="empty">'+(URL_ ? "サーバーからの応答を待っています。" : "最初に「接続設定」を開いて、リレーURLとACCESS_TOKENを保存してください。")+'</div>'; if (!URL_) $("conn").open = true; return; }
     const dayPnl = (st.day && st.day[today()]) || 0, lag = srv && srv.lastTickAt ? Math.round((Date.now() - srv.lastTickAt)/1000) : null;
-    $("eq").textContent = usd(st.equity); $("eqsub").textContent = "開始 $"+st.startUsd+"（"+pc((st.equity/st.startUsd - 1)*100)+"）";
-    $("day").textContent = usd(dayPnl, 1); $("daysub").textContent = srv && srv.stoppedDay === today() ? "上限到達で新規停止中" : "上限 $"+(srv ? srv.dailyStop : "–");
+    { const L = st.led, okL = !!(L && L.ok);
+      $("eq").textContent = usd(st.equity);
+      $("eqsub").textContent = okL ? "＝ "+st.startUsd+" ＋ 実現 "+usd(L.R,1)+" ＋ 含み "+usd(L.U,1) : "アプリ内の計算（BingXの収支を取得中）";
+      $("day").textContent = usd(okL ? L.pnl : st.equity - st.startUsd, 1);
+      $("daysub").textContent = (okL && L.today != null ? "今日の実現 "+usd(L.today,1)+"／" : "")+(srv && srv.stoppedDay === today() ? "上限到達で新規停止中" : "1日の損失上限 $"+(srv ? srv.dailyStop : "–")); }
     $("pos").textContent = st.positions.length+"/"+st.rule.maxPos; $("possub").textContent = "ロング"+st.positions.filter(p=>p.dir>0).length+"・ショート"+st.positions.filter(p=>p.dir<0).length+"／新規"+(st.running ? "受付中" : "停止中");
     $("srv").textContent = srv && srv.enabled ? "常駐中" : "停止中"; $("srvsub").textContent = lag == null ? "" : "最終処理 "+lag+"秒前";
     $("bRun").textContent = st.running ? "新規エントリーを停止" : "新規エントリーを再開";
     $("bSrv").textContent = srv && srv.enabled ? "サーバー常駐を停止" : "サーバー常駐を開始";
-    const V = {an:vAnalysis, pos:vPositions, hist:vHistory, bt:vBacktest, rule:vRules, log:vLog}[tab];
+    const V = {man:vManual, fills:vFills, an:vAnalysis, pos:vPositions, hist:vHistory, bt:vBacktest, rule:vRules, log:vLog}[tab];
     const y = window.scrollY; $("view").innerHTML = V(); window.scrollTo(0, y);
+    { const a = $("bManOn"), o = $("bManOff"), c = $("bManClr");
+      if (a) a.onclick = () => cmd({cmd:"manualOn"});
+      if (o) o.onclick = () => { if (confirm("手動記録モードを止めますか？（記録は残ります。ボットの管理外ポジションの警告が復活します）")) cmd({cmd:"manualOff"}); };
+      if (c) c.onclick = () => { if (confirm("手動トレードの記録をすべて消しますか？")) cmd({cmd:"manClear"}); }; }
     const bb = $("bBt"); if (bb) bb.onclick = () => { if (confirm("過去検証の結果を消して、最初からやり直しますか？（約20分かかります）")) cmd({cmd:"btRestart"}); };
   }
   $("tabs").onclick = e => { const t = e.target.closest("button"); if (t){ tab = t.dataset.t; render(); } };
