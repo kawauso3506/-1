@@ -57,7 +57,7 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
 </head>
 <body>
 <main>
-<h1>TrenchDesk v3<small>週足・日足トレンド＋15分足EMA50押し目</small></h1>
+<h1>TrenchDesk v3<small>週足・日足トレンド＋日足EMA20押し目</small></h1>
 <div id="err"></div>
 <div class="top">
   <div class="stat"><span>総資産</span><b class="num" id="eq">–</b><span id="eqsub" class="num"></span></div>
@@ -110,28 +110,28 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
   // ---- 分析：指定の6項目 ----
   function sixItems(a){
     const tr = t => t === "上昇" ? "L-t" : t === "下降" ? "S-t" : "";
-    const state = a.held ? "保有中" : a.can ? "待機（反転足が確定すれば可）" : "不可";
-    const plan = a.plan ? "方向 "+DIR(a.plan.dir)+"／推奨エントリー 反転足の次の15分足の始値（現在 "+px(a.plan.entry)+"）／損切り "+px(a.plan.stop)+"（"+(a.plan.dir > 0 ? "−" : "+")+st.rule.slPct+"%＝総資産の約2%）／初期トレーリングライン 15分足EMA20 "+px(a.plan.trail)+"（終値が一度"+(a.plan.dir > 0 ? "上" : "下")+"で確定してから有効）／半分利確 "+(a.plan.target != null ? px(a.plan.target)+"（"+a.plan.targetName+"）" : "RR1:1以上離れた節目なし")
+    const state = a.held ? "保有中" : a.can ? "待機（"+(a.dir > 0 ? "陽線" : "陰線")+"が確定すれば可）" : "不可";
+    const plan = a.plan ? "方向 "+DIR(a.plan.dir)+"／推奨エントリー 確定足の次の日足の始値（日本時間9時過ぎ・現在 "+px(a.plan.entry)+"）／損切り "+px(a.plan.stop)+"（"+(a.plan.dir > 0 ? "−" : "+")+st.rule.slPctD+"%）／部分利確 "+(a.plan.target != null ? px(a.plan.target)+"（"+a.plan.targetName+"）で半分、残りの損切りを建値へ" : "なし（"+(a.plan.dir > 0 ? "20日高値" : "20日安値")+"の更新中）")+"／残りの全部利確 日足の終値がEMA20（現在 "+px(a.plan.trail)+"）を"+(a.plan.dir > 0 ? "割ったら" : "超えたら")
       : a.held ? "保有タブを参照" : "条件を満たしていないため、なし";
     return '<div class="card '+(a.held ? (a.dir > 0 ? "L" : "S") : a.watching ? "W" : "")+'"><h3>'+esc(b(a.sym))+' <em class="num">'+px(a.px)+'</em></h3><ol class="six">'+
       '<li><span>週足トレンド：</span><b class="'+tr(a.w)+'">'+a.w+'</b></li>'+
       '<li><span>日足トレンド：</span><b class="'+tr(a.d)+'">'+a.d+'</b></li>'+
-      '<li><span>15分足：</span>EMA50 '+px(a.e50)+'（現在値との差 '+pc(a.dist)+'）／直近の足 '+esc(a.shape)+'</li>'+
+      '<li><span>日足：</span>EMA20 '+px(a.e20)+'（差 '+pc(a.dist)+'）／EMA50 '+px(a.e50)+'（差 '+pc(a.dist50)+'）／直近の足 '+esc(a.shape)+'</li>'+
       '<li><span>エントリー可否：</span><b class="'+(a.can ? "W-t" : "")+'">'+state+'</b>。'+esc(a.reason)+'</li>'+
       '<li><span>具体的内容：</span>'+esc(plan)+'</li>'+
       '<li><span>相関リスク：</span>'+esc(a.corr)+'</li></ol></div>';
   }
   function vAnalysis(){
     const u = st.universe, list = st.analysis || [];
-    const h = '<p class="sub">対象 '+u.total+'銘柄（売買代金$5M以上）：週足・日足とも上昇 '+u.up+'／とも下降 '+u.dn+'／不一致・レンジ '+u.range+'／上場1年未満で対象外 '+u.young+(u.noData ? '／データ取得中 '+u.noData : '')+'。上位足が一致した銘柄だけを、EMA50に近い順に表示します。</p>';
+    const h = '<p class="sub">対象は、売買代金の上位60銘柄（$5M以上・上場1年以上）です。週足と日足のトレンドが一致している銘柄を、日足EMA20に近い順に表示します。判定は1日1回、日足の確定後（日本時間9時過ぎ）です。</p>';
     return h + (list.length ? list.map(sixItems).join("") : '<div class="empty">週足と日足のトレンドが一致している銘柄はまだありません。データ取得中の場合は数分待ってください。</div>');
   }
   function vPositions(){
     const ps = st.positions; if (!ps.length) return '<div class="empty">保有中のポジションはありません。</div>';
     return ps.map(p => '<div class="card '+(p.dir > 0 ? "L" : "S")+'"><h3>'+esc(b(p.sym))+' '+DIR(p.dir)+'（'+esc(p.pat)+'）<em class="num">'+usd(p.upnl,1)+'（総資産の'+pc(p.upnlEq)+'）</em></h3><ol class="six" style="list-style:none;padding:0">'+
       '<li><span>建値 </span>'+px(p.entry)+(p.fillEntry ? '（実約定）' : '（想定）')+'<span>／現在 </span>'+px(p.px)+'<span>／証拠金 </span>'+usd(p.margin)+'</li>'+
-      '<li><span>損切り </span>'+px(p.stop)+(p.be ? '（半分利確後、建値＋手数料分へ引き上げ済み）' : '（取引所にも注文済み）')+'</li>'+
-      '<li><span>トレーリング </span>15分足EMA20 '+px(p.e20)+'：'+(p.armed ? "有効（終値が抜けたら決済）" : "まだ無効（終値がEMA20の"+(p.dir > 0 ? "上" : "下")+"で確定したら有効）")+'</li>'+
+      '<li><span>損切り </span>'+px(p.stop)+'（'+(p.be ? "" : "−"+p.slPct+"%")+'）'+(p.be ? '（半分利確後、建値＋手数料分へ引き上げ済み）' : '（取引所にも注文済み）')+'</li>'+
+      '<li><span>残りの決済 </span>'+(p.v === "d1" ? '日足の終値がEMA20を'+(p.dir > 0 ? "割ったら" : "超えたら")+'：'+(p.armed ? "有効" : "まだ無効（終値がEMA20の"+(p.dir > 0 ? "上" : "下")+"で確定したら有効）") : '15分足EMA20 '+px(p.e20)+'：'+(p.armed ? "有効（EMA20から0.5ATR抜けたら決済）" : "まだ無効")+'（以前の15分足の戦略）')+'</li>'+
       '<li><span>半分利確 </span>'+(p.target != null ? px(p.target)+'（'+esc(p.targetName)+'）'+(p.half ? "：実行済み（実現 "+usd(p.booked,1)+"）" : "") : "目標なし")+'<span>／取引所の注文ではなく、ボットが価格を見て成行で決済します</span>'+'</li>'+
       '<li><span>取引所 </span>'+esc(p.live ? ({open:"発注済み", opening:"発注中", error:"失敗", skip:"見送り", closed:"決済済み"}[p.live.status]||p.live.status)+(p.live.msg ? "（"+p.live.msg+"）" : "") : "–")+'<span>／開始 </span>'+tm(p.ts)+'</li></ol></div>').join("");
   }
@@ -146,82 +146,34 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
   }
   function vBacktest(){
     const t = st.bt; if (!t) return '<div class="empty">データ待ち</div>';
-    let h = '<p class="sub">過去約60日の15分足で、この戦略を上位60銘柄に当てはめた結果です。'+(t.complete ? "完了" : "取得中 "+t.done+"/"+t.total+"銘柄（1銘柄あたり約20秒）")+(t.skipped ? "・データ不足で除外 "+t.skipped : "")+(t.days ? "・期間 "+t.days+"日" : "")+'。★が実売買と同じ設定です。</p>';
-    h += '<p class="sub">年率は複利（毎回その時点の総資産の10%で入る）で、最大5件・同じ方向3件・BTCとETHのルールを守って採用した取引だけで計算します。1回平均は値動きの%（手数料・スリッページ込み）。「ランダム比」は同じトレンド条件で8時間おきに入った場合との差です。✅＝年率15%以上・前半後半とも年率プラス・ランダムより良い。60日は短く、1〜2回の大きな相場で結果が変わります。</p>';
-    h += '<div class="scroll"><table class="num"><tr><th>設定</th><th>件数</th><th>勝率</th><th>1回平均</th><th>ランダム比</th><th>年率</th><th>前半/後半</th><th>最大DD</th><th></th></tr>';
+    let h = '<p class="sub">日足（最大約4年）で、この戦略を売買代金の上位60銘柄に当てはめた結果です。'+(t.complete ? "完了" : "取得中 "+t.done+"/"+t.total+"銘柄（1銘柄あたり約8秒）")+(t.skipped ? "・データ不足で除外 "+t.skipped : "")+(t.days ? "・期間 "+t.days+"日" : "")+'。★が実売買と同じ設定です。</p>';
+    h += '<p class="sub">年率は複利（毎回その時点の総資産の10%で入る）で、最大5件・同じ方向3件・BTCとETHのルールを守って採用した取引だけで計算します。1回平均は値動きの%で、往復コスト'+t.cost+'%（手数料0.1%＋スリッページ0.3%の想定）を引いた後です。「ランダム比」は、同じトレンド条件で7日おきに入り、同じ決済ルールで手仕舞った場合との差です。✅＝年率15%以上・前半後半とも年率プラス・ランダムより良い。今の上位銘柄だけを使うので、上場廃止・低迷した銘柄が入らず、結果は良く出がちです。</p>';
+    h += '<div class="scroll"><table class="num"><tr><th>設定</th><th>件数</th><th>勝率</th><th>1回平均</th><th>ランダム比</th><th>年率</th><th>前半/後半</th><th>最大DD</th><th>決済（損切り/建値/EMA20）</th><th>平均保有</th><th></th></tr>';
     for (const r of t.rows){
-      if (!r.n){ h += '<tr><td>'+esc(r.k)+'</td><td colspan="8">データなし</td></tr>'; continue; }
-      h += '<tr class="'+(r.live ? "live" : "")+'"><td>'+(r.live ? "★ " : "")+esc(varLabel(r))+'</td><td>'+r.pf.n+'/'+r.n+'</td><td>'+r.win+'%</td><td>'+pc(r.avg)+'±'+r.ci.toFixed(2)+'</td><td>'+pc(r.diff)+'</td><td>'+pc(r.pf.ann,0)+'</td><td>'+pc(r.pf.annA,0)+'/'+pc(r.pf.annB,0)+'</td><td>'+pc(r.pf.dd,1)+'</td><td>'+(r.ok ? "✅" : "")+'</td></tr>';
+      const lab = "損切り"+r.sl+"%／部分利確"+(r.half ? "あり" : "なし");
+      if (!r.n){ h += '<tr><td>'+lab+'</td><td colspan="10">データなし</td></tr>'; continue; }
+      h += '<tr class="'+(r.live ? "live" : "")+'"><td>'+(r.live ? "★ " : "")+lab+'</td><td>'+r.pf.n+'/'+r.n+'</td><td>'+r.win+'%</td><td>'+pc(r.avg)+'±'+r.ci.toFixed(2)+'</td><td>'+pc(r.diff)+'</td><td>'+pc(r.pf.ann,0)+'</td><td>'+pc(r.pf.annA,0)+'/'+pc(r.pf.annB,0)+'</td><td>'+pc(r.pf.dd,1)+'</td><td>'+r.exits.sl+'/'+r.exits.be+'/'+r.exits.e20+'</td><td>'+r.hold.toFixed(1)+'日</td><td>'+(r.ok ? "✅" : "")+'</td></tr>';
     }
-    return h + '</table></div><div class="bar"><button id="bBt" class="warn">過去検証をやり直す</button></div>';
+    h += '</table></div>';
+    const lv = t.rows.find(r => r.live && r.n);
+    if (lv) h += '<div class="card"><h3>年ごとの成績（★の設定・口座全体・複利）</h3><p class="sub" style="margin:0">'+lv.pf.years.map(y => y.y+"年 "+pc(y.r,1)+"（"+y.n+"件）").join("／")+'</p></div>';
+    return h + '<div class="bar"><button id="bBt" class="warn">過去検証をやり直す</button></div>';
   }
   function vRules(){
     const R = st.rule, row = (k,v) => '<dt>'+k+'</dt><dd>'+v+'</dd>';
     return '<div class="card"><dl class="rules">'+
       row("レバレッジ", R.lev+"倍固定")+row("1回のサイズ", "証拠金＝総資産の"+(R.marginPct*100)+"%（建玉は総資産の"+(R.marginPct*R.lev*100)+"%）")+
       row("同時保有", "最大"+R.maxPos+"件（証拠金は最大50%、現金は常に50%以上）")+row("同じ方向", "最大"+R.maxSameDir+"件")+row("BTCとETH", "同時に同じ方向では持たない")+
-      row("対象銘柄", "24時間売買代金$5M以上・上場1年以上（週足"+R.minWeeks+"本以上）")+
+      row("対象銘柄", "売買代金の上位"+R.topN+"銘柄（$5M以上・上場1年以上＝週足"+R.minWeeks+"本以上）")+
       row("トレンド", "週足と日足で、EMA20＞EMA50かつ終値＞EMA50＝上昇、逆＝下降。両方一致した方向だけ")+
-      row("EMA50接触", "15分足の安値がEMA50以下（ショートは高値が以上）。直前の足の終値はEMA50のトレンド側")+
-      row("反転足", "包み足：前の足と逆向きの足で、実体が前の実体を完全に包む。はらみ足：実体が前の実体の内側")+
-      row("待つ時間", "接触した足の後、"+R.watchBars+"本（2時間）以内に反転足が確定したら、次の足で入る")+
-      row("逆行の加速", "15分足の終値がEMA50からATR(14)の"+R.accK+"本分以上逆側：エントリー前は取り消し、後は損切り")+
-      row("損切り", "建値から"+R.slPct+"%（手数料・スリッページ込みで総資産の約2.0%）。取引所にも注文を置く")+
-      row("トレーリング", "終値が15分足EMA20から、ATRの"+R.trailBuf+"本分以上逆側で確定したら全決済。有効になるのは、終値がEMA20から同じ幅だけ順行側で確定してから（余裕を持たせて、小さな往復で決済されにくくしてある）")+
-      row("半分利確", "日足EMA20・EMA50・20日高値（ショートは安値）のうち、損切り幅以上離れていて一番近いものに到達したら半分。その後、残りの損切りを建値＋"+(R.beCost*100).toFixed(1)+"%（手数料分）へ引き上げ")+
+      row("押し目", "日足の安値がEMA20以下（ショートは高値がEMA20以上）。EMA50まで押した場合も含む")+
+      row("確定足", "接触した日を含めて"+(R.dWatch+1)+"本以内に、トレンド方向の足（ロングは陽線、ショートは陰線）が確定したら、次の足の始値で入る")+
+      row("取り消し", "日足の終値がEMA50からATR(14)の"+R.dCancelK+"倍以上、逆側で確定したら、崩れと見て見送る")+
+      row("損切り", "建値から"+R.slPctD+"%（総資産の約"+(R.marginPct*R.lev*(R.slPctD+0.1)).toFixed(1)+"%の損失）。取引所にも注文を置く")+
+      row("部分利確", "20日高値（ショートは20日安値）に届いたら半分。建値より有利側にある時だけ。その後、残りの損切りを建値＋"+(R.beCost*100).toFixed(1)+"%（手数料分）へ")+
+      row("残りの決済", "日足の終値がEMA20を割ったら（ショートは超えたら）全決済。終値が一度EMA20のトレンド側で確定してから有効")+
       row("1日の上限", "当日の損失が$"+(srv ? srv.dailyStop : "–")+"を超えたら新規エントリーを停止")+
-      '</dl></div>';
-  }
-  // ---- 手動トレードの記録と分析 ----
-  const dur = ms => ms == null ? "–" : ms < 3600e3 ? Math.round(ms/60000)+"分" : (ms/3600e3).toFixed(1)+"時間";
-  const p1 = (v, d=2) => v == null ? "–" : (v >= 0 ? "+" : "−")+Math.abs(v).toFixed(d)+"%";
-  const fBrief = F => F ? "週足 "+F.tW+"／日足 "+F.tD+"／EMA50との位置 "+F.loc50+"ATR／反転足 "+F.rev : "状況を記録中…";
-  function vManual(){
-    const M = st.manual;
-    if (!st.manualOn || !M) return '<div class="empty">手動記録モードは止まっています。</div><div class="bar"><button id="bManOn">手動記録モードを開始</button></div>';
-    const held = (st.positions||[]).map(p => b(p.sym));
-    let h = '<p class="sub">取引所（BingXデモ）で手動で建てたポジションを自動で検知し、その時の相場の状況・損切りと利確の置き方・結果を記録します。ボットの新規エントリーは止めてあります。'+
-      (held.length ? '<b>ボットが保有中の銘柄（'+esc(held.join("、"))+'）は、手動で触らないでください。</b>ボットが注文を取り消すことがあります。' : '')+'</p>';
-    h += '<div class="bar"><button id="bManOff">手動記録モードを止める</button><button id="bManClr" class="warn">手動の記録を消す</button></div>';
-    // 保有中
-    h += '<h3 style="font-size:15px;margin:14px 0 6px">保有中の手動ポジション（'+M.active.length+'）</h3>';
-    h += M.active.length ? M.active.map(a => '<div class="card '+(a.dir > 0 ? "L" : "S")+'"><h3>'+esc(b(a.sym))+' '+DIR(a.dir)+' <em class="num">'+p1(a.g)+'（'+usd(a.upnl,1)+'）</em></h3><ol class="six" style="list-style:none;padding:0">'+
-      '<li><span>建値 </span>'+px(a.entry)+'<span>／現在 </span>'+px(a.px)+'<span>／開始 </span>'+tm(a.t0)+'</li>'+
-      '<li><span>損切り </span>'+(a.sl == null ? "未設定" : p1(a.sl))+'<span>／利確 </span>'+(a.tp == null ? "未設定" : p1(a.tp))+'<span>／最大含み益 </span>'+p1(a.mfe)+'<span>／最大含み損 </span>'+p1(a.mae)+'</li>'+
-      '<li><span>入りの状況 </span>'+esc(fBrief(a.F))+'</li></ol></div>').join("") : '<div class="empty">今は、手動のポジションはありません。取引所で建てると、10秒以内に検知します。</div>';
-    const S_ = M.stat;
-    h += '<h3 style="font-size:15px;margin:14px 0 6px">集計（決済済み '+S_.n+'件）</h3>';
-    if (!S_.n) h += '<div class="empty">決済された手動トレードはまだありません。</div>';
-    else h += '<div class="card"><dl class="rules">'+
-      '<dt>勝率・合計</dt><dd>'+(S_.win == null ? "–" : S_.win+"%")+'／'+usd(S_.pnl,1)+(S_.estN ? '（うち推定 '+S_.estN+'件）' : '')+'</dd>'+
-      '<dt>1回平均</dt><dd>価格 '+p1(S_.avgPct)+'／'+usd(S_.avgPnl,1)+'</dd>'+
-      '<dt>平均保有</dt><dd>'+dur(S_.hold)+'</dd>'+
-      '<dt>最大含み益・含み損</dt><dd>平均 '+p1(S_.mfe)+' ／ '+p1(S_.mae)+'（価格）</dd>'+
-      '<dt>利益の取り込み率</dt><dd>'+(S_.cap == null ? "–" : Math.round(S_.cap)+"%")+'（決済した価格変化 ÷ 最大含み益）</dd>'+
-      '<dt>損切りの置き方</dt><dd>'+(S_.slN ? "平均 "+p1(S_.sl)+"（"+S_.slN+"件で設定）" : "設定なし")+(S_.noSl ? '／未設定 '+S_.noSl+'件' : '')+'</dd>'+
-      '<dt>利確の置き方</dt><dd>'+(S_.tpN ? "平均 "+p1(S_.tp)+"（"+S_.tpN+"件で設定）" : "設定なし")+'</dd>'+
-      '<dt>追加・一部決済</dt><dd>'+S_.adds+'回／'+M.trades.reduce((s,t) => s + t.reduces, 0)+'回</dd></dl></div>';
-    // 入りの特徴
-    h += '<h3 style="font-size:15px;margin:14px 0 6px">入りの特徴（ランダムな時点との比較・'+M.nF+'件）</h3>';
-    if (M.nF < 1) h += '<div class="empty">決済後、約1分で分析します。</div>';
-    else {
-      h += '<p class="sub">「ランダム」は、同じ銘柄・同じ方向で、直近14日の全ての15分足に入った場合の割合です。z＝偏りの大きさ（偶然なら±2以内が普通）。約85通りを同時に見るので、偶然でも2〜4個は|z|≥2になります。<b>'+(M.nF < 20 ? "件数が20未満なので、参考です。" : "")+'</b>「候補」は、z≥3・あなたの入りの半分以上・8件以上のものだけです。</p>';
-      h += M.cand.length ? '<div class="card W"><h3>候補ルール（実装の元になりうるもの）</h3><ol class="six">'+M.cand.map(x => '<li>'+esc(x.label)+' ＝ <b>'+esc(x.b)+'</b>（あなた '+Math.round(x.share*100)+'%／ランダム '+Math.round(x.exp*100)+'%、z '+x.z.toFixed(1)+'）</li>').join("")+'</ol></div>' : '<div class="empty">今のところ、偶然を超えて偏っている特徴はありません（件数が少ないうちは、出ません）。</div>';
-      h += '<div class="scroll"><table class="num"><tr><th>特徴</th><th>区分</th><th>あなた</th><th>ランダム</th><th>倍率</th><th>z</th></tr>'+M.rows.slice(0,15).map(x => '<tr><td style="white-space:normal">'+esc(x.label)+'</td><td>'+esc(x.b)+'</td><td>'+Math.round(x.share*100)+'%（'+x.c+'）</td><td>'+Math.round(x.exp*100)+'%</td><td>'+(x.lift == null ? "–" : x.lift.toFixed(1))+'</td><td>'+x.z.toFixed(1)+'</td></tr>').join("")+'</table></div>';
-    }
-    // 入り後の値動き
-    if (M.nF >= 1){
-      const nm = {m15:"約15分後", h1:"約1時間後", h4:"約4時間後", h24:"約24時間後"};
-      h += '<h3 style="font-size:15px;margin:14px 0 6px">入りの後の値動き（価格の%・コスト前）</h3><div class="scroll"><table class="num"><tr><th>時点</th><th>件数</th><th>あなた</th><th>ランダム</th><th>差</th></tr>'+
-        M.fw.map(f => '<tr><td>'+nm[f.nm]+'</td><td>'+f.n+'</td><td>'+p1(f.man)+'</td><td>'+p1(f.base)+'</td><td>'+p1(f.diff)+(f.se == null ? "" : "±"+(1.96*f.se).toFixed(2))+'</td></tr>').join("")+'</table></div><p class="sub">差が±の幅より大きければ、あなたの入りは、ランダムより有利な位置だったことになります。</p>';
-    }
-    if (M.bot.n) h += '<div class="card"><h3>決済の比較</h3><p class="sub" style="margin:0">今のボットの決済ルール（損切り・逆行の加速・トレーリング）を、あなたの入りに当てはめた場合（'+M.bot.n+'件・価格の%・コスト前）：あなた '+p1(M.bot.man)+'／ボット '+p1(M.bot.bot)+'。あなたの方が良かったのは '+M.bot.better+'件です。</p></div>';
-    // 履歴
-    h += '<h3 style="font-size:15px;margin:14px 0 6px">手動トレードの履歴</h3>';
-    h += M.trades.length ? '<div class="scroll"><table class="num"><tr><th>銘柄</th><th>方向</th><th>入り</th><th>保有</th><th>価格</th><th>損益</th><th>最大益/損</th><th>取込</th><th>損切/利確</th><th>決済</th></tr>'+
-      M.trades.map(t => '<tr><td>'+esc(b(t.sym))+'</td><td class="'+(t.dir > 0 ? "L-t" : "S-t")+'">'+DIR(t.dir)+'</td><td>'+tm(t.t0)+'</td><td>'+dur(t.hold)+'</td><td>'+p1(t.pct)+'</td><td>'+usd(t.pnl,1)+(t.pnlEst ? "*" : "")+'</td><td>'+p1(t.mfe,1)+'/'+p1(t.mae,1)+'</td><td>'+(t.cap == null ? "–" : t.cap+"%")+'</td><td>'+(t.sl == null ? "–" : p1(t.sl,1))+'/'+(t.tp == null ? "–" : p1(t.tp,1))+'</td><td style="text-align:left">'+esc(t.how||"")+'</td></tr>').join("")+'</table></div><p class="sub">*＝注文履歴を取得できず、推定</p>' : '<div class="empty">まだありません。</div>';
-    h += '<details><summary>取引所の応答の見本（項目名の確認用）</summary><pre style="white-space:pre-wrap;font-size:11px;color:var(--sub)">'+esc(JSON.stringify(M.diag, null, 1).slice(0, 2600))+'</pre></details>';
-    return h;
+      '</dl><p class="sub">以前の15分足の戦略で建てたポジションは、決済まで以前のルール（損切り−'+R.slPct+'%・15分足EMA20トレーリング・逆行の加速）で管理します。</p></div>';
   }
   // ---- BingXの収支と約定履歴（BingXの数字をそのまま表示） ----
   const tyLabel = t => ({MARKET:"成行", STOP_MARKET:"損切り注文", STOP:"損切り注文", TAKE_PROFIT_MARKET:"利確注文", TAKE_PROFIT:"利確注文", LIMIT:"指値", TRIGGER_MARKET:"条件付き成行"}[t] || t);
@@ -254,7 +206,7 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
     if (st.legacy){ L.push("--- 管理外（以前のルールの残りなど） ---"); (st.legacy.positions||[]).forEach(x => L.push(x.sym+" "+(x.side==="LONG"?"ロング":"ショート")+" 数量 "+x.amt+" 建値 "+px(x.entry)+" 含み "+usd(x.pnl,1))); if ((st.legacy.orderSyms||[]).length) L.push("注文のみ："+st.legacy.orderSyms.join("、")); L.push(""); }
     if (st.fills) L.push("約定のずれ（不利側が＋）：入り "+(st.fills.en==null?"–":st.fills.en.toFixed(2)+"%（"+st.fills.enN+"件）")+"／出 "+(st.fills.ex==null?"–":st.fills.ex.toFixed(2)+"%（"+st.fills.exN+"件）")+"　※バックテストの想定は往復0.1%");
     L.push("--- 保有 ---"); st.positions.forEach(p => L.push(b(p.sym)+" "+DIR(p.dir)+"（"+p.pat+"）建値 "+px(p.entry)+" 現在 "+px(p.px)+" 含み "+usd(p.upnl,1)+" 損切り "+px(p.stop)+(p.be?"（建値へ引き上げ済み）":"")+" トレーリング "+(p.armed?"有効":"未")+" 半分利確 "+(p.target!=null?px(p.target)+(p.half?"済":""):"なし"))); L.push("");
-    L.push("--- 過去検証 ---"); const t = st.bt; if (t){ L.push((t.complete?"完了":"取得中 "+t.done+"/"+t.total)+" 期間 "+t.days+"日"); t.rows.forEach(r => L.push((r.live?"★ ":"")+varLabel(r)+"："+(r.n ? "採用 "+r.pf.n+"/"+r.n+"件・勝率 "+r.win+"%・1回平均 "+pc(r.avg)+"±"+r.ci.toFixed(2)+"・ランダム比 "+pc(r.diff)+"・年率 "+pc(r.pf.ann,0)+"（前半 "+pc(r.pf.annA,0)+"／後半 "+pc(r.pf.annB,0)+"）・最大DD "+pc(r.pf.dd,1)+"・決済内訳 損切り"+r.exits.sl+"/トレーリング"+r.exits.tr+"/逆行加速"+r.exits.ac+"・包み足"+r.pats.en+"/はらみ足"+r.pats.ha+(r.ok?" ✅":"") : "データなし"))); } L.push("");
+    L.push("--- 過去検証（日足） ---"); const t = st.bt; if (t){ L.push((t.complete?"完了":"取得中 "+t.done+"/"+t.total)+" 期間 "+t.days+"日 往復コスト "+t.cost+"%"); t.rows.forEach(r => L.push((r.live?"★ ":"")+"損切り"+r.sl+"%／部分利確"+(r.half?"あり":"なし")+"："+(r.n ? "採用 "+r.pf.n+"/"+r.n+"件・勝率 "+r.win+"%・1回平均 "+pc(r.avg)+"±"+r.ci.toFixed(2)+"・ランダム比 "+pc(r.diff)+"・年率 "+pc(r.pf.ann,0)+"（前半 "+pc(r.pf.annA,0)+"／後半 "+pc(r.pf.annB,0)+"）・最大DD "+pc(r.pf.dd,1)+"・決済 損切り"+r.exits.sl+"/建値"+r.exits.be+"/EMA20 "+r.exits.e20+"・平均保有 "+r.hold.toFixed(1)+"日・年別 "+r.pf.years.map(y => y.y+":"+y.r+"%").join(",")+(r.ok?" ✅":"") : "データなし"))); } L.push("");
     if (st.manual){ const M = st.manual, S_ = M.stat;
       L.push("--- 手動トレード（決済 "+S_.n+"件） ---");
       if (S_.n) L.push("勝率 "+S_.win+"%／合計 "+usd(S_.pnl,1)+"／1回平均 価格 "+p1(S_.avgPct)+"／平均保有 "+dur(S_.hold)+"／最大含み益 "+p1(S_.mfe)+"・含み損 "+p1(S_.mae)+"／取り込み率 "+(S_.cap==null?"–":Math.round(S_.cap)+"%")+"／損切り平均 "+(S_.slN?p1(S_.sl):"設定なし")+"／利確平均 "+(S_.tpN?p1(S_.tp):"設定なし")+"／損切り未設定 "+S_.noSl+"件");
