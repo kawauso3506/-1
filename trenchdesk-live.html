@@ -85,7 +85,7 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
 (() => {
   const $ = id => document.getElementById(id);
   const LS = {get:k => { try{ return localStorage.getItem(k) || ""; }catch(_){ return ""; } }, set:(k,v) => { try{ localStorage.setItem(k,v); }catch(_){} }};
-  let URL_ = LS.get("trenchdesk_relay_url"), TOK = LS.get("trenchdesk_relay_token"), st = null, srv = null, err = null, tab = "man";
+  let URL_ = LS.get("trenchdesk_relay_url"), TOK = LS.get("trenchdesk_relay_token"), st = null, srv = null, err = null, tab = "pos";
   async function api(path, body){
     if (!URL_ || !TOK) throw new Error("接続設定でリレーURLとACCESS_TOKENを入力してください");
     const r = await fetch(URL_.replace(/\/$/,"") + path, {method: body ? "POST" : "GET", headers: Object.assign({authorization:"Bearer "+TOK}, body ? {"content-type":"application/json"} : {}), body: body ? JSON.stringify(body) : undefined});
@@ -93,6 +93,9 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
   }
   async function pull(){ try{ const j = await api("/server/state"); st = j.state; srv = j.server; err = null; }catch(e){ err = e.message; } render(); }
   async function cmd(b){ try{ const j = await api("/server/cmd", b); st = j.state; srv = j.server; err = null; }catch(e){ err = e.message; } render(); }
+  let lastHtml = "", lastTab = null, lastTouch = 0, pendingRender = false;
+  for (const ev of ["touchstart","touchmove","wheel","scroll"]) window.addEventListener(ev, () => { lastTouch = Date.now(); }, {passive:true, capture:true});
+  window.addEventListener("touchend", () => { lastTouch = Date.now(); setTimeout(() => { if (pendingRender && Date.now() - lastTouch >= 2400) render(); }, 2600); }, {passive:true, capture:true});
   const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
   const usd = (v, s) => v == null ? "–" : (s ? (v >= 0 ? "+" : "−") : (v < 0 ? "−" : "")) + "$" + Math.abs(v).toFixed(2);
   const pc = (v, d=2) => v == null ? "–" : (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(d) + "%";
@@ -101,7 +104,7 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
   const DIR = d => d > 0 ? "ロング" : d < 0 ? "ショート" : "–";
   const tm = t => { const d = new Date(t); return (d.getMonth()+1)+"/"+d.getDate()+" "+String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); };
   const today = () => new Date(Date.now()+9*3600e3).toISOString().slice(0,10);
-  const TABS = [["man","手動"],["fills","約定履歴"],["an","分析"],["pos","保有"],["hist","ボット取引"],["bt","過去検証"],["rule","ルール"],["log","ログ"]];
+  const TABS = [["fills","約定履歴"],["an","分析"],["pos","保有"],["hist","ボット取引"],["bt","過去検証"],["rule","ルール"],["log","ログ"]];
   const varLabel = r => "逆行判定 "+(r.acc === "S" ? "安値更新" : "ATR"+r.acc+"本")+"／トレーリング "+(r.trail === "h1" ? "1時間足" : "15分足")+"EMA20 余裕"+r.buf+"ATR";
 
   // ---- 分析：指定の6項目 ----
@@ -235,6 +238,7 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
       '<dt>総資産</dt><dd><b>'+(L.eq != null ? usd(L.eq) : "–")+'</b> ＝ '+st.startUsd+' ＋ '+fx(L.R)+' ＋ '+fx(L.U)+'</dd>'+
       '<dt>照合</dt><dd>約定履歴の合計（確定損益−手数料）'+fx(L.ordS)+'／収支明細との差 '+(L.diff == null ? "–" : usd(L.diff))+(L.diff == null ? "" : Math.abs(L.diff) < 0.02 ? "（一致）" : "（不一致：履歴を取得できていない銘柄があります）")+'</dd>'+
       '<dt>アプリ内の従来計算</dt><dd>総資産 '+usd(st.eqInternal)+(L.eq != null ? '（BingX基準との差 '+usd(st.eqInternal - L.eq, 1)+'）' : '')+'</dd></dl>'+
+      (L.incErr ? '<p class="sub">BingXの収支明細の取得に失敗しています（'+tm(L.incErr.since)+'から。BingX側の一時的なエラーのため、2分おきに再試行中）。その間は'+(L.src && L.src.indexOf("注文履歴") === 0 ? "注文履歴の合計" : "最後に取得できた収支明細")+'で計算します。</p>' : '')+
       '<p class="sub">総資産・累計損益は、手動トレードや以前のポジションを含む、BingXの口座全体の増減です。</p></div>';
     h += L.rows.length ? '<div class="scroll"><table class="num"><tr><th>日時</th><th>銘柄</th><th>売買</th><th>数量</th><th>約定価格</th><th>手数料</th><th>確定損益</th><th>種別</th><th>出所</th><th>番号</th></tr>'+
       L.rows.map(r => '<tr><td>'+tm(r.t)+'</td><td>'+esc(r.sym)+'</td><td class="'+(r.ps === "LONG" ? "L-t" : "S-t")+'">'+(r.ps === "LONG" ? "ロング" : "ショート")+(r.open ? "建" : "決")+'</td><td>'+r.q+'</td><td>'+px(r.p)+'</td><td>−'+r.f.toFixed(4)+'</td><td>'+(r.open ? "–" : usd(r.g,1))+'</td><td style="text-align:left">'+esc(tyLabel(r.ty))+'</td><td>'+esc(r.by)+'</td><td>'+esc(String(r.id).slice(-6))+'</td></tr>').join("")+'</table></div><p class="sub">BingXの注文履歴そのままです（半分利確・損切り・手動を含む）。確定損益は手数料を引く前の値です。「出所」は、この注文をボットが出したかの判別です。</p>'
@@ -297,8 +301,15 @@ dl.rules dt{color:var(--sub)} dl.rules dd{margin:0}
     $("srv").textContent = srv && srv.enabled ? "常駐中" : "停止中"; $("srvsub").textContent = lag == null ? "" : "最終処理 "+lag+"秒前";
     $("bRun").textContent = st.running ? "新規エントリーを停止" : "新規エントリーを再開";
     $("bSrv").textContent = srv && srv.enabled ? "サーバー常駐を停止" : "サーバー常駐を開始";
-    const V = {man:vManual, fills:vFills, an:vAnalysis, pos:vPositions, hist:vHistory, bt:vBacktest, rule:vRules, log:vLog}[tab];
-    const y = window.scrollY; $("view").innerHTML = V(); window.scrollTo(0, y);
+    const V = {fills:vFills, an:vAnalysis, pos:vPositions, hist:vHistory, bt:vBacktest, rule:vRules, log:vLog}[tab];
+    const html = V(), view = $("view");
+    if (html !== lastHtml){
+      if (Date.now() - lastTouch < 2500 && lastTab === tab){ pendingRender = true; return; } // スクロール中は書き換えない（指を離して2.5秒後に反映）
+      const sx = [...view.querySelectorAll(".scroll")].map(e => e.scrollLeft), op = [...view.querySelectorAll("details")].map(e => e.open), y = window.scrollY;
+      view.innerHTML = html; lastHtml = html; pendingRender = false;
+      if (lastTab === tab){ view.querySelectorAll(".scroll").forEach((e,i) => { if (sx[i]) e.scrollLeft = sx[i]; }); view.querySelectorAll("details").forEach((e,i) => { if (op[i]) e.open = true; }); if (Math.abs(window.scrollY - y) > 2) window.scrollTo(0, y); }
+      lastTab = tab;
+    }
     { const a = $("bManOn"), o = $("bManOff"), c = $("bManClr");
       if (a) a.onclick = () => cmd({cmd:"manualOn"});
       if (o) o.onclick = () => { if (confirm("手動記録モードを止めますか？（記録は残ります。ボットの管理外ポジションの警告が復活します）")) cmd({cmd:"manualOff"}); };
