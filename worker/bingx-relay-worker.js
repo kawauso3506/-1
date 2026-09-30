@@ -719,7 +719,6 @@ function makePerp(){
       if (S.pend.length) openFromPending(now);
       await reconcile(now).catch(err => { lastErr = "照合: "+err.message; });
       btStep(now).catch(err => { lastErr = "検証: "+err.message; });
-      manualStep(now).catch(err => { lastErr = "手動記録: "+err.message; }); manWork().catch(()=>{});
       ledStep(now).catch(err => { lastErr = "BingXの収支の取得: "+err.message; });
     }catch(err){ lastErr = err.message; log("SYS", "処理エラー: "+err.message); }
     finally{ busy = false; persist(); }
@@ -1168,7 +1167,10 @@ function makePerp(){
   async function ledStep(now){
     if (!LED || ledBusy || now - ledAt < 5000) return; ledAt = now; ledBusy = true;
     try{
-      if (now - ledIncAt >= 30000){ ledIncAt = now; await ledIncome(now); }
+      if (now - ledIncAt >= (LED.incErr ? 120000 : 30000)){ ledIncAt = now; // 失敗が続いているときは2分おきに再試行
+        try{ await ledIncome(now); LED.incErr = null; }
+        catch(err){ LED.incErr = {since:LED.incErr ? LED.incErr.since : now, at:now, msg:String(err.message).slice(0,200)}; ledDirty = true;
+          if (now - LED.incErr.since > 15*60000) lastErr = "BingXの収支明細を15分以上取得できていません（注文履歴の合計で代用中）: "+LED.incErr.msg; } }
       else if (now - ledPosAt >= 15000){ ledPosAt = now; await ledPositions(now); }
       else await ledOrders(now);
       ledCache = null;
@@ -1193,7 +1195,7 @@ function makePerp(){
     return {ok, src:incOk ? "収支明細" : (rows.length ? "注文履歴（収支明細を取得できないため）" : null), since, R, U, eq:ok ? START_USD + R + U : null, pnl:ok ? R + U : null,
       inc:inc ? {pnl:inc.pnl, fee:inc.fee, fund:inc.fund, oth:inc.oth, n:inc.n, cap:inc.cap, types:inc.types, stale:!fr(inc)} : null,
       ordS:+ordS.toFixed(4), diff:inc ? +(ordS - (inc.pnl + inc.fee)).toFixed(4) : null, today:inc && inc.byDay ? +(inc.byDay[dk]||0).toFixed(4) : null,
-      nRows:rows.length, rows:out, upn:up ? {n:up.n, sum:up.sum, stale:!fr(up), list:up.list} : null, diag:LED.diag};
+      nRows:rows.length, rows:out, incErr:LED.incErr || null, upn:up ? {n:up.n, sum:up.sum, stale:!fr(up), list:up.list} : null, diag:LED.diag};
   }
 
   // ---- 画面用：候補銘柄ごとの分析（6項目） ----
@@ -1250,8 +1252,9 @@ function makePerp(){
     persist();
   }
   return { publicState, handleCmd,
-    start(){ load(); btLoad(); manLoad(); ledLoad();
-      if (S.manualInit === undefined){ S.manualInit = true; S.manualOn = true; S.running = false; log("SYS", "手動記録モードを開始しました。ボットの新規エントリーは止めました（保有中の分は決済ルールが続きます）。取引所で手動で建てたポジションを検知して、記録・分析します"); } if (!S.log.length) log("SYS", "新しい戦略（週足・日足トレンド＋15分足EMA50押し目）で開始しました。総資産 $"+START_USD); persist(); },
+    start(){ load(); btLoad(); manLoad(); ledLoad(); S.manualOn = false; // 手動記録モードは廃止
+      if (S.manualInit === undefined) S.manualInit = true; // 手動記録モードは廃止（以前は、初回起動で新規エントリーを止めていた）
+      if (!S.log.length) log("SYS", "新しい戦略（週足・日足トレンド＋15分足EMA50押し目）で開始しました。総資産 $"+START_USD); persist(); },
     tick, pollMs(){ return POLL; }, equity, _t:{ledGet, ledStep, ledSummary, get LED(){ return LED; }, ctxBuild, featOf, baseStats, replayBot, manSummary, get MAN(){ return MAN; }, manFinalize, manPost, manCtx, histFills, ctxLoad}, note(tag,msg){ log(tag,msg); persist(); } };
 }
 let ENGINE = null, SRV = null;
