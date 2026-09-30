@@ -365,6 +365,10 @@ const RULE = {
   fee: 0.0005,            // 手数料（片道・建玉に対して）
   slip: 0.0005,           // スリッページ（片道・建玉に対して）
   trailBuf: 0.5,          // トレーリングの余裕：終値が15分足EMA20から、ATR(14)のこの倍数だけ超えて逆側で確定して初めて決済（有効化も、同じ幅だけ順行側に出てから）
+  slPctD: 15,             // 日足の戦略の損切り：建値から15%（証拠金10%・4倍なので、総資産の約6.1%の損失）。2%ルールより優先（2026/9/30 承認）
+  dCancelK: 0.5,          // 日足：終値がEMA50からATRのこの倍数だけ逆側で確定したら、押し目ではなく崩れと見て取り消す
+  dWatch: 3,              // 日足：EMA20に接触した日を0本目として、3本目までにトレンド方向の足が確定すること
+  topN: 60,               // 対象は、売買代金の上位60銘柄（約定のずれを小さくするため）
   accK: 1.2,              // 逆行の加速＝15分足の終値がEMA50からATR(14)の1.2本分以上、逆側で確定
   watchBars: 8,           // EMA50接触後、反転足を待つ本数（2時間）
 };
@@ -395,7 +399,7 @@ function reversalOf(P, L, dir){
   if (lo >= pc && lc <= po) return "ha";
   return null;
 }
-const PATNAME = {en:"包み足", ha:"はらみ足"};
+const PATNAME = {en:"包み足", ha:"はらみ足", d1:"日足の押し目"};
 // 逆行の加速（k＝ATR倍率。"S"＝終値がEMA50の逆側で、前の足の安値（ショートは高値）を更新して確定）
 function accelOf(L, P, e50, atr, dir, k){
   if (k === "S") return dir*(L.c - e50) < 0 && dir*(L.l - P.l) < 0 && (dir > 0 ? L.l < P.l : L.h > P.h);
@@ -435,7 +439,7 @@ function makePerp(){
   let busy = false, lastTickerAt = 0, lastReconcileAt = 0, lastErr = null;
   const POLL = 5000, FETCH_PER_TICK = 6;
 
-  function fresh(){ return {ver:V3_VER, startedAt:Date.now(), running:true, cash:START_USD, positions:[], trades:[], log:[], seq:0, W:{}, pend:[], legacy:null, day:{}}; }
+  function fresh(){ return {ver:V3_VER, startedAt:Date.now(), running:true, cash:START_USD, positions:[], trades:[], log:[], seq:0, W:{}, pend:[], WD:{}, legacy:null, day:{}}; }
   function load(){ try{ const j = JSON.parse(store.get(V3_KEY) || "null"); S = j && j.ver === V3_VER ? Object.assign(fresh(), j) : fresh(); }catch(_){ S = fresh(); } }
   function persist(){ store.set(V3_KEY, JSON.stringify(S)); if (manDirty && MAN) manSave(); if (ledDirty && LED && Date.now() - ledSavedAt > 30000) ledSave(); }
   function log(tag, msg){ S.log.unshift({id:++S.seq, t:Date.now(), tag, msg}); if (S.log.length > 120) S.log.length = 120; }
@@ -462,16 +466,16 @@ function makePerp(){
 
   // ---- ろうそくの取得（週足は1日ごと、日足は4時間ごと、15分足はトレンドが一致した銘柄と保有中の銘柄だけ） ----
   function candleStep(now){
-    const cur15 = Math.floor(now/TFMS.m15)*TFMS.m15, held = new Set(S.positions.map(p => p.sym)); let n = 0;
-    const list = universe().map(t => t.sym); for (const s of held) if (!list.includes(s)) list.unshift(s);
+    const cur15 = Math.floor(now/TFMS.m15)*TFMS.m15, curD = Math.floor(now/TFMS.d1)*TFMS.d1, held = new Set(S.positions.map(p => p.sym)), held15 = new Set(S.positions.filter(p => p.v !== "d1").map(p => p.sym)); let n = 0;
+    const list = top60().map(t => t.sym); for (const s of held) if (!list.includes(s)) list.unshift(s);
     const jobs = [];
     for (const sym of list){
       if (inflight.has(sym)) continue;
       const c = CDL[sym] || (CDL[sym] = {w:null, d:null, m15:null, fw:0, fd:0, f15:0, last15:0});
-      const needW = now - c.fw >= 24*3600e3, needD = now - c.fd >= 4*3600e3;
-      const tr = trendsOf(sym), want15 = held.has(sym) || (tr && tr.dir !== 0);
-      const need15 = want15 && c.f15 < cur15 + 20000 && now >= cur15 + 20000; // 15分足が確定して20秒後
-      if (need15) jobs.push([0, sym, "15"]); else if (needW || needD) jobs.push([now < cur15 + 6*60000 ? 2 : 1, sym, "WD"]);
+      const closeD = c.fd < curD + 90000 && now >= curD + 90000; // 日足が確定して1分半後（日本時間9時過ぎ）
+      const needW = now - c.fw >= 24*3600e3, needD = closeD || now - c.fd >= 4*3600e3;
+      const need15 = held15.has(sym) && c.f15 < cur15 + 20000 && now >= cur15 + 20000; // 15分足の戦略の保有分だけ（決済の管理）
+      if (need15) jobs.push([0, sym, "15"]); else if (needW || needD) jobs.push([closeD ? 0 : 1, sym, "WD"]);
     }
     jobs.sort((a,b) => a[0] - b[0]);
     for (const [,sym,kind] of jobs){ if (n >= FETCH_PER_TICK) break; n++; inflight.add(sym);
@@ -482,7 +486,8 @@ function makePerp(){
     try{
       if (kind === "WD"){
         if (now - c.fw >= 24*3600e3){ c.w = await fetchK(b, "1w", TFMS.w1, 300, now); c.fw = now; }
-        if (now - c.fd >= 4*3600e3){ c.d = await fetchK(b, "1d", TFMS.d1, 300, now); c.fd = now; }
+        if (now - c.fd >= 4*3600e3 || c.fd < Math.floor(now/TFMS.d1)*TFMS.d1 + 90000){ const d = await fetchK(b, "1d", TFMS.d1, 300, now); c.fd = now;
+          if (d.length){ c.d = d; if (c.d[c.d.length-1].t !== c.lastD){ c.lastD = c.d[c.d.length-1].t; if (c.w) onDaily(sym, now); } } }
       } else {
         const m = await fetchK(b, "15m", TFMS.m15, 400, now); c.f15 = now;
         if (m.length >= 120){ c.m15 = m; const last = m[m.length-1].t; if (last !== c.last15){ c.last15 = last; on15(sym, now); } }
@@ -499,7 +504,8 @@ function makePerp(){
     if (from < 1) return; c.proc = cs[n-1].t;
     for (let i = Math.max(60, from); i < n; i++){
       const L = cs[i], P = cs[i-1], pos = S.positions.find(p => p.sym === sym);
-      if (pos){ if (L.t >= pos.barT) manageBar(pos, L, P, e50[i], e20[i], atr[i]); delete S.W[sym]; continue; } // 保有中は新しい監視をしない
+      if (pos){ if (pos.v !== "d1" && L.t >= pos.barT) manageBar(pos, L, P, e50[i], e20[i], atr[i]); delete S.W[sym]; continue; } // 保有中は新しい監視をしない
+      delete S.W[sym]; continue; // 15分足の戦略の新規エントリーは廃止（2026/9/30〜日足の戦略）。以下は使わない
       st = S.W[sym] || null;
       if (!dir){ if (st) delete S.W[sym]; continue; }
       if (st && st.dir !== dir){ delete S.W[sym]; st = null; }
@@ -545,18 +551,18 @@ function makePerp(){
     return c.length ? {px:c[0][1], name:c[0][0]} : null;
   }
   function openFromPending(now){
-    const q = S.pend.splice(0), cand = q.filter(x => now - x.t < 10*60000).map(x => Object.assign(x, {turn:(tokens.get(x.sym)||{}).turn||0})).sort((a,b) => b.turn - a.turn);
+    const q = S.pend.splice(0), cand = q.filter(x => now - x.t < (x.pat === "d1" ? 60*60000 : 10*60000)).map(x => Object.assign(x, {turn:(tokens.get(x.sym)||{}).turn||0})).sort((a,b) => b.turn - a.turn);
     for (const x of cand){
       const why = canOpen(x.sym, x.dir), b = baseOf(x.sym);
-      if (why){ log("見送り", b+"："+PATNAME[x.pat]+"は確定したが、"+why); continue; }
+      if (why){ log("見送り", b+"："+(x.pat === "d1" ? (x.dir > 0 ? "陽線" : "陰線") : PATNAME[x.pat])+"は確定したが、"+why); continue; }
       const t = tokens.get(x.sym); if (!t) continue;
-      const eq = equity(), margin = eq*RULE.marginPct, notional = margin*RULE.lev;
+      const eq = equity(), margin = eq*RULE.marginPct, notional = margin*RULE.lev, isD = x.pat === "d1", slp = isD ? RULE.slPctD : RULE.slPct;
       const entry = x.dir > 0 ? t.ask : t.bid, qty = notional/entry, fee = notional*RULE.fee;
-      const stop = entry*(1 - x.dir*RULE.slPct/100), tg = targetOf(x.sym, x.dir, entry);
-      const p = {id:++S.seq, sym:x.sym, dir:x.dir, pat:x.pat, entry, qty, qty0:qty, notional, margin, margin0:margin, stop, target:tg ? tg.px : null, targetName:tg ? tg.name : null,
-        half:false, armed:false, ts:now, barT:x.barT, fee, realized:0, live:null};
+      const stop = entry*(1 - x.dir*slp/100), tg = isD ? targetD(x.sym, x.dir, entry) : targetOf(x.sym, x.dir, entry);
+      const p = {id:++S.seq, sym:x.sym, dir:x.dir, pat:x.pat, v:isD ? "d1" : undefined, slPct:slp, entry, qty, qty0:qty, notional, margin, margin0:margin, stop, target:tg ? tg.px : null, targetName:tg ? tg.name : null,
+        half:false, armed:isD ? !!(x.conf && x.dir*(x.conf.c - x.conf.e20) > 0) : false, ts:now, barT:x.barT, fee, realized:0, live:null};
       S.cash -= margin + fee; S.positions.push(p);
-      log("エントリー", b+" "+(x.dir > 0 ? "ロング" : "ショート")+"（"+PATNAME[x.pat]+"）価格 "+fmtPx(entry)+" ／ 損切り "+fmtPx(stop)+"（-"+RULE.slPct+"%）"+(tg ? " ／ 半分利確 "+fmtPx(tg.px)+"（"+tg.name+"）" : " ／ 半分利確の目標なし（RR1:1以上離れた節目がない）"));
+      log("エントリー", b+" "+(x.dir > 0 ? "ロング" : "ショート")+"（"+PATNAME[x.pat]+"）価格 "+fmtPx(entry)+" ／ 損切り "+fmtPx(stop)+"（-"+slp+"%）"+(tg ? " ／ 半分利確 "+fmtPx(tg.px)+"（"+tg.name+"）" : isD ? " ／ 半分利確の目標なし（"+(x.dir > 0 ? "20日高値の更新中" : "20日安値の更新中")+"）" : " ／ 半分利確の目標なし（RR1:1以上離れた節目がない）")+(isD ? " ／ 残りは日足の終値がEMA20を"+(x.dir > 0 ? "割ったら" : "超えたら")+"決済"+(p.armed ? "" : "（終値が一度EMA20の"+(x.dir > 0 ? "上" : "下")+"で確定してから有効）") : ""));
       liveOpen(p);
     }
   }
@@ -587,7 +593,7 @@ function makePerp(){
   }
   function managePrice(p){ // 毎回の価格で：損切り・半分利確
     const t = tokens.get(p.sym); if (!t || !(t.px > 0)) return;
-    if (p.dir*(t.px - p.stop) <= 0) return closePart(p, 1, p.stop*(1 - p.dir*RULE.slip), p.be ? "建値で決済（半分利確後の損切り）" : "損切り（-"+RULE.slPct+"%）");
+    if (p.dir*(t.px - p.stop) <= 0) return closePart(p, 1, p.stop*(1 - p.dir*RULE.slip), p.be ? "建値で決済（半分利確後の損切り）" : "損切り（-"+(p.slPct || RULE.slPct)+"%）");
     if (!p.half && p.target != null && p.dir*(t.px - p.target) >= 0){
       p.half = true; p.stop = p.entry*(1 + p.dir*RULE.beCost); p.be = true; // 残りの損切りを建値（＋手数料分）へ引き上げる。取引所の注文も、半分決済のあとにこの価格で置き直す
       closePart(p, 0.5, p.target, "半分利確（"+p.targetName+"に到達）。残りの損切りを建値 "+fmtPx(p.stop)+" へ引き上げ"); }
@@ -637,8 +643,8 @@ function makePerp(){
         const f = await fillOf(p.sym, oid);
         if (f && S.positions.includes(p)){ // 実際の約定価格で、建値・損切り・半分利確の目標を計算し直す
           const assumed = p.entry, slip = p.dir*(f.px - assumed)/assumed*100; noteSlip("en", slip); // 不利側が＋（ロングは高く買わされた、ショートは安く売らされた）
-          p.entryAssumed = assumed; p.entry = f.px; p.fillEntry = true; p.stop = f.px*(1 - p.dir*RULE.slPct/100);
-          const tg = targetOf(p.sym, p.dir, f.px); p.target = tg ? tg.px : null; p.targetName = tg ? tg.name : null;
+          p.entryAssumed = assumed; p.entry = f.px; p.fillEntry = true; p.stop = f.px*(1 - p.dir*(p.slPct || RULE.slPct)/100);
+          const tg = p.v === "d1" ? targetD(p.sym, p.dir, f.px) : targetOf(p.sym, p.dir, f.px); p.target = tg ? tg.px : null; p.targetName = tg ? tg.name : null;
           const old = p.live.slId; p.live.slId = await placeStop(p, qty, prec); // 新しい損切りを先に置いてから、古い方を取り消す
           if (old) await relay("/cancel-order", "POST", {symbol:b+"USDT", orderId:old}).catch(()=>{});
           log("約定", b+"：実際の約定価格 "+fmtPx(f.px)+"（想定 "+fmtPx(assumed)+"、不利側に "+(slip >= 0 ? "+" : "")+slip.toFixed(2)+"%）。損切りを "+fmtPx(p.stop)+" に置き直しました");
@@ -718,7 +724,7 @@ function makePerp(){
       candleStep(now);
       if (S.pend.length) openFromPending(now);
       await reconcile(now).catch(err => { lastErr = "照合: "+err.message; });
-      btStep(now).catch(err => { lastErr = "検証: "+err.message; });
+      bdStep(now).catch(err => { lastErr = "検証: "+err.message; });
       ledStep(now).catch(err => { lastErr = "BingXの収支の取得: "+err.message; });
     }catch(err){ lastErr = err.message; log("SYS", "処理エラー: "+err.message); }
     finally{ busy = false; persist(); }
@@ -1198,6 +1204,179 @@ function makePerp(){
       nRows:rows.length, rows:out, incErr:LED.incErr || null, upn:up ? {n:up.n, sum:up.sum, stale:!fr(up), list:up.list} : null, diag:LED.diag};
   }
 
+  // ============================================================
+  // 日足の戦略（2026/9/30〜）
+  //  トレンド：週足と日足が同じ向き（EMA20＞EMA50かつ終値＞EMA50＝上昇、逆＝下降）
+  //  入り：日足の安値がEMA20以下（ショートは高値がEMA20以上）＝押し目。接触した日を含めて4本以内に、トレンド方向の足（陽線/陰線）が確定したら、次の足の始値で入る
+  //        ただし終値がEMA50からATRの0.5倍以上逆側で確定したら、崩れと見て取り消す
+  //  損切り：建値から15%。部分利確：20日高値（ショートは安値）で半分→残りの損切りを建値＋0.2%へ
+  //  残りの決済：日足の終値がEMA20を割ったら（ショートは超えたら）。終値が一度EMA20のトレンド側で確定してから有効
+  // ============================================================
+  const DAYMS = TFMS.d1;
+  const trendW = (sym) => { const c = CDL[sym]; return c && c.w && c.w.length >= RULE.minWeeks ? trendOf(c.w) : 0; };
+  function top60(){ return universe().slice(0, RULE.topN); }
+  function targetD(sym, dir, entry){ // 20日高値（ショートは安値）。建値より有利側にある時だけ
+    const d = CDL[sym] && CDL[sym].d; if (!d || d.length < 20) return null;
+    const last = d.slice(-20), v = dir > 0 ? Math.max(...last.map(x => x.h)) : Math.min(...last.map(x => x.l));
+    return dir*(v - entry) > 0 ? {px:v, name:dir > 0 ? "20日高値" : "20日安値"} : null;
+  }
+  function onDaily(sym, now){
+    const c = CDL[sym], d = c.d, n = d.length; if (n < 60) return;
+    const e20 = emaSeries(d,20), e50 = emaSeries(d,50), atr = atrSeries(d,14), wt = trendW(sym), inU = top60().some(t => t.sym === sym);
+    const from = c.procD ? d.findIndex(x => x.t > c.procD) : Math.max(60, n - 4); // 再起動直後は、直近4本から監視の状態を作り直す
+    if (from < 0) return; c.procD = d[n-1].t;
+    for (let i = Math.max(60, from); i < n; i++){
+      const L = d[i], P = d[i-1], pos = S.positions.find(p => p.sym === sym);
+      if (pos){ if (pos.v === "d1" && L.t >= pos.barT) manageDay(pos, L, e20[i]); delete S.WD[sym]; continue; }
+      const dt = trendAt(d, e20, e50, i), dir = inU && wt !== 0 && wt === dt ? wt : 0;
+      let st = S.WD[sym] || null;
+      if (!dir || (st && st.dir !== dir)){ if (st) delete S.WD[sym]; continue; }
+      const touch = dir > 0 ? L.l <= e20[i] : L.h >= e20[i], broke = atr[i] > 0 && dir*(L.c - e50[i]) <= -RULE.dCancelK*atr[i];
+      if (broke){ if (st || touch) log("見送り", baseOf(sym)+"：日足の終値がEMA50から"+RULE.dCancelK+"ATR以上、逆側で確定（押し目ではなく崩れ）"); delete S.WD[sym]; continue; }
+      if (touch && !st){ st = S.WD[sym] = {dir, touchT:L.t}; }
+      if (!st) continue;
+      const k = Math.round((L.t - st.touchT)/DAYMS);
+      if (dir*(L.c - L.o) > 0){ // トレンド方向の足が確定
+        delete S.WD[sym];
+        if (i === n-1 && now - (L.t + DAYMS) < 6*3600e3) S.pend.push({sym, dir, pat:"d1", t:now, barT:L.t + DAYMS, conf:{c:L.c, e20:e20[i]}});
+        else log("見送り", baseOf(sym)+"：確定足から時間が経っていたため（"+tmD(L.t)+"の足）");
+      } else if (k >= RULE.dWatch){ delete S.WD[sym]; log("見送り", baseOf(sym)+"：EMA20に接触してから"+(RULE.dWatch+1)+"本以内に、"+(dir > 0 ? "陽線" : "陰線")+"が確定しなかった"); }
+    }
+  }
+  const tmD = t => { const x = new Date(t + 9*3600e3); return (x.getUTCMonth()+1)+"/"+x.getUTCDate(); };
+  function manageDay(p, L, e20){ // 日足の確定ごと：残りの全部決済（EMA20）
+    if (!S.positions.includes(p)) return;
+    const px = (tokens.get(p.sym)||{}).px || L.c, dv = p.dir*(L.c - e20);
+    if (!p.armed && dv > 0){ p.armed = true; log("トレーリング", baseOf(p.sym)+"：日足の終値がEMA20の"+(p.dir > 0 ? "上" : "下")+"で確定。以後、終値がEMA20を"+(p.dir > 0 ? "割ったら" : "超えたら")+"残りを全決済"); }
+    else if (p.armed && dv < 0) closePart(p, 1, px, "日足の終値がEMA20を"+(p.dir > 0 ? "割った" : "超えた")+"（残りを全決済）");
+  }
+  function analysisD(){ // 画面用：上位60銘柄のうち、週足・日足が一致しているもの（6項目）
+    const out = [], longN = S.positions.filter(p => p.dir > 0).length, shortN = S.positions.filter(p => p.dir < 0).length;
+    for (const t of top60()){
+      const c = CDL[t.sym], pos = S.positions.find(p => p.sym === t.sym); if (!c || !c.d || c.d.length < 60) continue;
+      const d = c.d, n = d.length, e20 = emaSeries(d,20), e50 = emaSeries(d,50), L = d[n-1], wt = trendW(t.sym), dt = trendAt(d, e20, e50, n-1);
+      const dir = wt !== 0 && wt === dt ? wt : 0; if (!dir && !pos) continue;
+      const st = S.WD[t.sym], d20 = (t.px/e20[n-1] - 1)*100, d50 = (t.px/e50[n-1] - 1)*100;
+      let reason, can = false, plan = null;
+      if (pos) reason = "保有中（"+(pos.dir > 0 ? "ロング" : "ショート")+"）";
+      else if (st){ const k = Math.round((L.t - st.touchT)/DAYMS); reason = "EMA20に接触済み（"+tmD(st.touchT)+"）。"+(dir > 0 ? "陽線" : "陰線")+"の確定待ち（残り"+Math.max(0, RULE.dWatch - k)+"本）"; }
+      else reason = "日足EMA20への接触待ち（現在EMA20から"+(d20 >= 0 ? "+" : "")+d20.toFixed(2)+"%）";
+      if (!pos){ const why = canOpen(t.sym, dir); if (why) reason += "。ただし今は入れない："+why;
+        if (st && !why){ can = true; const e = t.px, tg = targetD(t.sym, dir, e);
+          plan = {dir, entry:e, stop:e*(1 - dir*RULE.slPctD/100), trail:e20[n-1], target:tg ? tg.px : null, targetName:tg ? tg.name : null}; } }
+      const b = baseOf(t.sym), other = b === "BTC" ? "ETH" : b === "ETH" ? "BTC" : null, notes = ["保有中 ロング"+longN+"件・ショート"+shortN+"件（最大"+RULE.maxPos+"件、同じ方向は"+RULE.maxSameDir+"件まで）"];
+      if (dir && (dir > 0 ? longN : shortN) >= 2) notes.push("同じ方向がすでに"+(dir > 0 ? longN : shortN)+"件。暗号資産は同じ方向に動きやすく、実質的に同じ賭けが重なる");
+      if (other && S.positions.some(p => baseOf(p.sym) === other)) notes.push(other+"を保有中。同じ方向では持てない");
+      out.push({sym:t.sym, w:TLABEL(wt), d:TLABEL(dt), dir, px:t.px, e20:e20[n-1], e50:e50[n-1], dist:+d20.toFixed(2), dist50:+d50.toFixed(2), shape:L.c > L.o ? "陽線" : L.c < L.o ? "陰線" : "十字線",
+        watching:!!st, held:!!pos, can, reason, plan, corr:notes.join("。")});
+    }
+    out.sort((a,b) => (b.held - a.held) || (b.watching - a.watching) || Math.abs(a.dist) - Math.abs(b.dist));
+    return out.slice(0, 30);
+  }
+
+  // ---- 過去検証（日足・最大約4年・上位60銘柄） ----
+  const BTD_KEY = "td3_btd", BTD_VER = 1, BTD_STEP = 8000, BTD_COST = 0.4, BTD_RAND = 7; // 往復コスト0.4%（手数料0.1%＋スリッページ0.3%の想定）
+  const BTD_SL = [4.8, 15], BTD_HALF = [true, false], dvKey = (s,h) => s+"|"+(h ? 1 : 0), DLIVE = dvKey(15, true);
+  let BD = null, bdBusy = false, bdAt = 0, bdCache = null, bdCacheAt = 0; const bdSaved = {};
+  function bdFresh(){ return {ver:BTD_VER, syms:[], done:{}, tr:{}, rb:{}, from:0, to:0, complete:false}; }
+  function bdLoad(){ try{ const j = JSON.parse(store.get(BTD_KEY) || "null"); BD = j && j.ver === BTD_VER ? j : bdFresh();
+      if (j && j.parts){ BD.tr = {}; for (const k in j.parts){ for (let c=0;c<j.parts[k];c++) (BD.tr[k] || (BD.tr[k] = [])).push(...JSON.parse(store.get(BTD_KEY+"_"+k+"_"+c) || "[]")); bdSaved[k] = (BD.tr[k]||[]).length; } delete BD.parts; }
+    }catch(_){ BD = bdFresh(); } }
+  function bdSave(){ const parts = {}, meta = Object.assign({}, BD, {tr:undefined});
+    for (const k in BD.tr){ const a = BD.tr[k]; parts[k] = Math.ceil(a.length/1500); for (let c=Math.floor((bdSaved[k]||0)/1500); c<parts[k]; c++) store.set(BTD_KEY+"_"+k+"_"+c, JSON.stringify(a.slice(c*1500,(c+1)*1500))); bdSaved[k] = a.length; }
+    meta.parts = parts; store.set(BTD_KEY, JSON.stringify(meta)); }
+  function bdSim(D, sl, half, rand){
+    const {d, e20, e50, atr, dirs} = D, out = [], n = d.length; let st = null, pos = null, lastR = -1e9;
+    const costR = BTD_COST;
+    for (let i = 60; i < n - 1; i++){
+      const L = d[i];
+      if (pos){
+        const x = pos; let why = null, ex = null;
+        if (i >= x.i0){
+          const hit = x.d > 0 ? L.l <= x.stop : L.h >= x.stop;
+          if (hit){ ex = x.d > 0 ? Math.min(x.stop, L.o) : Math.max(x.stop, L.o); why = x.half ? "be" : "sl"; }
+          else {
+            if (half && !x.half && x.tg != null && (x.d > 0 ? L.h >= x.tg : L.l <= x.tg)){ x.half = true; x.hr = x.d*(x.tg/x.e - 1)*100; x.stop = x.e*(1 + x.d*RULE.beCost); }
+            const dv = x.d*(L.c - e20[i]);
+            if (!x.armed && dv > 0) x.armed = true; else if (x.armed && dv < 0){ why = "e20"; ex = d[i+1].o; }
+          }
+        }
+        if (why){ const r2 = x.d*(ex/x.e - 1)*100, r = (x.half ? (x.hr + r2)/2 : r2) - costR;
+          out.push([x.te, L.t + DAYMS, x.d, +r.toFixed(3), x.half ? 1 : 0, why, i - x.i0 + 1]); pos = null; }
+        continue;
+      }
+      const dir = dirs[i]; if (!dir){ st = null; continue; }
+      const enter = () => { const e = d[i+1].o, hh = dir > 0 ? Math.max(...d.slice(i-19, i+1).map(z => z.h)) : Math.min(...d.slice(i-19, i+1).map(z => z.l));
+        pos = {d:dir, e, stop:e*(1 - dir*sl/100), tg:dir*(hh - e) > 0 ? hh : null, i0:i+1, te:d[i+1].t, armed:dir*(L.c - e20[i]) > 0, half:false}; };
+      if (rand){ if (i - lastR >= rand){ lastR = i; enter(); } continue; }
+      if (st && st.dir !== dir) st = null;
+      const touch = dir > 0 ? L.l <= e20[i] : L.h >= e20[i], broke = atr[i] > 0 && dir*(L.c - e50[i]) <= -RULE.dCancelK*atr[i];
+      if (broke){ st = null; continue; }
+      if (touch && !st) st = {dir, i};
+      if (!st) continue;
+      if (dir*(L.c - L.o) > 0){ st = null; enter(); }
+      else if (i - st.i >= RULE.dWatch) st = null;
+    }
+    return out;
+  }
+  function bdProcess(si, w, d){
+    const e20 = emaSeries(d,20), e50 = emaSeries(d,50), atr = atrSeries(d,14), w20 = emaSeries(w,20), w50 = emaSeries(w,50), dirs = new Array(d.length).fill(0);
+    let kw = -1; for (let i=0;i<d.length;i++){ const T = d[i].t + DAYMS; while (kw+1 < w.length && w[kw+1].t + TFMS.w1 <= T) kw++;
+      if (kw + 1 < RULE.minWeeks || i < 49) continue; const a = trendAt(w, w20, w50, kw), b2 = trendAt(d, e20, e50, i); dirs[i] = a !== 0 && a === b2 ? a : 0; }
+    const D = {d, e20, e50, atr, dirs};
+    for (const sl of BTD_SL) for (const h of BTD_HALF){ const k = dvKey(sl,h), tr = bdSim(D, sl, h, 0), rb = bdSim(D, sl, h, BTD_RAND);
+      (BD.tr[k] || (BD.tr[k] = [])).push(...tr.map(x => [si, ...x]));
+      const R = BD.rb[k] || (BD.rb[k] = {n:0, s:0}); for (const x of rb){ R.n++; R.s += x[3]; } }
+    if (!BD.from || d[60].t < BD.from) BD.from = d[60].t; if (d[d.length-1].t > BD.to) BD.to = d[d.length-1].t;
+  }
+  async function bdStep(now){
+    if (bdBusy || BD.complete || now - bdAt < BTD_STEP) return;
+    const curD = Math.floor(now/DAYMS)*DAYMS; if (now < curD + 20*60000) return; // 日足の確定直後は、実売買の取得を優先
+    if (!BD.syms.length){ const u = top60().map(t => t.sym); if (u.length < 10) return; BD.syms = u; }
+    const si = BD.syms.findIndex(s => BD.done[s] == null);
+    if (si < 0){ BD.complete = true; bdSave(); log("SYS", "日足の過去検証が完了しました（"+BD.syms.length+"銘柄）"); return; }
+    bdBusy = true; bdAt = now; const sym = BD.syms[si], b = baseOf(sym);
+    try{
+      const n0 = Date.now(), w = await fetchK(b, "1w", TFMS.w1, 300, n0), d = await fetchKBack(b, "1d", DAYMS, 1500, n0);
+      if (w.length >= RULE.minWeeks && d.length >= 300){ bdProcess(si, w, d); BD.done[sym] = 1; } else BD.done[sym] = -1;
+      bdSave(); bdCache = null;
+    }catch(err){ bdAt = now + 30000; lastErr = "日足の過去検証 "+b+": "+err.message; }
+    finally{ bdBusy = false; }
+  }
+  function bdPortfolio(rows, days){ // 口座全体：最大5件・同じ方向3件・BTCとETH・1銘柄1件を守り、複利（毎回その時点の総資産の10%）
+    const tr = rows.slice().sort((a,b) => a[1] - b[1] || a[0] - b[0]), open = [], taken = [];
+    for (const x of tr){
+      for (let j = open.length-1; j >= 0; j--) if (open[j][2] <= x[1]) open.splice(j,1);
+      const bs = baseOf(BD.syms[x[0]] || ""), other = bs === "BTC" ? "ETH" : bs === "ETH" ? "BTC" : null;
+      if (open.length >= RULE.maxPos || open.filter(o => o[3] === x[3]).length >= RULE.maxSameDir || open.some(o => o[0] === x[0])) continue;
+      if (other && open.some(o => baseOf(BD.syms[o[0]]||"") === other && o[3] === x[3])) continue;
+      open.push(x); taken.push(x);
+    }
+    const eqOf = r => r*RULE.marginPct*RULE.lev, byExit = taken.slice().sort((a,b) => a[2] - b[2]);
+    let g = 1, peak = 1, dd = 0; const yr = {};
+    for (const x of byExit){ const f = 1 + eqOf(x[4])/100; g *= f; peak = Math.max(peak, g); dd = Math.min(dd, (g/peak - 1)*100); const y = new Date(x[2]).getUTCFullYear(); yr[y] = (yr[y] || 1)*f; }
+    const mid = BD.from + (BD.to - BD.from)/2, grow = xs => xs.reduce((a,x) => a*(1 + eqOf(x[4])/100), 1);
+    const ann = (xs, dy) => dy > 0 && xs.length ? (Math.pow(grow(xs), 365/dy) - 1)*100 : null;
+    return {n:taken.length, total:(g - 1)*100, ann:ann(taken, days), annA:ann(taken.filter(x => x[1] < mid), days/2), annB:ann(taken.filter(x => x[1] >= mid), days/2), dd,
+      years:Object.keys(yr).sort().map(y => ({y, r:+((yr[y] - 1)*100).toFixed(1), n:byExit.filter(x => new Date(x[2]).getUTCFullYear() === +y).length})),
+      win:taken.length ? Math.round(taken.filter(x => x[4] > 0).length/taken.length*100) : null, avgEq:taken.length ? taken.reduce((s,x) => s + eqOf(x[4]), 0)/taken.length : null};
+  }
+  function bdSummary(){
+    if (bdCache && Date.now() - bdCacheAt < 60000) return bdCache;
+    const days = BD.to > BD.from ? (BD.to - BD.from)/DAYMS : 0, rows = [];
+    for (const sl of BTD_SL) for (const h of BTD_HALF){
+      const k = dvKey(sl,h), tr = BD.tr[k] || [], rb = BD.rb[k] || {n:0, s:0}; if (!tr.length){ rows.push({k, sl, half:h, n:0}); continue; }
+      const n = tr.length, avg = tr.reduce((s,x) => s + x[4], 0)/n, by = {}; for (const x of tr){ const o = by[x[0]] || (by[x[0]] = [0,0]); o[0]++; o[1] += x[4]; }
+      let ss = 0; for (const s in by){ const q = by[s][1] - by[s][0]*avg; ss += q*q; }
+      const ci = 1.96*Math.sqrt(ss)/n, ra = rb.n ? rb.s/rb.n : null, pf = bdPortfolio(tr, days), cnt = w => tr.filter(x => x[6] === w).length;
+      rows.push({k, sl, half:h, live:k === DLIVE, n, win:Math.round(tr.filter(x => x[4] > 0).length/n*100), avg, ci, rand:ra, diff:ra == null ? null : avg - ra,
+        exits:{sl:cnt("sl"), be:cnt("be"), e20:cnt("e20")}, halfN:tr.filter(x => x[5]).length, hold:tr.reduce((s,x) => s + x[7], 0)/n, pf,
+        ok:!!(pf.ann != null && pf.ann >= 15 && pf.annA > 0 && pf.annB > 0 && ra != null && avg - ra > 0)});
+    }
+    bdCache = {kind:"d1", complete:BD.complete, done:Object.keys(BD.done).length, total:BD.syms.length || RULE.topN, skipped:Object.values(BD.done).filter(v => v < 0).length,
+      from:BD.from, to:BD.to, days:+days.toFixed(0), cost:BTD_COST, rows}; bdCacheAt = Date.now(); return bdCache;
+  }
+
   // ---- 画面用：候補銘柄ごとの分析（6項目） ----
   function analysis(){
     const out = [], longN = S.positions.filter(p => p.dir > 0).length, shortN = S.positions.filter(p => p.dir < 0).length;
@@ -1231,12 +1410,12 @@ function makePerp(){
     return { ver:V3_VER, rule:RULE, running:S.running, startedAt:S.startedAt, startUsd:START_USD, equity:+eq.toFixed(2), cash:+S.cash.toFixed(2), lastErr, lastTickerAt,
       universe:{total:u.length, up, dn, range:rng, young, noData},
       positions:S.positions.map(p => { const t = tokens.get(p.sym), px = t ? t.px : p.entry, c = CDL[p.sym], cs = c && c.m15;
-        return {sym:p.sym, dir:p.dir, pat:PATNAME[p.pat], entry:p.entry, px, qty:p.qty, margin:+p.margin.toFixed(2), stop:p.stop, be:!!p.be, fillEntry:!!p.fillEntry, booked:+(p.booked||0).toFixed(2), target:p.target, targetName:p.targetName, half:p.half, armed:p.armed,
+        return {sym:p.sym, dir:p.dir, pat:PATNAME[p.pat], entry:p.entry, px, qty:p.qty, margin:+p.margin.toFixed(2), stop:p.stop, be:!!p.be, v:p.v||"m15", slPct:p.slPct||RULE.slPct, fillEntry:!!p.fillEntry, booked:+(p.booked||0).toFixed(2), target:p.target, targetName:p.targetName, half:p.half, armed:p.armed,
           e20:cs && cs.length > 20 ? emaSeries(cs,20)[cs.length-1] : null, upnl:+unreal(p).toFixed(2), upnlEq:+(unreal(p)/eq*100).toFixed(2), ts:p.ts, live:p.live}; }),
       trades:tr.slice(0,100), stats:{n:full.length, win:full.length ? Math.round(wins/full.length*100) : null, net:+tr.reduce((s,x) => s + x.net, 0).toFixed(2), parts:tr.length - full.length}, day:S.day,
       led:ledGet(), eqInternal:+equityInternal().toFixed(2),
       fills:S.fills ? {enN:S.fills.en[0], en:S.fills.en[0] ? S.fills.en[1]/S.fills.en[0] : null, exN:S.fills.ex[0], ex:S.fills.ex[0] ? S.fills.ex[1]/S.fills.ex[0] : null} : null,
-      analysis:analysis(), bt:btSummary(), legacy:S.legacy, manualOn:!!S.manualOn, manual:S.manualOn && MAN ? manSummary() : null, log:S.log.slice(0,80) };
+      analysis:analysisD(), bt:bdSummary(), btOld:null, legacy:S.legacy, manualOn:!!S.manualOn, manual:S.manualOn && MAN ? manSummary() : null, log:S.log.slice(0,80) };
   }
   function handleCmd(b){
     const c = b && b.cmd;
@@ -1248,14 +1427,15 @@ function makePerp(){
     else if (c === "manClear"){ MAN = manFresh(); for (let i=0;i<50;i++) store.set(MAN_KEY+"_d"+i, "[]"); manDirty = true; manCache = null; log("SYS", "手動トレードの記録を消しました"); }
     else if (c === "legacyClose"){ closeLegacy().then(persist); }
     else if (c === "legacyScan"){ reconcile(Date.now(), true).then(persist).catch(err => { lastErr = "照合: "+err.message; }); }
-    else if (c === "btRestart"){ BT = btFresh(); for (const k in btSaved) btSaved[k] = 0; btSave(); btCache = null; log("SYS", "過去検証をやり直します"); }
+    else if (c === "btRestart"){ BD = bdFresh(); for (const k in bdSaved) bdSaved[k] = 0; bdSave(); bdCache = null; log("SYS", "日足の過去検証をやり直します"); }
+    else if (c === "btRestartOld"){ BT = btFresh(); for (const k in btSaved) btSaved[k] = 0; btSave(); btCache = null; log("SYS", "過去検証をやり直します"); }
     persist();
   }
   return { publicState, handleCmd,
-    start(){ load(); btLoad(); manLoad(); ledLoad(); S.manualOn = false; // 手動記録モードは廃止
+    start(){ load(); btLoad(); manLoad(); ledLoad(); bdLoad(); S.WD = S.WD || {}; S.manualOn = false; // 手動記録モードは廃止
       if (S.manualInit === undefined) S.manualInit = true; // 手動記録モードは廃止（以前は、初回起動で新規エントリーを止めていた）
       if (!S.log.length) log("SYS", "新しい戦略（週足・日足トレンド＋15分足EMA50押し目）で開始しました。総資産 $"+START_USD); persist(); },
-    tick, pollMs(){ return POLL; }, equity, _t:{ledGet, ledStep, ledSummary, get LED(){ return LED; }, ctxBuild, featOf, baseStats, replayBot, manSummary, get MAN(){ return MAN; }, manFinalize, manPost, manCtx, histFills, ctxLoad}, note(tag,msg){ log(tag,msg); persist(); } };
+    tick, pollMs(){ return POLL; }, equity, _t:{onDaily, bdSummary, get BD(){ return BD; }, analysisD, top60, ledGet, ledStep, ledSummary, get LED(){ return LED; }, ctxBuild, featOf, baseStats, replayBot, manSummary, get MAN(){ return MAN; }, manFinalize, manPost, manCtx, histFills, ctxLoad}, note(tag,msg){ log(tag,msg); persist(); } };
 }
 let ENGINE = null, SRV = null;
 function jstDay(){ return new Date(Date.now()+9*3600e3).toISOString().slice(0,10); }
